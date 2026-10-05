@@ -1,0 +1,7 @@
+# Prototype 20: independent database reads joined into one response.
+flow DatabaseRequest(request: any) {
+    user = query_user(request)
+    orders = query_orders(request)
+    recommendations = query_recommendations(request)
+    return make_response(user, orders, recommendations)
+}

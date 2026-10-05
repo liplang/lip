@@ -1,0 +1,10 @@
+# Prototype 19: a Web-style dependency chain. HTTP is implemented by Go Host
+# adapters; LIP describes the data dependencies and the validation gate.
+flow HTTPHandler(request: any) {
+    parsed = parse_request(request)
+    valid = validate_request(parsed)
+    when valid {
+        user = load_user(parsed.user_id)
+        return make_response(user)
+    }
+}

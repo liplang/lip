@@ -1,0 +1,10 @@
+# Prototype 22: parse -> validate -> transform -> save.
+flow FilePipeline(path: string) {
+    raw = read_file(path)
+    document = parse_document(raw)
+    valid = validate_document(document)
+    when valid {
+        transformed = transform_document(document)
+        return save_document(transformed)
+    }
+}

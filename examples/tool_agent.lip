@@ -1,0 +1,8 @@
+# Prototypes 27 and 28: plan once, call independent tools, then synthesize.
+flow ToolAgent(request: string) {
+    plan = plan_tools(request)
+    weather = call_weather(plan)
+    search = call_search(plan)
+    database = call_database(plan)
+    return synthesize(plan, weather, search, database)
+}

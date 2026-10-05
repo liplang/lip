@@ -1,0 +1,7 @@
+flow Gated(input: number) {
+    valid = input > 0
+    when valid {
+        doubled = input * 2
+        return doubled
+    }
+}

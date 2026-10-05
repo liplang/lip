@@ -1,0 +1,4 @@
+flow Hello(request: string) {
+    greeting = "Hello, " + request
+    return greeting
+}

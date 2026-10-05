@@ -1,0 +1,7 @@
+# Prototypes 11 and 12: Host operations may return Await(...); the graph joins
+# their results before make_profile runs.
+flow AsyncJoin(id: string) {
+    user = fetch_user(id)
+    posts = fetch_posts(id)
+    return make_profile(user, posts)
+}

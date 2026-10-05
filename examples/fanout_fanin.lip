@@ -1,0 +1,7 @@
+# Prototypes 6 and 7: independent consumers followed by a join.
+flow FanoutFanin(page: any) {
+    title = extract_title(page)
+    text = extract_text(page)
+    links = extract_links(page)
+    return combine(title, text, links)
+}

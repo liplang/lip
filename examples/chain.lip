@@ -1,0 +1,8 @@
+# Prototype 2: a multi-level dependency chain.
+flow Chain() {
+    a = 10
+    b = a * 2
+    c = b + 3
+    d = c * c
+    return d
+}
