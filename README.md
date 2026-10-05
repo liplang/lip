@@ -8,8 +8,6 @@ the language intentionally narrow: `flow`, expression `fn`,
 single-assignment bindings, dependency-derived fan-out/fan-in, `when` gates and
 a deterministic sequential reference runtime with bounded automatic scheduling.
 
-The formal language definition is [ALPHA-0.1-SPEC.md](ALPHA-0.1-SPEC.md).
-The implementation milestones are [ALPHA-0.1-IMPLEMENTATION.md](ALPHA-0.1-IMPLEMENTATION.md).
 Start with [QUICKSTART.md](docs/QUICKSTART.md); the compiler details are in
 [docs/COMPILER.md](docs/COMPILER.md). 想按步骤学习语言，请看
 [docs/TUTORIAL.md](docs/TUTORIAL.md)。发布变更记录见
@@ -26,8 +24,7 @@ GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/hello
 ```
 
-构建命令支持简写：`lipc file.lip`，默认输出为同目录下的
-`<FlowName>_generated.go`；需要自定义输出时再使用 `-o`。
+构建命令支持简写：`lipc file.lip`，默认输出为同目录下的`<FlowName>_generated.go`；需要自定义输出时再使用 `-o`。
 
 The reference implementation targets Go 1.27.
 
