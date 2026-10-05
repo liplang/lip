@@ -33,38 +33,11 @@ func sampleInput(typ string, index int) runtime.Value {
 	return runtime.Value(raw)
 }
 
-func __lip_fn_twice(host runtime.Host) runtime.Op {
-	return func(ctx context.Context, args []runtime.Value) runtime.Result {
-		if len(args) != 1 {
-			return runtime.Failed(fmt.Errorf("function twice expects 1 arguments, got %d", len(args)))
-		}
-		if err := runtime.CheckType(args[0], "number"); err != nil {
-			return runtime.Failed(fmt.Errorf("argument x: %w", err))
-		}
-		value0, err := runtime.Binary("*", args[0], runtime.Value(2))
-		if err != nil {
-			return runtime.Failed(err)
-		}
-		return runtime.Ready(value0)
-	}
-}
-
 func buildGraph(host runtime.Host) *runtime.Graph {
 	g := runtime.NewGraph()
-	host.RegisterPure("twice", __lip_fn_twice(host))
-	g.Add(runtime.NodeSpec{Name: "values", Op: "", Pure: true, Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return runtime.Ready([]runtime.Value{runtime.Value(1), runtime.Value(2), runtime.Value(3)})
-	}})
-	g.Add(runtime.NodeSpec{Name: "selected", Op: "", Pure: true, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		value0, err := runtime.Index(values["values"], runtime.Value(1))
-		if err != nil {
-			return runtime.Failed(err)
-		}
-		return runtime.Ready(value0)
-	}})
-	g.Add(runtime.NodeSpec{Name: "result", Op: "twice", Pure: false, Deps: []string{"selected"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return host.Call(ctx, "twice", []runtime.Value{values["selected"]})
-	}})
+	g.Add(runtime.NodeSpec{Name: "result", Op: "fetch", Pure: false, Deps: []string{"input"}, Gates: nil, Retry: &runtime.RetrySpec{Attempts: 3, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "fetch", []runtime.Value{values["input"]})
+	}}})
 	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"result"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(values["result"])
 	}, Output: true})
@@ -74,6 +47,9 @@ func buildGraph(host runtime.Host) *runtime.Graph {
 func checkInputs(inputs map[string]runtime.Value) error {
 	if _, ok := inputs["input"]; !ok {
 		return fmt.Errorf("missing flow input input")
+	}
+	if err := runtime.CheckType(inputs["input"], "string"); err != nil {
+		return fmt.Errorf("input input: %w", err)
 	}
 	return nil
 }
@@ -141,7 +117,7 @@ func main() {
 	ctx := context.Background()
 	host := runtime.DefaultHost()
 	inputs := map[string]runtime.Value{}
-	inputs["input"] = sampleInput("any", 0)
+	inputs["input"] = sampleInput("string", 0)
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
 		fmt.Println("error:", err)

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	stdruntime "runtime"
 	"strings"
+	"sync"
 )
 
 type Value = any
@@ -22,6 +23,7 @@ const (
 	Running
 	Completed
 	Error
+	Cancelled
 	Skipped
 )
 
@@ -35,6 +37,8 @@ func (s Status) String() string {
 		return "Completed"
 	case Error:
 		return "Error"
+	case Cancelled:
+		return "Cancelled"
 	case Skipped:
 		return "Skipped"
 	default:
@@ -56,20 +60,53 @@ func Await(ch <-chan Result) Result { return Result{Future: ch} }
 
 type Op func(context.Context, []Value) Result
 
-// Host is the intentionally small Go interop boundary for Alpha 0.1.
-type Host struct {
-	ops  map[string]Op
-	pure map[string]bool
+var errNilContext = errors.New("nil context")
+
+func checkContext(ctx context.Context) error {
+	if ctx == nil {
+		return errNilContext
+	}
+	return nil
 }
 
-func NewHost() Host { return Host{ops: make(map[string]Op), pure: make(map[string]bool)} }
+type Effect int
+
+const (
+	EffectUnknown Effect = iota
+	EffectPure
+	EffectReadOnly
+	EffectExternalWrite
+)
+
+func (e Effect) String() string {
+	switch e {
+	case EffectPure:
+		return "Pure"
+	case EffectReadOnly:
+		return "ReadOnly"
+	case EffectExternalWrite:
+		return "ExternalWrite"
+	default:
+		return "Unknown"
+	}
+}
+
+// Host is the Go interop boundary. Register operations before executing a Flow.
+type Host struct {
+	ops     map[string]Op
+	effects map[string]Effect
+}
+
+func NewHost() Host {
+	return Host{ops: make(map[string]Op), effects: make(map[string]Effect)}
+}
 
 func (h Host) Register(name string, op Op) {
 	if h.ops == nil {
 		panic("runtime.Host is not initialized")
 	}
 	h.ops[name] = op
-	delete(h.pure, name)
+	h.effects[name] = EffectExternalWrite
 }
 
 // RegisterPure registers an operation that is safe to run concurrently with
@@ -80,12 +117,35 @@ func (h Host) RegisterPure(name string, op Op) {
 		panic("runtime.Host is not initialized")
 	}
 	h.ops[name] = op
-	h.pure[name] = true
+	h.effects[name] = EffectPure
 }
 
-func (h Host) IsPure(name string) bool { return h.pure[name] }
+func (h Host) IsPure(name string) bool { return h.EffectOf(name) == EffectPure }
+
+// RegisterReadOnly is a concurrent-safe Host registration with an explicit
+// read-only effect classification.
+func (h Host) RegisterReadOnly(name string, op Op) {
+	if h.ops == nil {
+		panic("runtime.Host is not initialized")
+	}
+	h.ops[name] = op
+	h.effects[name] = EffectReadOnly
+}
+
+func (h Host) EffectOf(name string) Effect {
+	if effect, ok := h.effects[name]; ok {
+		return effect
+	}
+	return EffectUnknown
+}
 
 func (h Host) Call(ctx context.Context, name string, args []Value) Result {
+	if err := checkContext(ctx); err != nil {
+		return Failed(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return Failed(err)
+	}
 	op, ok := h.ops[name]
 	if !ok {
 		return Failed(fmt.Errorf("unknown host operation %q", name))
@@ -401,20 +461,59 @@ type NodeSpec struct {
 	Name   string
 	Op     string
 	Pure   bool
+	Effect Effect
 	Deps   []string
 	Gates  []string
-	Eval   func(context.Context, map[string]Value) Result
-	Gate   func(map[string]Value) (bool, error)
-	Output bool
+	// After waits for named nodes to complete or be skipped, without consuming
+	// their values. Failed or cancelled predecessors block this node.
+	After    []string
+	Eval     func(context.Context, map[string]Value) Result
+	Gate     func(map[string]Value) (bool, error)
+	Output   bool
+	Map      *MapSpec
+	State    bool
+	Retry    *RetrySpec
+	Feedback *FeedbackSpec
+}
+
+// MapSpec describes a one-shot dynamic map. The graph contains one node for
+// the map; the runtime creates one execution instance per source element.
+// Eval receives the current item and a stable outer-values snapshot so it can
+// use Flow bindings while evaluating the element expression.
+type MapSpec struct {
+	Source string
+	Pure   bool
+	Ops    []string
+	Eval   func(context.Context, Value, map[string]Value) Result
+}
+
+// RetrySpec applies a bounded retry policy to one computation. Attempts
+// includes the first execution and must be positive.
+type RetrySpec struct {
+	Attempts int
+	Eval     func(context.Context, map[string]Value) Result
+}
+
+// FeedbackSpec is a bounded feedback loop. Init creates the first candidate,
+// Verify decides whether it is acceptable, and Step creates the next
+// candidate. Attempts counts verification rounds.
+type FeedbackSpec struct {
+	Attempts int
+	Ops      []string
+	Init     func(context.Context, map[string]Value) Result
+	Step     func(context.Context, Value) Result
+	Verify   func(context.Context, Value) Result
 }
 
 type TraceEvent struct {
+	Tick   uint64
 	Node   string
 	Status Status
 	Reason string
 }
 
 type Graph struct {
+	mu          sync.Mutex
 	nodes       []NodeSpec
 	trace       []TraceEvent
 	output      Value
@@ -422,9 +521,289 @@ type Graph struct {
 	outputIndex int
 }
 
-func NewGraph() *Graph               { return &Graph{} }
-func (g *Graph) Add(node NodeSpec)   { g.nodes = append(g.nodes, node) }
-func (g *Graph) Trace() []TraceEvent { return append([]TraceEvent(nil), g.trace...) }
+func NewGraph() *Graph { return &Graph{} }
+
+func (g *Graph) Add(node NodeSpec) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.nodes = append(g.nodes, node)
+}
+
+func (g *Graph) Trace() []TraceEvent {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.traceSnapshot()
+}
+
+func (g *Graph) traceSnapshot() []TraceEvent {
+	return append([]TraceEvent(nil), g.trace...)
+}
+
+// Instance keeps graph values and state across logical ticks. A Graph remains
+// reusable and one-shot Run/RunParallel retain their Alpha 0.1 semantics;
+// callers opt into persistence by creating an Instance.
+type Instance struct {
+	mu             sync.Mutex
+	graph          *Graph
+	host           Host
+	inputs         map[string]Value
+	states         map[string]Value
+	stateOverrides map[string]Value
+	cache          []instanceNode
+	tick           uint64
+	trace          []TraceEvent
+	versions       map[string]uint64
+}
+
+type instanceNode struct {
+	valid         bool
+	value         Value
+	depValues     map[string]Value
+	depPresent    map[string]bool
+	afterVersions map[string]uint64
+}
+
+// NewInstance creates a persistent execution instance. Initial input
+// validation is performed by generated Flow wrappers; the runtime also
+// accepts a nil input map for flows without parameters.
+func (g *Graph) NewInstance(host Host, inputs map[string]Value) *Instance {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	initial := cloneValues(inputs)
+	return &Instance{
+		graph:          &Graph{nodes: append([]NodeSpec(nil), g.nodes...)},
+		host:           host,
+		inputs:         initial,
+		states:         make(map[string]Value),
+		stateOverrides: make(map[string]Value),
+		cache:          make([]instanceNode, len(g.nodes)),
+		versions:       make(map[string]uint64),
+	}
+}
+
+// SetState schedules a state value for the next Tick. State updates are
+// external inputs to the dependency graph; they do not create a feedback edge
+// by themselves.
+func (i *Instance) SetState(name string, value Value) error {
+	if i == nil || i.graph == nil {
+		return errors.New("nil runtime instance")
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, node := range i.graph.nodes {
+		if node.Name == name && node.State {
+			i.stateOverrides[name] = value
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown state %q", name)
+}
+
+// State returns the most recently committed value of a state node.
+func (i *Instance) State(name string) (Value, bool) {
+	if i == nil {
+		return nil, false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	value, ok := i.states[name]
+	return value, ok
+}
+
+func (i *Instance) TickCount() uint64 {
+	if i == nil {
+		return 0
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.tick
+}
+
+// Trace returns the most recent tick trace.
+func (i *Instance) Trace() []TraceEvent {
+	if i == nil {
+		return nil
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return append([]TraceEvent(nil), i.trace...)
+}
+
+// Tick merges input changes, invalidates affected nodes and propagates the
+// change through the graph. Unchanged nodes reuse their previous result.
+func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []TraceEvent, error) {
+	if i == nil || i.graph == nil {
+		return nil, nil, errors.New("nil runtime instance")
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := checkContext(ctx); err != nil {
+		return nil, nil, err
+	}
+	for name, value := range inputs {
+		i.inputs[name] = value
+	}
+	i.tick++
+	tick := i.tick
+	i.trace = nil
+	defer func() { i.stateOverrides = make(map[string]Value) }()
+	values := cloneValues(i.inputs)
+	status := make([]Status, len(i.graph.nodes))
+	nextCache := append([]instanceNode(nil), i.cache...)
+	var output Value
+	hasOutput, outputIndex := false, -1
+	record := func(node string, state Status, reason string) {
+		i.trace = append(i.trace, TraceEvent{Tick: tick, Node: node, Status: state, Reason: reason})
+	}
+	if err := ctx.Err(); err != nil {
+		for index := range status {
+			status[index] = Pending
+		}
+		abortNodes(i.graph.nodes, status, -1, err, record)
+		return nil, append([]TraceEvent(nil), i.trace...), err
+	}
+	fail := func(index int, err error) (Value, []TraceEvent, error) {
+		node := i.graph.nodes[index]
+		status[index] = failureStatus(err)
+		nextCache[index] = instanceNode{}
+		record(node.Name, status[index], err.Error())
+		abortNodes(i.graph.nodes, status, index, err, record)
+		i.cache = nextCache
+		return nil, append([]TraceEvent(nil), i.trace...), fmt.Errorf("node %s: %w", node.Name, err)
+	}
+
+	for completed := 0; completed < len(i.graph.nodes); {
+		progress := false
+		for index, node := range i.graph.nodes {
+			if status[index] != Pending {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return fail(index, err)
+			}
+			override, hasOverride := i.stateOverrides[node.Name]
+			state, hasState := i.states[node.Name]
+			// An initializer is a dependency only until state is initialized.
+			readyNode := node
+			if node.State && (hasState || hasOverride) {
+				readyNode.Deps = nil
+			}
+			ready, blocked, reason := dependencies(readyNode, i.graph.nodes, status, values)
+			if !ready && !blocked {
+				continue
+			}
+			progress = true
+			completed++
+			if !blocked && node.Gate != nil {
+				ok, err := node.Gate(values)
+				if err != nil {
+					return fail(index, err)
+				}
+				if !ok {
+					blocked, reason = true, "gate is false"
+				}
+			}
+			if blocked {
+				status[index] = Skipped
+				nextCache[index] = instanceNode{}
+				i.versions[node.Name] = tick
+				record(node.Name, Skipped, reason)
+				continue
+			}
+
+			cached := nextCache[index]
+			reused := false
+			var result Result
+			if node.State && hasState && (!hasOverride || equalValues(state, override)) {
+				result, reused = Ready(state), true
+			} else if !node.State && nodeEffect(node, i.host) == EffectPure && reusableNode(cached, node, values, i.versions) {
+				result, reused = Ready(cached.value), true
+			} else {
+				status[index] = Running
+				record(node.Name, Running, "")
+				if node.State && hasOverride {
+					result = Ready(override)
+				} else {
+					result = evaluateNode(ctx, node, values, 1)
+				}
+			}
+			result, err := awaitResult(ctx, result)
+			if err != nil {
+				return fail(index, err)
+			}
+			if result.Err != nil {
+				return fail(index, result.Err)
+			}
+			values[node.Name] = result.Value
+			status[index] = Completed
+			if !reused {
+				i.versions[node.Name] = tick
+			}
+			nextCache[index] = snapshotNode(result.Value, node, values, i.versions)
+			if node.State {
+				i.states[node.Name] = result.Value
+				delete(i.stateOverrides, node.Name)
+			}
+			if node.Output && index >= outputIndex {
+				output, hasOutput, outputIndex = result.Value, true, index
+			}
+			reason = ""
+			if reused {
+				reason = "reused"
+			}
+			record(node.Name, Completed, reason)
+		}
+		if !progress {
+			i.cache = nextCache
+			return nil, append([]TraceEvent(nil), i.trace...), errors.New("dependency graph did not make progress (cycle or unresolved dependency)")
+		}
+	}
+	i.cache = nextCache
+	if !hasOutput {
+		return nil, append([]TraceEvent(nil), i.trace...), nil
+	}
+	return output, append([]TraceEvent(nil), i.trace...), nil
+}
+
+func isCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func failureStatus(err error) Status {
+	if isCancellation(err) {
+		return Cancelled
+	}
+	return Error
+}
+
+func snapshotNode(value Value, node NodeSpec, values map[string]Value, versions map[string]uint64) instanceNode {
+	cached := instanceNode{valid: true, value: value, depValues: make(map[string]Value), depPresent: make(map[string]bool), afterVersions: make(map[string]uint64)}
+	for _, dep := range append(append([]string{}, node.Deps...), node.Gates...) {
+		cached.depValues[dep], cached.depPresent[dep] = values[dep]
+	}
+	for _, after := range node.After {
+		cached.afterVersions[after] = versions[after]
+	}
+	return cached
+}
+
+func reusableNode(cached instanceNode, node NodeSpec, values map[string]Value, versions map[string]uint64) bool {
+	if !cached.valid {
+		return false
+	}
+	for _, dep := range append(append([]string{}, node.Deps...), node.Gates...) {
+		current, present := values[dep]
+		if cached.depPresent[dep] != present || present && !equalValues(cached.depValues[dep], current) {
+			return false
+		}
+	}
+	for _, after := range node.After {
+		if cached.afterVersions[after] != versions[after] {
+			return false
+		}
+	}
+	return true
+}
 
 // DefaultParallelism is deliberately bounded. It gives automatic scheduling a
 // useful default without allowing a large machine to create an unbounded
@@ -441,10 +820,46 @@ func DefaultParallelism() int {
 }
 
 func (g *Graph) record(node string, status Status, reason string) {
-	g.trace = append(g.trace, TraceEvent{Node: node, Status: status, Reason: reason})
+	g.recordAt(0, node, status, reason)
+}
+
+func (g *Graph) recordAt(tick uint64, node string, status Status, reason string) {
+	g.trace = append(g.trace, TraceEvent{Tick: tick, Node: node, Status: status, Reason: reason})
+}
+
+func abortNodes(nodes []NodeSpec, status []Status, failed int, err error, record func(string, Status, string)) {
+	for index, node := range nodes {
+		if index == failed || status[index] != Pending && status[index] != Running {
+			continue
+		}
+		reason := "flow aborted: " + err.Error()
+		if status[index] == Running || failed < 0 && isCancellation(err) {
+			status[index] = Cancelled
+		} else {
+			status[index] = Skipped
+		}
+		record(node.Name, status[index], reason)
+	}
+}
+
+func (g *Graph) abortRun(status []Status, failed int, err error) (Value, []TraceEvent, error) {
+	if failed >= 0 {
+		status[failed] = failureStatus(err)
+		g.record(g.nodes[failed].Name, status[failed], err.Error())
+	}
+	abortNodes(g.nodes, status, failed, err, g.record)
+	if failed >= 0 {
+		err = fmt.Errorf("node %s: %w", g.nodes[failed].Name, err)
+	}
+	return nil, g.traceSnapshot(), err
 }
 
 func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []TraceEvent, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, nil, err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.trace = nil
 	g.output = nil
 	g.hasOut = false
@@ -457,7 +872,13 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 	for i := range status {
 		status[i] = Pending
 	}
+	if err := ctx.Err(); err != nil {
+		return g.abortRun(status, -1, err)
+	}
 	for completed := 0; completed < len(g.nodes); {
+		if err := ctx.Err(); err != nil {
+			return g.abortRun(status, -1, err)
+		}
 		progress := false
 		for i, node := range g.nodes {
 			if status[i] != Pending {
@@ -477,9 +898,7 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 			if node.Gate != nil {
 				ok, err := node.Gate(values)
 				if err != nil {
-					status[i] = Error
-					g.record(node.Name, Error, err.Error())
-					return nil, g.Trace(), fmt.Errorf("node %s: %w", node.Name, err)
+					return g.abortRun(status, i, err)
 				}
 				if !ok {
 					status[i] = Skipped
@@ -491,16 +910,12 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 			}
 			status[i] = Running
 			g.record(node.Name, Running, "")
-			result, waitErr := awaitResult(ctx, node.Eval(ctx, values))
+			result, waitErr := awaitResult(ctx, evaluateNode(ctx, node, values, 1))
 			if waitErr != nil {
-				status[i] = Error
-				g.record(node.Name, Error, waitErr.Error())
-				return nil, g.Trace(), waitErr
+				return g.abortRun(status, i, waitErr)
 			}
 			if result.Err != nil {
-				status[i] = Error
-				g.record(node.Name, Error, result.Err.Error())
-				return nil, g.Trace(), fmt.Errorf("node %s: %w", node.Name, result.Err)
+				return g.abortRun(status, i, result.Err)
 			}
 			values[node.Name] = result.Value
 			status[i] = Completed
@@ -514,13 +929,13 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 			progress = true
 		}
 		if !progress {
-			return nil, g.Trace(), errors.New("dependency graph did not make progress (cycle or unresolved dependency)")
+			return nil, g.traceSnapshot(), errors.New("dependency graph did not make progress (cycle or unresolved dependency)")
 		}
 	}
 	if !g.hasOut {
-		return nil, g.Trace(), nil
+		return nil, g.traceSnapshot(), nil
 	}
-	return g.output, g.Trace(), nil
+	return g.output, g.traceSnapshot(), nil
 }
 
 // RunAuto is the default user-facing scheduler: independent pure nodes and
@@ -534,9 +949,16 @@ func (g *Graph) RunAuto(ctx context.Context, host Host, inputs map[string]Value)
 // host operation is eligible when it was registered with Host.RegisterPure or
 // when the generated graph marks the node Pure.
 func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Value, limit int) (Value, []TraceEvent, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, nil, err
+	}
 	if limit < 1 {
 		return nil, nil, fmt.Errorf("parallelism limit must be at least 1")
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	g.trace = nil
 	g.output = nil
 	g.hasOut = false
@@ -559,7 +981,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 	completed := 0
 	for completed < len(g.nodes) {
 		if err := ctx.Err(); err != nil {
-			return nil, g.Trace(), err
+			return g.abortRun(status, -1, err)
 		}
 		progress := false
 		ready := make([]int, 0)
@@ -581,9 +1003,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			if node.Gate != nil {
 				ok, err := node.Gate(values)
 				if err != nil {
-					status[i] = Error
-					g.record(node.Name, Error, err.Error())
-					return nil, g.Trace(), fmt.Errorf("node %s: %w", node.Name, err)
+					return g.abortRun(status, i, err)
 				}
 				if !ok {
 					status[i] = Skipped
@@ -596,12 +1016,24 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			ready = append(ready, i)
 		}
 
+		// Source-order write barriers prevent later reads from overtaking a
+		// write, even when the write still waits for an earlier dependency.
+		barrier := len(g.nodes)
+		for index, node := range g.nodes {
+			if (status[index] == Pending || status[index] == Running) && !nodeCanRunParallel(node, host) {
+				barrier = index
+				break
+			}
+		}
 		for _, i := range ready {
 			if len(active) >= limit {
 				break
 			}
+			if i > barrier && !neededForNode(i, barrier, g.nodes) {
+				continue
+			}
 			node := g.nodes[i]
-			if !node.Pure && !host.IsPure(node.Op) {
+			if !nodeCanRunParallel(node, host) {
 				continue
 			}
 			status[i] = Running
@@ -609,24 +1041,25 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			g.record(node.Name, Running, "")
 			snapshot := cloneValues(values)
 			go func(index int, spec NodeSpec) {
-				result, err := awaitResult(ctx, spec.Eval(ctx, snapshot))
+				result, err := awaitResult(ctx, evaluateNode(ctx, spec, snapshot, limit))
 				results <- resultEvent{index: index, result: result, err: err}
 			}(i, node)
 			progress = true
 		}
 
 		if len(active) > 0 {
-			event := <-results
+			var event resultEvent
+			select {
+			case event = <-results:
+			case <-ctx.Done():
+				return g.abortRun(status, -1, ctx.Err())
+			}
 			delete(active, event.index)
 			if event.err != nil {
-				status[event.index] = Error
-				g.record(g.nodes[event.index].Name, Error, event.err.Error())
-				return nil, g.Trace(), event.err
+				return g.abortRun(status, event.index, event.err)
 			}
 			if event.result.Err != nil {
-				status[event.index] = Error
-				g.record(g.nodes[event.index].Name, Error, event.result.Err.Error())
-				return nil, g.Trace(), fmt.Errorf("node %s: %w", g.nodes[event.index].Name, event.result.Err)
+				return g.abortRun(status, event.index, event.result.Err)
 			}
 			values[g.nodes[event.index].Name] = event.result.Value
 			status[event.index] = Completed
@@ -644,21 +1077,17 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 		// drained, preserving the sequential semantics of side effects.
 		for _, i := range ready {
 			node := g.nodes[i]
-			if node.Pure || host.IsPure(node.Op) {
+			if nodeCanRunParallel(node, host) || i != barrier {
 				continue
 			}
 			status[i] = Running
 			g.record(node.Name, Running, "")
-			result, waitErr := awaitResult(ctx, node.Eval(ctx, values))
+			result, waitErr := awaitResult(ctx, evaluateNode(ctx, node, values, 1))
 			if waitErr != nil {
-				status[i] = Error
-				g.record(node.Name, Error, waitErr.Error())
-				return nil, g.Trace(), waitErr
+				return g.abortRun(status, i, waitErr)
 			}
 			if result.Err != nil {
-				status[i] = Error
-				g.record(node.Name, Error, result.Err.Error())
-				return nil, g.Trace(), fmt.Errorf("node %s: %w", node.Name, result.Err)
+				return g.abortRun(status, i, result.Err)
 			}
 			values[node.Name] = result.Value
 			status[i] = Completed
@@ -673,24 +1102,349 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			break
 		}
 		if !progress && len(active) == 0 {
-			return nil, g.Trace(), errors.New("dependency graph did not make progress (cycle or unresolved dependency)")
+			return nil, g.traceSnapshot(), errors.New("dependency graph did not make progress (cycle or unresolved dependency)")
 		}
 	}
 	if !g.hasOut {
-		return nil, g.Trace(), nil
+		return nil, g.traceSnapshot(), nil
 	}
-	return g.output, g.Trace(), nil
+	return g.output, g.traceSnapshot(), nil
+}
+
+func evaluateNode(ctx context.Context, node NodeSpec, values map[string]Value, limit int) Result {
+	if err := ctx.Err(); err != nil {
+		return Failed(err)
+	}
+	if node.Map != nil {
+		return evaluateMap(ctx, node.Map, values, limit)
+	}
+	if node.Retry != nil {
+		return evaluateRetry(ctx, node.Retry, values)
+	}
+	if node.Feedback != nil {
+		return evaluateFeedback(ctx, node.Feedback, values)
+	}
+	if node.Eval == nil {
+		return Failed(fmt.Errorf("node %q has no evaluator", node.Name))
+	}
+	return node.Eval(ctx, values)
+}
+
+func evaluateRetry(ctx context.Context, spec *RetrySpec, values map[string]Value) Result {
+	if spec == nil || spec.Eval == nil {
+		return Failed(errors.New("retry node has no evaluator"))
+	}
+	if spec.Attempts < 1 {
+		return Failed(errors.New("retry attempts must be at least 1"))
+	}
+	var last Result
+	for attempt := 0; attempt < spec.Attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return Failed(err)
+		}
+		result, waitErr := awaitResult(ctx, spec.Eval(ctx, values))
+		if waitErr != nil {
+			if isCancellation(waitErr) {
+				return Failed(waitErr)
+			}
+			last = Failed(waitErr)
+			continue
+		}
+		if result.Err == nil {
+			return result
+		}
+		if isCancellation(result.Err) {
+			return result
+		}
+		last = result
+	}
+	return last
+}
+
+func evaluateFeedback(ctx context.Context, spec *FeedbackSpec, values map[string]Value) Result {
+	if spec == nil || spec.Init == nil || spec.Step == nil || spec.Verify == nil {
+		return Failed(errors.New("feedback node has incomplete evaluators"))
+	}
+	if spec.Attempts < 1 {
+		return Failed(errors.New("feedback attempts must be at least 1"))
+	}
+	current, err := awaitResult(ctx, spec.Init(ctx, values))
+	if err != nil {
+		return Failed(err)
+	}
+	if current.Err != nil {
+		return current
+	}
+	for attempt := 0; attempt < spec.Attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return Failed(err)
+		}
+		verified, err := awaitResult(ctx, spec.Verify(ctx, current.Value))
+		if err != nil {
+			return Failed(err)
+		}
+		if verified.Err != nil {
+			return verified
+		}
+		ok, err := Bool(verified.Value)
+		if err != nil {
+			return Failed(fmt.Errorf("feedback verifier: %w", err))
+		}
+		if ok {
+			return Ready(current.Value)
+		}
+		if attempt == spec.Attempts-1 {
+			return Failed(fmt.Errorf("feedback did not converge after %d attempts", spec.Attempts))
+		}
+		next, err := awaitResult(ctx, spec.Step(ctx, current.Value))
+		if err != nil {
+			return Failed(err)
+		}
+		if next.Err != nil {
+			return next
+		}
+		current = next
+	}
+	return Failed(errors.New("feedback did not converge"))
+}
+
+// nodeEffect resolves conservative metadata. Explicit Effect overrides the
+// legacy Pure flag; an unclassified operation is treated as a write barrier.
+func nodeEffect(node NodeSpec, host Host) Effect {
+	if node.Effect != EffectUnknown {
+		return node.Effect
+	}
+	if node.Pure || node.Map != nil && node.Map.Pure {
+		return EffectPure
+	}
+	var ops []string
+	if node.Map != nil {
+		ops = node.Map.Ops
+	} else if node.Feedback != nil {
+		ops = node.Feedback.Ops
+	} else if node.Op != "" {
+		ops = []string{node.Op}
+	}
+	if len(ops) == 0 {
+		return EffectUnknown
+	}
+	effect := EffectPure
+	for _, op := range ops {
+		switch host.EffectOf(op) {
+		case EffectPure:
+		case EffectReadOnly:
+			effect = EffectReadOnly
+		default:
+			return EffectExternalWrite
+		}
+	}
+	return effect
+}
+
+func nodeCanRunParallel(node NodeSpec, host Host) bool {
+	effect := nodeEffect(node, host)
+	return effect == EffectPure || effect == EffectReadOnly
+}
+
+// neededForNode lets a pure predecessor run even when it appears later in the
+// source list than an effect barrier. This matters for graphs assembled by Go
+// callers, which are not required to add nodes in topological order.
+func neededForNode(candidate, target int, nodes []NodeSpec) bool {
+	if candidate < 0 || target < 0 || candidate >= len(nodes) || target >= len(nodes) {
+		return false
+	}
+	seen := make(map[int]bool)
+	var visit func(int) bool
+	visit = func(index int) bool {
+		if seen[index] {
+			return false
+		}
+		seen[index] = true
+		for _, name := range append(append([]string{}, nodes[index].Deps...), nodes[index].Gates...) {
+			for predecessor, node := range nodes {
+				if node.Name != name {
+					continue
+				}
+				if predecessor == candidate || visit(predecessor) {
+					return true
+				}
+			}
+		}
+		for _, name := range nodes[index].After {
+			for predecessor, node := range nodes {
+				if node.Name != name {
+					continue
+				}
+				if predecessor == candidate || visit(predecessor) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return visit(target)
+}
+
+func evaluateMap(ctx context.Context, spec *MapSpec, values map[string]Value, limit int) Result {
+	if spec == nil || spec.Eval == nil {
+		return Failed(errors.New("map node has no evaluator"))
+	}
+	input, ok := values[spec.Source]
+	if !ok {
+		return Failed(fmt.Errorf("map source %q is unavailable", spec.Source))
+	}
+	items, err := sequenceValues(input)
+	if err != nil {
+		return Failed(err)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(items) && len(items) > 0 {
+		limit = len(items)
+	}
+	if len(items) == 0 {
+		return Ready([]Value{})
+	}
+	if limit == 1 {
+		return mapSequential(ctx, spec, items, values)
+	}
+	return mapParallel(ctx, spec, items, values, limit)
+}
+
+func mapSequential(ctx context.Context, spec *MapSpec, items []Value, values map[string]Value) Result {
+	out := make([]Value, len(items))
+	for i, item := range items {
+		if err := ctx.Err(); err != nil {
+			return Failed(err)
+		}
+		result, err := awaitResult(ctx, spec.Eval(ctx, item, values))
+		if err != nil {
+			return Failed(fmt.Errorf("map element %d: %w", i, err))
+		}
+		if result.Err != nil {
+			return Failed(fmt.Errorf("map element %d: %w", i, result.Err))
+		}
+		out[i] = result.Value
+	}
+	return Ready(out)
+}
+
+func mapParallel(ctx context.Context, spec *MapSpec, items []Value, values map[string]Value, limit int) Result {
+	mapCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type itemResult struct {
+		index int
+		value Value
+		err   error
+	}
+	jobs := make(chan int)
+	results := make(chan itemResult, len(items))
+	workers := limit
+	if workers > len(items) {
+		workers = len(items)
+	}
+	var wg sync.WaitGroup
+	var stopOnce sync.Once
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				if mapCtx.Err() != nil {
+					continue
+				}
+				result, err := awaitResult(mapCtx, spec.Eval(mapCtx, items[index], values))
+				if err != nil {
+					stopOnce.Do(cancel)
+					results <- itemResult{index: index, err: err}
+					continue
+				}
+				if result.Err != nil {
+					stopOnce.Do(cancel)
+					results <- itemResult{index: index, err: result.Err}
+					continue
+				}
+				results <- itemResult{index: index, value: result.Value}
+			}
+		}()
+	}
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		defer close(jobs)
+		for i := range items {
+			select {
+			case jobs <- i:
+			case <-mapCtx.Done():
+				return
+			}
+		}
+	}()
+	<-producerDone
+	wg.Wait()
+	close(results)
+	out := make([]Value, len(items))
+	var firstErr error
+	firstErrIndex := int(^uint(0) >> 1)
+	for result := range results {
+		if result.err != nil {
+			if firstErr == nil || result.index < firstErrIndex {
+				firstErr = fmt.Errorf("map element %d: %w", result.index, result.err)
+				firstErrIndex = result.index
+			}
+			continue
+		}
+		out[result.index] = result.value
+	}
+	if err := ctx.Err(); err != nil {
+		return Failed(err)
+	}
+	if firstErr != nil {
+		return Failed(firstErr)
+	}
+	return Ready(out)
+}
+
+func sequenceValues(value Value) ([]Value, error) {
+	if value == nil {
+		return nil, errors.New("map source must be a list or slice, got nil")
+	}
+	if values, ok := value.([]Value); ok {
+		return append([]Value(nil), values...), nil
+	}
+	rv := reflect.ValueOf(value)
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, fmt.Errorf("map source must be a list or slice, got %T", value)
+	}
+	items := make([]Value, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		items[i] = rv.Index(i).Interface()
+	}
+	return items, nil
 }
 
 func awaitResult(ctx context.Context, result Result) (Result, error) {
-	for result.Future != nil {
+	if err := checkContext(ctx); err != nil {
+		return Result{}, err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
+		if result.Future == nil {
+			return result, nil
+		}
 		select {
 		case <-ctx.Done():
 			return Result{}, ctx.Err()
-		case result = <-result.Future:
+		case next, ok := <-result.Future:
+			if !ok {
+				return Result{}, errors.New("host future closed without a result")
+			}
+			result = next
 		}
 	}
-	return result, nil
 }
 
 func cloneValues(values map[string]Value) map[string]Value {
@@ -713,6 +1467,8 @@ func dependencies(node NodeSpec, nodes []NodeSpec, status []Status, values map[s
 			switch status[i] {
 			case Error:
 				return false, true, "dependency " + dep + " failed"
+			case Cancelled:
+				return false, true, "dependency " + dep + " was cancelled"
 			case Skipped:
 				return false, true, "dependency " + dep + " was skipped"
 			case Completed:
@@ -724,6 +1480,27 @@ func dependencies(node NodeSpec, nodes []NodeSpec, status []Status, values map[s
 			}
 		}
 		return false, false, ""
+	}
+	for _, after := range node.After {
+		found := false
+		for index, predecessor := range nodes {
+			if predecessor.Name != after {
+				continue
+			}
+			found = true
+			switch status[index] {
+			case Completed, Skipped:
+			case Error:
+				return false, true, "ordering predecessor " + after + " failed"
+			case Cancelled:
+				return false, true, "ordering predecessor " + after + " was cancelled"
+			default:
+				return false, false, ""
+			}
+		}
+		if !found {
+			return false, false, ""
+		}
 	}
 	return true, false, ""
 }

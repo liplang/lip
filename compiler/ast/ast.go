@@ -50,7 +50,7 @@ type ReturnStmt struct {
 
 func (*ReturnStmt) stmtNode() {}
 
-// ExprStmt is an effect-only call such as print(value). Alpha 0.1 does not
+// ExprStmt is an effect-only call such as print(value). Alpha 0.2 does not
 // allow arbitrary unused expressions; the compiler accepts only call forms.
 type ExprStmt struct {
 	Expr Expr
@@ -105,6 +105,18 @@ type ListExpr struct {
 }
 
 func (*ListExpr) exprNode() {}
+
+// ComprehensionExpr is the Alpha 0.2 one-shot dynamic map form:
+// [Element for Variable in Source]. The compiler keeps this as one graph node
+// and the runtime expands its execution instances after Source is available.
+type ComprehensionExpr struct {
+	Element  Expr
+	Variable string
+	Source   Expr
+	Pos      token.Pos
+}
+
+func (*ComprehensionExpr) exprNode() {}
 
 type FieldExpr struct {
 	Object Expr

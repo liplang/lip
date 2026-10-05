@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"lipalpha/compiler/ast"
@@ -19,12 +20,17 @@ type Graph struct {
 }
 
 type Node struct {
-	Name   string
-	Deps   []string
-	Gates  []string
-	Expr   ast.Expr
-	Output bool
-	Pos    token.Pos
+	Name             string
+	Deps             []string
+	Gates            []string
+	Expr             ast.Expr
+	Output           bool
+	State            bool
+	RetryAttempts    int
+	FeedbackAttempts int
+	FeedbackStep     string
+	FeedbackVerify   string
+	Pos              token.Pos
 }
 
 func ParseAndBuild(src string) (*Graph, error) {
@@ -141,7 +147,24 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			if b.allNames[s.Name] {
 				return b.err(s.Pos, "duplicate binding %q", s.Name)
 			}
-			if err := validateExpr(s.Expr); err != nil {
+			stateNode := false
+			retryAttempts, retryErr := retryAttemptsOf(s.Expr)
+			if retryErr != nil {
+				return b.err(s.Pos, "%v", retryErr)
+			}
+			feedbackStep, feedbackVerify, feedbackAttempts, feedbackErr := feedbackInfoOf(s.Expr)
+			if feedbackErr != nil {
+				return b.err(s.Pos, "%v", feedbackErr)
+			}
+			if call, ok := s.Expr.(*ast.CallExpr); ok && call.Name == "state" {
+				if len(call.Args) != 1 {
+					return b.err(s.Pos, "state expects exactly one initial value")
+				}
+				if err := validateSimpleExpr(call.Args[0]); err != nil {
+					return b.err(s.Pos, "state initial value: %v", err)
+				}
+				stateNode = true
+			} else if err := validateExpr(s.Expr); err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
 			refs := refsOf(s.Expr)
@@ -152,7 +175,7 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			if err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
-			b.graph.Nodes = append(b.graph.Nodes, Node{Name: s.Name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Pos: s.Pos})
+			b.graph.Nodes = append(b.graph.Nodes, Node{Name: s.Name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, State: stateNode, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
 			b.known[s.Name], b.allNames[s.Name] = true, true
 			b.types[s.Name] = typ
 		case *ast.WhenStmt:
@@ -188,6 +211,14 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 				}
 			}
 		case *ast.ReturnStmt:
+			retryAttempts, retryErr := retryAttemptsOf(s.Expr)
+			if retryErr != nil {
+				return b.err(s.Pos, "%v", retryErr)
+			}
+			feedbackStep, feedbackVerify, feedbackAttempts, feedbackErr := feedbackInfoOf(s.Expr)
+			if feedbackErr != nil {
+				return b.err(s.Pos, "%v", feedbackErr)
+			}
 			if err := validateExpr(s.Expr); err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
@@ -200,9 +231,17 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			}
 			name := fmt.Sprintf("__return_%d", b.outputID)
 			b.outputID++
-			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Output: true, Pos: s.Pos})
+			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Output: true, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
 			terminal = true
 		case *ast.ExprStmt:
+			retryAttempts, retryErr := retryAttemptsOf(s.Expr)
+			if retryErr != nil {
+				return b.err(s.Pos, "%v", retryErr)
+			}
+			feedbackStep, feedbackVerify, feedbackAttempts, feedbackErr := feedbackInfoOf(s.Expr)
+			if feedbackErr != nil {
+				return b.err(s.Pos, "%v", feedbackErr)
+			}
 			if call, ok := s.Expr.(*ast.CallExpr); ok && b.functionNames[call.Name] {
 				return b.err(s.Pos, "a local fn call must be assigned or returned")
 			}
@@ -215,7 +254,7 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			}
 			name := fmt.Sprintf("__expr_%d", b.exprID)
 			b.exprID++
-			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Pos: s.Pos})
+			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
 		default:
 			return fmt.Errorf("unsupported statement")
 		}
@@ -247,11 +286,84 @@ func gateName(expr ast.Expr) (string, error) {
 	return "", fmt.Errorf("when condition must be an identifier or true")
 }
 
+func retryAttemptsOf(expr ast.Expr) (int, error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.Name != "retry" {
+		return 0, nil
+	}
+	if len(call.Args) != 2 {
+		return 0, fmt.Errorf("retry expects a call and an attempt count")
+	}
+	if _, ok := call.Args[0].(*ast.CallExpr); !ok {
+		return 0, fmt.Errorf("retry first argument must be a Host or local function call")
+	}
+	literal, ok := call.Args[1].(*ast.LiteralExpr)
+	if !ok {
+		return 0, fmt.Errorf("retry attempt count must be an integer literal")
+	}
+	number, ok := literal.Value.(float64)
+	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || number < 1 || number != math.Trunc(number) || number > float64(int(^uint(0)>>1)) {
+		return 0, fmt.Errorf("retry attempt count must be a positive integer")
+	}
+	return int(number), nil
+}
+
+func feedbackInfoOf(expr ast.Expr) (step, verify string, attempts int, err error) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || call.Name != "feedback" {
+		return "", "", 0, nil
+	}
+	if len(call.Args) != 4 {
+		return "", "", 0, fmt.Errorf("feedback expects an initial call, step name, verifier name and attempt count")
+	}
+	if _, ok := call.Args[0].(*ast.CallExpr); !ok {
+		return "", "", 0, fmt.Errorf("feedback first argument must be a Host or local function call")
+	}
+	stepExpr, ok := call.Args[1].(*ast.IdentExpr)
+	if !ok {
+		return "", "", 0, fmt.Errorf("feedback step must be an operation name")
+	}
+	verifyExpr, ok := call.Args[2].(*ast.IdentExpr)
+	if !ok {
+		return "", "", 0, fmt.Errorf("feedback verifier must be an operation name")
+	}
+	literal, ok := call.Args[3].(*ast.LiteralExpr)
+	if !ok {
+		return "", "", 0, fmt.Errorf("feedback attempt count must be an integer literal")
+	}
+	number, ok := literal.Value.(float64)
+	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || number < 1 || number != math.Trunc(number) || number > float64(int(^uint(0)>>1)) {
+		return "", "", 0, fmt.Errorf("feedback attempt count must be a positive integer")
+	}
+	return stepExpr.Name, verifyExpr.Name, int(number), nil
+}
+
 func validateExpr(expr ast.Expr) error {
 	switch e := expr.(type) {
 	case *ast.IdentExpr, *ast.LiteralExpr:
 		return nil
 	case *ast.CallExpr:
+		if e.Name == "state" {
+			return fmt.Errorf("state(...) is only allowed as a Flow binding")
+		}
+		if e.Name == "retry" {
+			if _, err := retryAttemptsOf(e); err != nil {
+				return err
+			}
+			return nil
+		}
+		if e.Name == "feedback" {
+			if _, _, _, err := feedbackInfoOf(e); err != nil {
+				return err
+			}
+			initial := e.Args[0].(*ast.CallExpr)
+			for _, arg := range initial.Args {
+				if err := validateSimpleExpr(arg); err != nil {
+					return fmt.Errorf("feedback initial call: %w", err)
+				}
+			}
+			return nil
+		}
 		for _, arg := range e.Args {
 			if err := validateSimpleExpr(arg); err != nil {
 				return fmt.Errorf("call argument: %w", err)
@@ -278,6 +390,17 @@ func validateExpr(expr ast.Expr) error {
 			}
 		}
 		return nil
+	case *ast.ComprehensionExpr:
+		if _, ok := e.Source.(*ast.IdentExpr); !ok {
+			return fmt.Errorf("comprehension source must be an identifier")
+		}
+		if reservedName(e.Variable) {
+			return fmt.Errorf("identifier %q is reserved for generated graph nodes", e.Variable)
+		}
+		if _, ok := e.Element.(*ast.ComprehensionExpr); ok {
+			return fmt.Errorf("nested comprehensions are not supported")
+		}
+		return validateExpr(e.Element)
 	case *ast.FieldExpr:
 		return validateSimpleExpr(e.Object)
 	case *ast.IndexExpr:
@@ -323,34 +446,45 @@ func validateSimpleExpr(expr ast.Expr) error {
 
 func refsOf(expr ast.Expr) []string {
 	var refs []string
-	var visit func(ast.Expr)
-	visit = func(e ast.Expr) {
+	var visit func(ast.Expr, map[string]bool)
+	visit = func(e ast.Expr, bound map[string]bool) {
 		switch x := e.(type) {
 		case *ast.IdentExpr:
-			refs = append(refs, x.Name)
+			if !bound[x.Name] {
+				refs = append(refs, x.Name)
+			}
 		case *ast.CallExpr:
-			for _, a := range x.Args {
-				visit(a)
+			args := x.Args
+			if x.Name == "feedback" && len(args) > 0 {
+				args = args[:1]
+			}
+			for _, a := range args {
+				visit(a, bound)
 			}
 		case *ast.BinaryExpr:
-			visit(x.Left)
-			visit(x.Right)
+			visit(x.Left, bound)
+			visit(x.Right, bound)
 		case *ast.IfExpr:
-			visit(x.Cond)
-			visit(x.Then)
-			visit(x.Else)
+			visit(x.Cond, bound)
+			visit(x.Then, bound)
+			visit(x.Else, bound)
 		case *ast.ListExpr:
 			for _, item := range x.Items {
-				visit(item)
+				visit(item, bound)
 			}
+		case *ast.ComprehensionExpr:
+			visit(x.Source, bound)
+			next := cloneBoolMap(bound)
+			next[x.Variable] = true
+			visit(x.Element, next)
 		case *ast.FieldExpr:
-			visit(x.Object)
+			visit(x.Object, bound)
 		case *ast.IndexExpr:
-			visit(x.Object)
-			visit(x.Index)
+			visit(x.Object, bound)
+			visit(x.Index, bound)
 		}
 	}
-	visit(expr)
+	visit(expr, nil)
 	return refs
 }
 
@@ -370,6 +504,19 @@ func validateFunction(fn *ast.Function) error {
 	}
 	if err := validateExpr(fn.Return); err != nil {
 		return err
+	}
+	if _, ok := fn.Return.(*ast.ComprehensionExpr); ok {
+		return fmt.Errorf("comprehension is only supported as a Flow binding or Flow return value")
+	}
+	if attempts, err := retryAttemptsOf(fn.Return); err != nil {
+		return err
+	} else if attempts > 0 {
+		return fmt.Errorf("retry is only supported as a Flow node")
+	}
+	if _, _, attempts, err := feedbackInfoOf(fn.Return); err != nil {
+		return err
+	} else if attempts > 0 {
+		return fmt.Errorf("feedback is only supported as a Flow node")
 	}
 	for _, ref := range refsOf(fn.Return) {
 		if !seen[ref] {
@@ -431,6 +578,25 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 			return "number", nil
 		}
 	case *ast.CallExpr:
+		if e.Name == "state" {
+			if len(e.Args) != 1 {
+				return "any", fmt.Errorf("state expects exactly one initial value")
+			}
+			return inferExprType(e.Args[0], env, fnTypes, fnParams)
+		}
+		if e.Name == "retry" {
+			if _, err := retryAttemptsOf(e); err != nil {
+				return "any", err
+			}
+			inner := e.Args[0].(*ast.CallExpr)
+			return inferExprType(inner, env, fnTypes, fnParams)
+		}
+		if e.Name == "feedback" {
+			if _, _, _, err := feedbackInfoOf(e); err != nil {
+				return "any", err
+			}
+			return inferExprType(e.Args[0], env, fnTypes, fnParams)
+		}
 		for _, arg := range e.Args {
 			if _, err := inferExprType(arg, env, fnTypes, fnParams); err != nil {
 				return "any", err
@@ -492,6 +658,16 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 			if _, err := inferExprType(item, env, fnTypes, fnParams); err != nil {
 				return "any", err
 			}
+		}
+		return "list", nil
+	case *ast.ComprehensionExpr:
+		if _, err := inferExprType(e.Source, env, fnTypes, fnParams); err != nil {
+			return "any", err
+		}
+		next := cloneStringMap(env)
+		next[e.Variable] = "any"
+		if _, err := inferExprType(e.Element, next, fnTypes, fnParams); err != nil {
+			return "any", err
 		}
 		return "list", nil
 	case *ast.FieldExpr:

@@ -274,21 +274,45 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		}
 		expr = &ast.IfExpr{Cond: cond, Then: thenExpr, Else: elseExpr, Pos: t.Pos}
 	case token.LBracket:
-		items := []ast.Expr{}
-		if !p.match(token.RBracket) {
-			for {
-				item, err := p.parseExpr(0)
-				if err != nil {
-					return nil, err
-				}
-				items = append(items, item)
-				if p.match(token.RBracket) {
-					break
-				}
-				if _, err := p.expect(token.Comma); err != nil {
-					return nil, err
-				}
+		if p.match(token.RBracket) {
+			expr = &ast.ListExpr{Items: []ast.Expr{}, Pos: t.Pos}
+			break
+		}
+		item, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if p.match(token.For) {
+			variable, err := p.expect(token.Ident)
+			if err != nil {
+				return nil, err
 			}
+			if _, err = p.expect(token.In); err != nil {
+				return nil, err
+			}
+			source, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			if _, err = p.expect(token.RBracket); err != nil {
+				return nil, err
+			}
+			expr = &ast.ComprehensionExpr{Element: item, Variable: variable.Text, Source: source, Pos: t.Pos}
+			break
+		}
+		items := []ast.Expr{item}
+		for {
+			if p.match(token.RBracket) {
+				break
+			}
+			if _, err := p.expect(token.Comma); err != nil {
+				return nil, err
+			}
+			item, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
 		}
 		expr = &ast.ListExpr{Items: items, Pos: t.Pos}
 	case token.LParen:
@@ -368,6 +392,8 @@ func tPos(expr ast.Expr) token.Pos {
 	case *ast.IfExpr:
 		return e.Pos
 	case *ast.ListExpr:
+		return e.Pos
+	case *ast.ComprehensionExpr:
 		return e.Pos
 	case *ast.FieldExpr:
 		return e.Pos

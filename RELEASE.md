@@ -1,11 +1,12 @@
-# 0.1.0 发布清单
+# 0.4.0 发布清单
 
 ## 版本一致性
 
-- [x] `VERSION` 和 `lipc version` 均为 `0.1.0`。
-- [ ] 在发布仓库中创建并核对 `0.1.0` 标签（本地源码包无法代替这一步）。
-- [x] 语言成熟度在文档中标为 Alpha 0.1。
-- [x] 以 [ALPHA-0.1-SPEC.md](ALPHA-0.1-SPEC.md) 为唯一规范来源。
+- [x] `VERSION` 和 `lipc version` 均为 `0.4.0`。
+- [ ] 在发布仓库中创建并核对 `0.4.0` 标签（本地源码包无法代替这一步）。
+- [x] 语言成熟度在文档中标为 Alpha 0.4。
+- [x] 以 [ALPHA-0.3-SPEC.md](docs/ALPHA-0.3-SPEC.md) 和
+  [ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md) 为本次新增能力的规范来源。
 
 ## 必须执行的验证
 
@@ -16,8 +17,12 @@ GOCACHE=/tmp/lip-gocache go vet ./...
 GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version
 test "$(tr -d '\n' < VERSION)" = "$(GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version)"
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc help >/dev/null
 
 for f in examples/*.lip; do
+  GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc check "$f" || exit 1
+done
+for f in tests/conformance/*.lip; do
   GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc check "$f" || exit 1
 done
 
@@ -35,6 +40,12 @@ GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/gated
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/fanout
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/language
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/host_adapter
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/map
+
+# Verify Go-like executable build and temporary run paths.
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc build -o "$tmpdir/hello" examples/hello.lip
+GOCACHE=/tmp/lip-gocache "$tmpdir/hello"
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc run examples/hello.lip -- Alice
 ```
 
 ## 发布内容
@@ -45,13 +56,14 @@ GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/host_adapter
 
 ## 已知边界
 
-Alpha 0.1 不承诺 loops、map/comprehension、动态展开、持久状态、事件、
-feedback、retry 语法、增量重算或直接 Go import。它们必须通过 Host Adapter
-或留待后续版本，不能在发布说明中描述成已实现能力。
+Alpha 0.4 支持持久 State/Tick、受限 Retry/Feedback、取消传播和 Runtime
+Effect/Ordering。普通 loops、事件/streams、detach/background、完整 Effect
+类型系统和直接 Go import 仍不在本版本边界内。
 
 ## 审计结论
 
-本版本的实现与规范边界一致：自动调度、有限纯节点并行、`Await`、类型
-检查、Go Host Adapter 和 CLI 生成均有可运行验证。发布者仍需在带有 Git
+本版本的实现与规范边界一致：自动调度、有限并行、`Await`、动态 Map、
+State/Tick、Retry、Feedback、取消传播、Effect/Ordering、类型检查、Go Host
+Adapter 和 CLI 生成均有可运行验证。发布者仍需在带有 Git
 元数据的仓库中完成版本标签检查；源码导出包可统一使用
 `-buildvcs=false`，避免把本地 VCS 状态当成构建依赖。

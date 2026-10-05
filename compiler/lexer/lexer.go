@@ -68,6 +68,10 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.Return
 		case "when":
 			kind = token.When
+		case "for":
+			kind = token.For
+		case "in":
+			kind = token.In
 		case "if":
 			kind = token.If
 		case "then":

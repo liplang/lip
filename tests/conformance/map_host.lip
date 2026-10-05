@@ -1,0 +1,4 @@
+flow ConformanceHostMap(values: any) {
+    doubled = [double(x) for x in values]
+    return doubled
+}

@@ -53,20 +53,13 @@ func buildGraph(host runtime.Host) *runtime.Graph {
 	g := runtime.NewGraph()
 	host.RegisterPure("twice", __lip_fn_twice(host))
 	g.Add(runtime.NodeSpec{Name: "values", Op: "", Pure: true, Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return runtime.Ready([]runtime.Value{runtime.Value(1), runtime.Value(2), runtime.Value(3)})
+		return runtime.Ready([]runtime.Value{runtime.Value(1), runtime.Value(2), runtime.Value(3), runtime.Value(4)})
 	}})
-	g.Add(runtime.NodeSpec{Name: "selected", Op: "", Pure: true, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		value0, err := runtime.Index(values["values"], runtime.Value(1))
-		if err != nil {
-			return runtime.Failed(err)
-		}
-		return runtime.Ready(value0)
-	}})
-	g.Add(runtime.NodeSpec{Name: "result", Op: "twice", Pure: false, Deps: []string{"selected"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return host.Call(ctx, "twice", []runtime.Value{values["selected"]})
-	}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"result"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return runtime.Ready(values["result"])
+	g.Add(runtime.NodeSpec{Name: "doubled", Pure: false, Deps: []string{"values"}, Gates: nil, Map: &runtime.MapSpec{Source: "values", Pure: false, Ops: []string{"twice"}, Eval: func(ctx context.Context, item runtime.Value, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "twice", []runtime.Value{item})
+	}}})
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"doubled"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return runtime.Ready(values["doubled"])
 	}, Output: true})
 	return g
 }

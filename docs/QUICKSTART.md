@@ -1,6 +1,6 @@
-# LIP Alpha 0.1 快速入门
+# LIP Alpha 0.4 快速入门
 
-LIP Alpha 0.1 需要 Go 1.27。
+LIP Alpha 0.4 需要 Go 1.27。
 
 查看当前编译器实现版本：
 
@@ -31,17 +31,28 @@ flow Hello(request: string) {
 go run ./cmd/lipc check hello.lip
 ```
 
-最短构建方式是直接把 `.lip` 文件作为参数，输出默认为同目录下的
-`Hello_generated.go`：
+像 `go build` 一样生成可执行文件：
+
+```bash
+go run ./cmd/lipc build hello.lip
+```
+
+像 `go run` 一样临时生成并运行：
+
+```bash
+go run ./cmd/lipc run hello.lip
+```
+
+需要审查或提交生成的 Go 时显式使用 `-emit-go`：
+
+```bash
+go run ./cmd/lipc build -emit-go -o hello_generated.go hello.lip
+```
+
+直接传 `.lip` 文件仍保留为生成源码的兼容简写：
 
 ```bash
 go run ./cmd/lipc hello.lip
-```
-
-生成 Go：
-
-```bash
-go run ./cmd/lipc build -o hello_generated.go hello.lip
 ```
 
 如果已经安装命令，也可以省略 `go run ./cmd/lipc`：
@@ -130,11 +141,12 @@ go run ./cmd/lipc examples/host_adapter/flow.lip \
 go run ./examples/host_adapter
 ```
 
-完整示例见 [examples/host_adapter](examples/host_adapter)。
+完整示例见 [examples/host_adapter](../examples/host_adapter)。
 
 ## 5. 自动调度与有限并行
 
-默认的 `Run` 会自动调度独立纯节点。只有明确标记为纯操作的节点才会并行：
+默认的 `Run` 会自动调度独立纯节点和只读节点。只有明确标记为纯/只读的操作
+才具备并行资格：
 
 ```go
 value, trace, err := hostflow.Run(ctx, host, inputs)
@@ -148,3 +160,23 @@ value, trace, err := hostflow.RunParallel(ctx, host, inputs, 2)
 
 普通 `host.Register` 操作保持顺序执行；严格基准模式使用
 `hostflow.RunSequential(...)`。
+
+## 6. 动态 Map
+
+Alpha 0.4 支持受限列表推导式：
+
+```lip
+fn twice(x: number) { return x * 2 }
+
+flow MapNumbers(input: any) {
+    values = [1, 2, 3]
+    doubled = [twice(x) for x in values]
+    return doubled
+}
+```
+
+Map 的输入必须是 Go slice 或 array，输出保持输入顺序。`RunSequential`
+逐个处理；`Run` 和 `RunParallel` 对纯 Map 元素使用调用方提供的并发上限。
+Map 不引入持久状态、反馈或事件语义。完整边界见
+[ALPHA-0.2-SPEC.md](ALPHA-0.2-SPEC.md)、[ALPHA-0.3-SPEC.md](ALPHA-0.3-SPEC.md)
+和 [ALPHA-0.4-SPEC.md](ALPHA-0.4-SPEC.md)。

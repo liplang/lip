@@ -1,0 +1,4 @@
+flow RetryFetch(input: string) {
+    result = retry(fetch(input), 3)
+    return result
+}

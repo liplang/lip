@@ -1,0 +1,5 @@
+flow Counter(input: number) {
+    count = state(0)
+    doubled = count * 2
+    return doubled + input
+}

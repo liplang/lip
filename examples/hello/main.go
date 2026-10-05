@@ -10,8 +10,11 @@ import (
 	"lipalpha/runtime"
 )
 
-func sampleInput(typ string) runtime.Value {
+func sampleInput(typ string, index int) runtime.Value {
 	raw := os.Getenv("LIP_INPUT")
+	if len(os.Args) > index+1 {
+		raw = os.Args[index+1]
+	}
 	if raw == "" {
 		if typ == "number" {
 			return runtime.Value(float64(1))
@@ -55,6 +58,44 @@ func checkInputs(inputs map[string]runtime.Value) error {
 	return nil
 }
 
+type Instance struct{ engine *runtime.Instance }
+
+func NewInstance(host runtime.Host, inputs map[string]runtime.Value) (*Instance, error) {
+	if err := checkInputs(inputs); err != nil {
+		return nil, err
+	}
+	graph := buildGraph(host)
+	return &Instance{engine: graph.NewInstance(host, inputs)}, nil
+}
+
+func (i *Instance) Tick(ctx context.Context, inputs map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error) {
+	if i == nil || i.engine == nil {
+		return nil, nil, fmt.Errorf("nil flow instance")
+	}
+	return i.engine.Tick(ctx, inputs)
+}
+
+func (i *Instance) SetState(name string, value runtime.Value) error {
+	if i == nil || i.engine == nil {
+		return fmt.Errorf("nil flow instance")
+	}
+	return i.engine.SetState(name, value)
+}
+
+func (i *Instance) State(name string) (runtime.Value, bool) {
+	if i == nil || i.engine == nil {
+		return nil, false
+	}
+	return i.engine.State(name)
+}
+
+func (i *Instance) TickCount() uint64 {
+	if i == nil || i.engine == nil {
+		return 0
+	}
+	return i.engine.TickCount()
+}
+
 func Run(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error) {
 	if err := checkInputs(inputs); err != nil {
 		return nil, nil, err
@@ -80,14 +121,14 @@ func main() {
 	ctx := context.Background()
 	host := runtime.DefaultHost()
 	inputs := map[string]runtime.Value{}
-	inputs["request"] = sampleInput("string")
+	inputs["request"] = sampleInput("string", 0)
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
 		fmt.Println("error:", err)
 		for _, event := range trace {
 			fmt.Printf("%s %s %s\n", event.Node, event.Status, event.Reason)
 		}
-		return
+		os.Exit(1)
 	}
 	fmt.Println(value)
 }
