@@ -35,8 +35,117 @@ func TestHelloGraph(t *testing.T) {
 	}
 }
 
+func TestGeneratedMainUsesOnlyDeclaredInputs(t *testing.T) {
+	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) {
+		greeting = "Hello, " + request
+		return greeting
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := compiler.GenerateGo(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"sampleInput", "LIP_INPUT", `runtime.Value("World")`, "float64(1)"} {
+		if strings.Contains(code, forbidden) {
+			t.Fatalf("generated main contains implicit input %q", forbidden)
+		}
+	}
+	for _, required := range []string{"parseCLIInputs", `usage: %s <request:string>`, "os.Args[1:]"} {
+		if !strings.Contains(code, required) {
+			t.Fatalf("generated main is missing strict input parser fragment %q", required)
+		}
+	}
+}
+
+func TestDependencyDeclarationsArePreserved(t *testing.T) {
+	graph, err := compiler.ParseAndBuild(`require python "numpy>=1.26"
+		require go "github.com/acme/adapter"
+		require host "load_profile"
+		flow Scientific(values: any) { return values }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Dependencies) != 3 || graph.Dependencies[0].Kind != "python" || graph.Dependencies[0].Spec != "numpy>=1.26" {
+		t.Fatalf("dependencies = %#v", graph.Dependencies)
+	}
+	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: "scientific", IncludeMain: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"func RequiredDependencies()", `Kind: "python", Spec: "numpy>=1.26"`, `Kind: "go", Spec: "github.com/acme/adapter"`, `Kind: "host", Spec: "load_profile"`} {
+		if !strings.Contains(code, fragment) {
+			t.Fatalf("generated library is missing dependency metadata %q", fragment)
+		}
+	}
+	mainCode, err := compiler.GenerateGo(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mainCode, "runtime.NewProcessHost") || !strings.Contains(mainCode, "runtime.NewPythonHost") || !strings.Contains(mainCode, "host/go dependencies require a Go host program") {
+		t.Fatal("python dependency did not activate the standalone worker")
+	}
+	if _, err := compiler.ParseAndBuild(`require python "numpy"
+		require python "numpy"
+		flow Duplicate() { return 1 }`); err == nil {
+		t.Fatal("expected duplicate dependency error")
+	}
+	if _, err := compiler.ParseAndBuild(`requires python "numpy"
+		flow Legacy() { return 1 }`); err == nil || !strings.Contains(err.Error(), "require") {
+		t.Fatalf("expected singular require diagnostic, got %v", err)
+	}
+}
+
+func TestBindingErrorsAreCompileErrors(t *testing.T) {
+	for _, source := range []string{
+		`flow Missing() { return missing }`,
+		"flow Duplicate() { value = 1\n value = 2\n return value }",
+		"flow Escaped() { when true { value = 1\n }\n return value }",
+	} {
+		if _, err := compiler.ParseAndBuild(source); err == nil {
+			t.Fatalf("expected compile error for %q", source)
+		}
+	}
+	if _, err := compiler.ParseAndBuild("flow NoOutput(value: number) { doubled = value * 2 }"); err == nil {
+		t.Fatal("expected a Flow without return to be rejected")
+	}
+}
+
+func TestDottedHostCallBuilds(t *testing.T) {
+	graph, err := compiler.ParseAndBuild(`require python "math"
+	flow Python(input: number) {
+		root = math.sqrt(input)
+		return root
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := compiler.GenerateGo(graph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(code, `host.Call(ctx, "math.sqrt"`) {
+		t.Fatalf("generated code did not preserve dotted operation: %s", code)
+	}
+}
+
+func TestExternalCallsNeedDependencyDeclarations(t *testing.T) {
+	if _, err := compiler.ParseAndBuild(`flow MissingPython(input: number) {
+		return math.sqrt(input)
+	}`); err == nil || !strings.Contains(err.Error(), `require python "math"`) {
+		t.Fatalf("expected missing Python dependency diagnostic, got %v", err)
+	}
+	if _, err := compiler.ParseAndBuild(`flow MissingHost(input: string) {
+		return fetch(input)
+	}`); err == nil || !strings.Contains(err.Error(), `require host "fetch"`) {
+		t.Fatalf("expected missing Host dependency diagnostic, got %v", err)
+	}
+}
+
 func TestEffectCallStatement(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Log(value: string) {
+	graph, err := compiler.ParseAndBuild(`require host "print"
+	flow Log(value: string) {
         print(value)
         return value
     }`)

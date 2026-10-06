@@ -8,6 +8,13 @@ import (
 	"lipalpha/runtime"
 )
 
+type Dependency struct {
+	Kind string
+	Spec string
+}
+
+func RequiredDependencies() []Dependency { return []Dependency{{Kind: "host", Spec: "load_profile"}} }
+
 func buildGraph(host runtime.Host) *runtime.Graph {
 	g := runtime.NewGraph()
 	g.Add(runtime.NodeSpec{Name: "left", Op: "load_profile", Pure: false, Deps: []string{"path"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {

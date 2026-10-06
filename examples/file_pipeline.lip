@@ -1,4 +1,9 @@
 # Prototype 22: parse -> validate -> transform -> save.
+require host "read_file"
+require host "parse_document"
+require host "validate_document"
+require host "transform_document"
+require host "save_document"
 flow FilePipeline(path: string) {
     raw = read_file(path)
     document = parse_document(raw)

@@ -1,4 +1,8 @@
 # Prototypes 6 and 7: independent consumers followed by a join.
+require host "extract_title"
+require host "extract_text"
+require host "extract_links"
+require host "combine"
 flow FanoutFanin(page: any) {
     title = extract_title(page)
     text = extract_text(page)

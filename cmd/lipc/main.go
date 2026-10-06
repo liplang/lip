@@ -54,6 +54,9 @@ func check(args []string) {
 		fail(err)
 	}
 	fmt.Printf("ok: flow %s, %d graph nodes\n", graph.Flow, len(graph.Nodes))
+	for _, dependency := range graph.Dependencies {
+		fmt.Printf("require: %s:%s\n", dependency.Kind, dependency.Spec)
+	}
 }
 
 func build(args []string) {
@@ -311,14 +314,14 @@ func help(args []string) {
 	case "version":
 		fmt.Println("lipc version prints the compiler version.")
 	case "check":
-		fmt.Println("lipc check file.lip validates syntax, names, types and graph structure.")
+		fmt.Println("lipc check file.lip validates syntax, names, types, dependencies and graph structure.")
 	case "build":
 		fmt.Println("lipc build file.lip compiles a standalone executable.")
 		fmt.Println("Use -o path to choose the executable; use -emit-go or a .go output path to emit source.")
 		fmt.Println("Library generation: lipc build -emit-go -no-main -package name -o flow.go file.lip")
 	case "run":
 		fmt.Println("lipc run file.lip compiles a temporary executable and runs it.")
-		fmt.Println("Arguments after -- are passed to the generated program.")
+		fmt.Println("Arguments after -- are passed in Flow parameter order; missing or extra arguments fail.")
 	default:
 		usage()
 	}

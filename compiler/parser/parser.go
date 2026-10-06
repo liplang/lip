@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"lipalpha/compiler/ast"
 	"lipalpha/compiler/token"
@@ -16,6 +17,17 @@ type Parser struct {
 func New(tokens []token.Token) *Parser { return &Parser{tokens: tokens} }
 
 func (p *Parser) Parse() (*ast.Program, error) {
+	if p.peek().Kind == token.Ident && p.peek().Text == "requires" {
+		return nil, p.errorf(p.peek(), "unknown dependency directive %q; use singular %q", p.peek().Text, "require")
+	}
+	var dependencies []ast.Dependency
+	for p.peek().Kind == token.Require {
+		dependency, err := p.parseDependency()
+		if err != nil {
+			return nil, err
+		}
+		dependencies = append(dependencies, dependency)
+	}
 	var functions []*ast.Function
 	for p.peek().Kind == token.Fn {
 		fn, err := p.parseFunction()
@@ -31,7 +43,31 @@ func (p *Parser) Parse() (*ast.Program, error) {
 	if p.peek().Kind != token.EOF {
 		return nil, p.errorf(p.peek(), "expected end of file")
 	}
-	return &ast.Program{Functions: functions, Flow: flow}, nil
+	return &ast.Program{Functions: functions, Flow: flow, Dependencies: dependencies}, nil
+}
+
+func (p *Parser) parseDependency() (ast.Dependency, error) {
+	kw, err := p.expect(token.Require)
+	if err != nil {
+		return ast.Dependency{}, err
+	}
+	kind, err := p.expect(token.Ident)
+	if err != nil {
+		return ast.Dependency{}, err
+	}
+	switch kind.Text {
+	case "python", "go", "host":
+	default:
+		return ast.Dependency{}, p.errorf(kind, "unknown dependency kind %q (want python, go or host)", kind.Text)
+	}
+	spec, err := p.expect(token.String)
+	if err != nil {
+		return ast.Dependency{}, err
+	}
+	if strings.TrimSpace(spec.Text) == "" {
+		return ast.Dependency{}, p.errorf(spec, "dependency spec cannot be empty")
+	}
+	return ast.Dependency{Kind: kind.Text, Spec: spec.Text, Pos: kw.Pos}, nil
 }
 
 func (p *Parser) parseFunction() (*ast.Function, error) {
@@ -334,7 +370,7 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 	for {
 		switch p.peek().Kind {
 		case token.LParen:
-			ident, ok := expr.(*ast.IdentExpr)
+			name, ok := callableName(expr)
 			if !ok {
 				return nil, p.errorf(p.peek(), "only a function name can be called")
 			}
@@ -355,7 +391,7 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 					}
 				}
 			}
-			expr = &ast.CallExpr{Name: ident.Name, Args: args, Pos: ident.Pos}
+			expr = &ast.CallExpr{Name: name, Args: args, Pos: tPos(expr)}
 		case token.Dot:
 			p.next()
 			field, err := p.expect(token.Ident)
@@ -376,6 +412,24 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 		default:
 			return expr, nil
 		}
+	}
+}
+
+// callableName accepts both ordinary Host names and dotted Python operation
+// names. Field expressions remain value expressions everywhere else; a field
+// chain is treated as a callable only when it is immediately followed by '('.
+func callableName(expr ast.Expr) (string, bool) {
+	switch value := expr.(type) {
+	case *ast.IdentExpr:
+		return value.Name, true
+	case *ast.FieldExpr:
+		prefix, ok := callableName(value.Object)
+		if !ok {
+			return "", false
+		}
+		return prefix + "." + value.Name, true
+	default:
+		return "", false
 	}
 }
 

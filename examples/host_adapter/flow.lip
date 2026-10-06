@@ -1,3 +1,5 @@
+require host "load_profile"
+
 flow ParallelProfiles(path: string) {
     left = load_profile(path)
     right = load_profile(path)

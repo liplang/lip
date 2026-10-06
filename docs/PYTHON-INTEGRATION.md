@@ -1,15 +1,181 @@
 # Python 科学计算与进程集成设计
 
 Python 是 LIP 的 Host 能力，不是 LIP 编译器的语言依赖。LIP 负责依赖图、
-Logical Tick、取消和调度；Python 负责 NumPy、SciPy、Pandas、PyTorch 以及
-现有科学计算生态。这样即使没有安装 Python，普通 `.lip` 文件仍然可以被检查、
-编译和运行。
+Logical Tick、取消和调度；Python 负责 Worker 环境中安装的科学计算、数据处理、
+机器学习和用户自定义库。这样即使没有安装 Python，普通 `.lip` 文件仍然可以被
+检查、编译和运行。
 
 这份文档比较不同的集成路线。结论是有条件的：先采用可替换的进程协议，只有
 基准数据证明进程边界已经成为瓶颈时，才考虑更紧的耦合。
 
-当前 Alpha 0.4 实现只有 Go `runtime.Host` 边界，还没有 `ProcessHost`、Python
-Worker 或 Arrow 数据面；下面的 P0–P4 是设计和验收顺序，不是已经发布的 API。
+当前实现已经完成 P0/P1 的本机控制面：`runtime.PythonWorker`（也以
+`runtime.ProcessHost` 别名提供）用 `os/exec` 管理一个长期运行的 Python Worker，
+并通过 `runtime.Host.RegisterPython*` 把它接入 LIP。Worker 支持握手、request ID、
+deadline、有限队列、协作取消、进程回收/自动重启和 Python 异常返回。P2 的文件 blob
+基线已经开始，Arrow/共享内存评估以及句柄的容量/回收治理、P3 的 Worker
+pool/session/Socket 仍然是后续阶段；基础对象句柄操作已经可用。
+
+路线可以按四个阶段阅读：
+
+| 阶段 | 状态 | 主要工作 | 进入下一阶段的依据 |
+| --- | --- | --- | --- |
+| P0 | 已完成 | JSONL 握手、request ID、错误、超时、取消、重启、背压和协议损坏处理 | 控制面测试稳定通过 |
+| P1 | 已完成 | `ProcessHost`、通用 dotted call、动态导入、效果映射、示例和基准入口 | 能在真实 Flow 中调用已安装库并取回结果 |
+| P2 | 进行中 | 文件支持的只读 blob、`.npy` 映射、校验和、大小/映射/对象句柄配额；随后补 Arrow/共享内存评估、空闲回收、泄漏诊断和复杂对象生命周期 | JSON 复制成为 p95 或峰值内存瓶颈，且数据面基准可复现 |
+| P3 | 后续 | Worker pool、session 版本与故障重建、并发配额、Unix socket/gRPC 和流式进度 | 单 Worker 排队或跨机/协议演进需求被真实工作负载证实 |
+| P4 | 评估项 | cgo/嵌入 CPython 的性能、取消、崩溃隔离和 ABI 对比 | 基准证明进程边界是主要瓶颈，并接受更高耦合成本 |
+
+P2 的对象句柄基础和大小/数量配额已经落地，但不代表 P2 完成：目前句柄保存在
+单个 Worker session 中，仍需要空闲超时、主动回收、泄漏诊断和故障重建策略。
+
+### P2 当前选择：文件支持的只读数据句柄
+
+P2 不直接把 POSIX shared memory 当作默认方案。共享内存的吞吐很好，但跨平台
+清理、崩溃后的孤儿段、所有权和同步协议都更复杂；Arrow 适合有稳定 schema 的
+表格和列式数据，但会引入更大的 Go/Python 依赖面。当前先采用本机文件支持的
+只读数据句柄作为可靠基线，再用基准决定是否增加 Arrow 或共享内存：
+
+```go
+blob, err := worker.PutBlob(ctx, bytes, runtime.PythonBlobMetadata{
+    DType: "<f8", Shape: []int64{rows, columns},
+})
+result := worker.Call(ctx, "numpy.sum", []runtime.Value{blob})
+err = worker.ReleaseBlob(ctx, blob)
+```
+
+`PutBlob`/`PutFile` 使用 Worker 专属目录、0600 临时文件、写入后的 `fsync`、同目录
+原子重命名和 SHA-256 描述符。Python 首次打开时检查路径不能逃出数据目录、文件大小
+和摘要，然后以只读 mmap 建立 NumPy view；控制面只发送文件名、大小、摘要、格式、
+dtype、shape 和 order。`Format: "npy"` 使用 `numpy.load(..., mmap_mode="r",
+allow_pickle=False)`，适合已有 `.npy` 文件；默认 `raw` 格式适合 Go 直接产生的
+二进制数组。句柄释放会关闭映射并删除文件，Worker 关闭时会清理它自己创建的目录。
+
+这个基线的可靠性边界是明确的：它要求 Go 和 Python Worker 位于同一台机器并共享
+文件系统，首次打开需要一次 SHA-256 扫描，数据文件不会通过 JSONL 传输。它不承诺
+跨机器、跨容器挂载或无限期缓存；这正是 P3 传输升级和 P2 句柄治理的输入。只有在
+真实基准显示文件映射仍是瓶颈时，才增加 Arrow/共享内存，并保持同一个逻辑句柄协议。
+
+## 当前可运行的 P1 入口
+
+Go Host 启用 Python fallback，LIP 中的 dotted operation 原样传到 Worker；需要
+稳定领域接口时仍可以额外映射 Host 名称。编译器不需要安装 Python，也不解析
+Python 代码：
+
+```go
+worker, err := runtime.NewProcessHost(ctx, runtime.ProcessHostConfig{})
+if err != nil { /* Python 不可用或握手失败 */ }
+defer worker.Close()
+
+host := runtime.NewPythonHost(worker)
+value, trace, err := scientific.Run(ctx, host, map[string]runtime.Value{
+    "values": []runtime.Value{1, 2, 3, 4, 5},
+})
+```
+
+对应的 LIP 仍是普通 Host 调用：
+
+```lip
+require python "numpy>=1.26"
+require python "pandas"
+
+flow Scientific(values: any) {
+    total = numpy.sum(values)
+    average = numpy.mean(values)
+    raw_stats = pandas.describe(values)
+    stats = python.to_json(raw_stats)
+    return [total, average, stats]
+}
+```
+
+仓库中的完整可运行样例是 [`examples/python`](../examples/python)，执行
+`GOCACHE=/tmp/lip-gocache go run ./examples/python` 会启动真实 Python 子进程，
+调用 NumPy/Pandas，并把 JSON 可表示的结果和 Trace 取回 Go。没有 NumPy/Pandas 时，
+Worker 仍提供 `sum`、`mean`、`dot` 和 `matrix_multiply` 等标准库基线操作；生产
+部署应在启动检查中确认所需能力。内置 Worker 默认支持动态导入所有已安装的 Python
+模块，不维护一个需要逐项更新的库名单；部署方若需要权限收紧，可以配置
+`AllowedModules`/`DeniedModules`，让文件、网络和命令类模块由显式策略决定。
+
+这里的“所有库”指 Worker 所使用的 Python 环境中已安装、并且能通过模块路径取得
+的 Python API。LIP 不负责替用户安装依赖，也不会把每个包复制成一层 Go 绑定；升级
+或替换库只需要更新该环境。`python.call`、`python.to_json`、`python.release` 和
+`python.module_available` 属于 Worker 控制面，在设置 `AllowedModules` 后仍然可用，
+因此受限部署仍能管理句柄和检查可选依赖。默认允许所有安装模块意味着 Python 子进程
+拥有自身的操作系统权限；生产环境应使用专用虚拟环境、容器或外部 sandbox，并按需
+设置模块策略。
+
+文件头的 `require python "导入根或版本范围"` 是显式的依赖声明（例如 `sklearn`
+是 `scikit-learn` 的导入根）。`require go "模块"`
+用于说明承载生成包的 Go 程序需要哪个 Go module，`require host "操作名"` 用于
+说明必须由宿主注册哪个 Host operation。`lipc check` 会打印这些声明，库模式的
+`RequiredDependencies()` 会把它们返回给部署代码；声明不会联网安装、不会自动
+修改解释器，也不会把一个固定库白名单写进编译器。Alpha 0.4 现在要求 dotted
+Python operation 有匹配的 `require python`（或明确的 `require host`），bare Host
+operation 有 `require host`；缺声明在 `lipc check` 阶段失败。这样通用库调用不受
+白名单限制，但源文件仍然完整地说明运行环境。
+
+### 通用库调用，而不是逐个内置库
+
+Worker 的调用格式是 `module.submodule.callable`，所以新增库不需要修改 Go 或
+Worker 的代码：
+
+```go
+host.RegisterPythonPure("relu", worker, "torch.nn.functional.relu")
+host.RegisterPythonPure("standardize", worker, "sklearn.preprocessing.scale")
+host.RegisterPythonPure("random_sample", worker, "random.random")
+host.RegisterPythonReadOnly("transformer_log_level", worker, "transformers.utils.logging.get_verbosity")
+```
+
+同样的方式可以直接调用 `networkx.*`、`sympy.*`、`statsmodels.*`、
+`QuantLib.*`、`zipline.*` 以及用户自己的包；Worker 不需要知道这些包的名字。
+
+这些 Python 包的导入名分别是 `matplotlib`、`sklearn`、`xgboost`、`torch`、`jax`、
+`equinox`、`keras`、`cv2`、`transformers` 和 `pytorch_lightning`（新版 Lightning
+也可能使用 `lightning`）。只要包安装在 Worker 使用的同一个 Python 环境中，动态
+调用即可工作；包不存在时，结果会返回带 operation 名的 Python 异常。
+
+部署方可以收紧模块策略，而不改变 LIP Flow：
+
+```go
+worker, err := runtime.NewProcessHost(ctx, runtime.ProcessHostConfig{
+    AllowedModules: []string{"torch", "transformers", "sklearn"},
+})
+```
+
+`AllowedModules` 为空表示允许安装的模块，`DeniedModules` 可按部署需要增加拒绝
+规则；填写 `AllowedModules` 后则切换为 allowlist。`AllowAnyModule` 用于明确表达
+不应用任何模块规则的专用 Worker。这样库的扩展速度和权限边界可以分别治理。
+
+通用 dotted call 解决的是“调用函数并取回 JSON 结果”。不可直接 JSON 化的对象会
+留在 Worker 的 session 中并返回句柄；可以用 `python.call(handle, method, args)`
+继续调用，用 `python.to_json(value)` 显式序列化，最后用 `python.release(handle)`
+释放。大 Tensor、权重和图像仍需要独立数据面；句柄的池化、空闲回收和跨 Worker
+重建属于 P2/P3，不会把每个 Python 库逐个写进 LIP 核心。
+
+常见库的导入根和第一阶段适配边界如下：
+
+| 能力 | Python 导入根 | 直接可取回的结果 | 后续需要句柄/数据面的对象 |
+| --- | --- | --- | --- |
+| 数值与随机 | `math`、`random`、`statistics` | 标量、列表、统计量 | 随机生成器状态 |
+| 符号与量化 | `sympy`、`statsmodels`、`QuantLib`、`zipline` | 表达式序列化结果、统计表 | 定价器、回测器、长生命周期模型 |
+| 图与数据 | `pandas`、`matplotlib` | `python.to_json` 后的 records、描述统计、图表数据 | DataFrame、Figure、Axes |
+| 传统机器学习 | `sklearn`、`xgboost` | 预测数组、指标、特征表 | estimator、Booster、训练缓存 |
+| 深度学习 | `torch`、`jax`、`equinox`、`keras`、`lightning` | `python.to_json` 后的标量、数组、预测结果 | Tensor、Module、Optimizer、Checkpoint |
+| 视觉与语言 | `cv2`、`transformers`、`pytorch_lightning` | 关键点、标签、token、分类结果 | 图像 buffer、Tokenizer、模型权重 |
+
+表中的“后续”描述的是值传输方式，不是库白名单。库本身已经可以通过 dotted
+operation 导入；不可 JSON 化的返回值会变成显式句柄，而不是失效的 Python 指针。
+
+Go 侧还可以调用 `CallSession` 或使用 `RegisterPythonSession` 显式传递 session
+标签。session 是 Adapter 资源元数据，不会自动变成 LIP State。
+
+例如，Tensor 计算可以保持在 Python Worker 内，只在最后一步取回 JSON：
+
+```lip
+tensor = torch.tensor(values)
+relu = torch.nn.functional.relu(tensor)
+result = python.to_json(relu)
+return result
+```
 
 ## 结论先行：推荐的基本形态
 
@@ -127,6 +293,14 @@ Go Adapter 是边界的唯一所有者：它编码 `runtime.Value`，维护 requ
 {"id":"42","ok":false,"error":{"type":"ValueError","message":"singular matrix"}}
 ```
 
+对象句柄是普通 JSON 对象，不能脱离对应 session 使用：
+
+```json
+{"id":"43","op":"torch.tensor","args":[[[-1,2]]],"session":"default"}
+{"id":"44","op":"python.call","args":[{"$python_handle":"0"},"tolist",[]],"session":"default"}
+{"id":"45","op":"python.release","args":[{"$python_handle":"0"}],"session":"default"}
+```
+
 协议必须满足：
 
 - `id` 在一个 Worker 生命周期内唯一，响应必须回到同一个请求；
@@ -135,11 +309,12 @@ Go Adapter 是边界的唯一所有者：它编码 `runtime.Value`，维护 requ
   避免一个失控任务污染后续请求；
 - 请求队列、单 Worker 并发和 Worker 池大小都有上限，超过上限返回背压错误；
 - 启动、退出、协议损坏、JSON 解码和 Python 异常都要带 operation/request ID；
-- `session` 只能由 Go Adapter 创建和销毁，不能让 Python 任意改变 LIP State；
+- `session` 标签只能由 Go Adapter 传递，不能让 Python 任意改变 LIP State；完整的
+  session 创建、回收和对象句柄生命周期属于 P2/P3；
 - 协议版本、Python 包版本和能力列表可在启动握手中报告。
 
-第一版只传 JSON 标量、列表和对象。大数组不应长期复制成 JSON，而应通过独立的
-数据面携带 `dtype`、`shape`、字节数、校验和和释放责任。优先顺序是：
+第一版控制面传 JSON 标量、列表、对象和 session 句柄。大数组不应长期复制成 JSON，
+而应通过独立的数据面携带 `dtype`、`shape`、字节数、校验和和释放责任。优先顺序是：
 
 1. 小规模 JSON，作为协议正确性基线；
 2. 本机临时 `.npy`/memory-mapped 文件，作为低依赖的大数组方案；
@@ -180,17 +355,20 @@ Worker 不得任意执行宿主命令，也不得绕过 Runtime 的取消和权�
 
 ## 分阶段实现和退出条件
 
-- **P0：协议基线。** 用 Python 标准库写 echo、失败和延迟 Worker；测试 request
-  ID、超时、取消、重启、背压、stderr 日志和协议损坏。记录冷启动与长驻 Worker
-  的 p50/p95 延迟。
-- **P1：`ProcessHost`。** Go 侧用 `os/exec` 启动长期 Worker，通过 stdin/stdout
-  JSONL 提供 operation 注册、Worker 池、有限队列、deadline、协作取消和故障替换；
-  默认按 ExternalWrite 处理，只有明确声明的读操作才允许并发，写操作显式标记。
-- **P2：数据面。** 先加入 memory-mapped `.npy`；用真实矩阵、DataFrame 和
-  模型输入比较 JSON、映射文件与 Arrow 的复制次数、p95 延迟和峰值内存。
-- **P3：socket/gRPC 与 session。** 只有当多路复用、跨机部署或 schema 演进
-  的需求真实出现时，才把 JSONL 控制面替换或扩展为 Unix socket/gRPC，并加入
-  session 初始化、模型复用、能力协商和流式进度。
+- **P0/P1（已完成控制面）：** 内置标准库 Worker 提供 echo、失败、延迟和数值
+  基线；测试覆盖 request ID、超时、取消、重启、有限队列、协议握手错误和异常
+  返回。`ProcessHost` 通过 `os/exec` 长期运行 stdin/stdout JSONL Worker，Host
+  注册时显式声明 Pure/ReadOnly/ExternalWrite。`runtime/python_benchmark_test.go`
+  提供 cold-start 与 warm-call 基准；发布前需要用目标机器运行它并记录 p50/p95，
+  不用未经测量的数字作承诺。
+- **P2（进行中）：数据面和句柄治理。** 文件支持的只读 raw blob、typed NumPy view、
+  `.npy` 映射和大小/数量配额已经有可靠性基线；下一步用真实矩阵、DataFrame 和模型
+  输入比较 JSON、文件映射与 Arrow/共享内存的复制次数、p95 延迟和峰值内存，同时补齐
+  空闲回收、泄漏诊断和跨 Worker 重建。
+- **P3：多 Worker、session 与传输升级。** 先测量单 Worker 排队，再决定 Worker
+  pool；为 session 增加版本和故障重建语义。只有多路复用、跨机部署或 schema 演进
+  成为真实需求时，才引入 Unix Domain Socket/gRPC 和流式进度；Gob 不作为跨语言默认
+  协议。
 - **P4：嵌入评估。** 以可重复基准证明 IPC、数据复制或 Worker 数量是瓶颈，且
   能接受 GIL、ABI、崩溃和取消限制后，才做 CPython/cgo 原型。原型必须是可选
   Adapter，不能改变 LIP 编译器的安装和构建要求。
@@ -200,7 +378,8 @@ Effect、Tick 和取消语义不应改变。
 
 ## 暂不做的事情
 
-- 不在 LIP 语法中直接 `import` 任意 Python 包；
+- 不把 Python/Go `import` 执行语义和包管理塞进 LIP 核心；`require` 只提供可审计
+  的依赖元数据，库调用通过 Python Host 的通用 dotted operation 完成；
 - 不让 Python Worker 反向驱动隐式 Tick、绕过 State 或持有无界后台任务；
 - 不把 JSON 数组协议宣传成高性能张量通道；
 - 不以“嵌入更快”代替真实基准、故障测试和部署评估；

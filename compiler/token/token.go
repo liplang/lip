@@ -18,6 +18,7 @@ const (
 	If
 	Then
 	Else
+	Require
 	Assign
 	LParen
 	RParen
@@ -58,7 +59,7 @@ func (k Kind) String() string {
 	names := map[Kind]string{
 		EOF: "EOF", Ident: "identifier", Number: "number", String: "string",
 		True: "true", False: "false", Flow: "flow", Fn: "fn", Return: "return", When: "when",
-		If: "if", Then: "then", Else: "else", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
+		If: "if", Then: "then", Else: "else", Require: "require", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
 		LBrace: "{", RBrace: "}", LBracket: "[", RBracket: "]", Comma: ",", Colon: ":", Dot: ".", Plus: "+", Minus: "-", Star: "*", Slash: "/",
 		Equal: "==", NotEqual: "!=", Greater: ">", GreaterEqual: ">=", Less: "<", LessEqual: "<=",
 		And: "&&", Or: "||",

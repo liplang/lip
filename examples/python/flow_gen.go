@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"lipalpha/runtime"
 )
@@ -14,39 +13,33 @@ type Dependency struct {
 	Spec string
 }
 
-func RequiredDependencies() []Dependency { return []Dependency{} }
-
-func parseCLIInputs(args []string) (map[string]runtime.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("usage: %s <request:string>", os.Args[0])
-	}
-	inputs := map[string]runtime.Value{}
-	raw0 := args[0]
-	inputs["request"] = raw0
-	return inputs, nil
+func RequiredDependencies() []Dependency {
+	return []Dependency{{Kind: "python", Spec: "numpy"}, {Kind: "python", Spec: "pandas"}}
 }
 
 func buildGraph(host runtime.Host) *runtime.Graph {
 	g := runtime.NewGraph()
-	g.Add(runtime.NodeSpec{Name: "greeting", Op: "", Pure: true, Deps: []string{"request"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		value0, err := runtime.Binary("+", runtime.Value("Hello, "), values["request"])
-		if err != nil {
-			return runtime.Failed(err)
-		}
-		return runtime.Ready(value0)
+	g.Add(runtime.NodeSpec{Name: "total", Op: "numpy.sum", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "numpy.sum", []runtime.Value{values["values"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"greeting"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
-		return runtime.Ready(values["greeting"])
+	g.Add(runtime.NodeSpec{Name: "average", Op: "numpy.mean", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "numpy.mean", []runtime.Value{values["values"]})
+	}})
+	g.Add(runtime.NodeSpec{Name: "raw_stats", Op: "pandas.describe", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "pandas.describe", []runtime.Value{values["values"]})
+	}})
+	g.Add(runtime.NodeSpec{Name: "stats", Op: "python.to_json", Pure: false, Deps: []string{"raw_stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return host.Call(ctx, "python.to_json", []runtime.Value{values["raw_stats"]})
+	}})
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"total", "average", "stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+		return runtime.Ready([]runtime.Value{values["total"], values["average"], values["stats"]})
 	}, Output: true})
 	return g
 }
 
 func checkInputs(inputs map[string]runtime.Value) error {
-	if _, ok := inputs["request"]; !ok {
-		return fmt.Errorf("missing flow input request")
-	}
-	if err := runtime.CheckType(inputs["request"], "string"); err != nil {
-		return fmt.Errorf("input request: %w", err)
+	if _, ok := inputs["values"]; !ok {
+		return fmt.Errorf("missing flow input values")
 	}
 	return nil
 }
@@ -108,25 +101,4 @@ func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runti
 		return nil, nil, err
 	}
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
-}
-
-func main() {
-	ctx := context.Background()
-	host := runtime.DefaultHost()
-	inputs := map[string]runtime.Value{}
-	parsed, err := parseCLIInputs(os.Args[1:])
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-	inputs = parsed
-	value, trace, err := Run(ctx, host, inputs)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		for _, event := range trace {
-			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Node, event.Status, event.Reason)
-		}
-		os.Exit(1)
-	}
-	fmt.Println(value)
 }

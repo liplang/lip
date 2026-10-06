@@ -83,6 +83,8 @@ host.Register("write_file", writeFile)
 | 能力 | Alpha 0.4 状态 |
 | --- | --- |
 | `flow`、表达式 `fn`、单赋值绑定 | 支持，带名称、作用域和类型检查 |
+| Flow 输入/输出契约 | 支持，入口参数严格解析，至少一个 `return`，不注入默认值 |
+| `require` 依赖头 | 支持 Python/Go/Host 元数据、检查输出和生成库查询 |
 | `when` 执行门控、`if` 值选择 | 支持，语义明确区分 |
 | Dynamic Map | 支持运行时展开、稳定顺序、有界并发 |
 | 持久 Flow / State / Tick | 支持 `NewInstance`、`Tick`、`SetState`、Trace |
@@ -90,6 +92,7 @@ host.Register("write_file", writeFile)
 | Retry / Feedback | 支持有明确上限的 Runtime policy |
 | Cancellation | 支持 Context、Await、Map、Retry、Feedback 传播 |
 | Effect / Ordering | 支持 Host 效果分类和 `NodeSpec.After` |
+| Python Worker Adapter | 支持常驻 JSONL Worker、动态 Python 库调用、超时取消和重启 |
 | 普通 `for` / `while`、事件/流 DSL | 尚未进入 Alpha 语言核心 |
 
 每个里程碑的边界都有单独规范：
@@ -136,6 +139,11 @@ lipc version
 `lipc build` 默认编译可执行文件；`-emit-go` 或以 `.go` 结尾的输出路径
 生成 Go 源码。旧的 `lipc file.lip` 简写仍然保留，用于直接生成源码。
 
+可执行入口只接受 Flow 声明的参数，按声明顺序绑定；缺少参数或多传参数都会失败。
+`string` 原样传递，`number` 必须是有限十进制数，`bool` 只能写 `true` 或 `false`，
+`any` 必须写成 JSON。编译器不会读取 `LIP_INPUT`，也不会注入 `World`、`1` 或
+`false` 之类的默认值，因此示例和生成程序的结果完全由源代码和输入决定。
+
 生成的库提供：
 
 ```go
@@ -143,7 +151,22 @@ Run(ctx, host, inputs)
 RunSequential(ctx, host, inputs)
 RunParallel(ctx, host, inputs, limit)
 NewInstance(host, inputs)
+RequiredDependencies()
 ```
+
+LIP 文件可以在头部显式记录外部依赖：
+
+```lip
+require python "numpy>=1.26"
+require python "pandas"
+require go "github.com/acme/adapter"
+require host "load_profile"
+```
+
+这些声明是检查和部署元数据，不会自动安装、导入或替换环境。`lipc check` 会
+显示依赖，生成库提供 `RequiredDependencies()`。Python Worker 仍按真实模块路径
+动态调用任意已安装库；Go 包由承载生成包的 Go 程序导入并注册 Host adapter。
+外部调用没有对应 `require` 声明会在检查阶段失败，避免源文件留下隐式能力。
 
 ## 持久 State 和 Logical Tick
 
@@ -170,20 +193,23 @@ State 初值在第一次 Tick 提交；后续 Tick 复用未受影响的纯节�
 
 ## Go Host 与 Python 路线
 
-LIP 不在语言中直接 import Go 或 Python。Python 科学计算通过 Host Adapter
+LIP 不在语言中执行 Go 或 Python `import`；需要的包可以用 `require` 元数据写在
+文件头。Python 科学计算通过 Host Adapter
 接入：
 
 ```text
-LIP node → Go Adapter → Python Worker → NumPy / SciPy / Pandas / PyTorch
+LIP node → Go Adapter → Python Worker → installed Python libraries
 ```
 
-规划中的保守第一步是长期运行的独立 Python Worker 和 JSON-lines 请求/响应协议。
-当前 Alpha 0.4 尚未提供 `ProcessHost`；Go
-负责 request ID、超时、取消、重启、背压和效果分类，Python 负责科学计算。
-具体实现形态是 Go 用 `os/exec` 启动一次 Python 子进程，让它常驻内存，通过
-stdin/stdout 管道传 JSONL；后续需要多路复用或独立连接时，再把传输换成 Unix
-Domain Socket。Gob 不作为 Go/Python 的跨语言协议首选，大数组通过 memory-mapped
-文件、Arrow 或共享内存传递，控制消息只携带句柄和形状等元数据。
+当前已经提供 `runtime.NewProcessHost`（`PythonWorker` 别名）和
+`runtime.NewPythonHost`：Go 用 `os/exec` 启动一次 Python
+子进程，让它常驻内存，通过 stdin/stdout 管道传 JSONL，并负责 request ID、超时、
+取消、重启、背压和效果分类，Python 负责科学计算。`examples/python` 展示了在
+LIP Flow 中调用 NumPy/Pandas 并取回结果；Worker 按 `module.submodule.callable`
+动态调用已安装的 Python 库，因此新增 PyTorch、JAX、Scikit-learn、Transformers
+等库不需要修改 LIP 核心。标准库 Worker 也提供 `sum`、`mean`、`dot` 和矩阵乘法
+基线。P2 已提供带大小、SHA-256、dtype 和 shape 元数据的本机只读 blob/mmap 基线；
+后续根据真实基准评估 Arrow 或共享内存数据面，控制消息只携带句柄和形状等元数据。
 只有基准证明进程边界不可接受时，才评估 Unix socket/gRPC 或嵌入 CPython。
 
 完整的路线比较、协议约束、数据通道和阶段门槛见
@@ -199,6 +225,7 @@ Domain Socket。Gob 不作为 Go/Python 的跨语言协议首选，大数组通�
 - [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md)：Python 方案比较与协议；
 - [docs/CONSISTENCY-AUDIT.md](docs/CONSISTENCY-AUDIT.md)：实现、规范与设计讨论的交叉审计；
 - [docs/SPECS.md](docs/SPECS.md)：各 Alpha 里程碑的规范索引；
+- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)：下一版完整程序契约与迁移门槛；
 - [examples/PROTOTYPES.md](examples/PROTOTYPES.md)：30 个原型的覆盖情况；
 - [CHANGELOG.md](CHANGELOG.md)：版本变更和发布检查。
 
@@ -212,5 +239,5 @@ GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 ```
 
 参考实现目标为 Go 1.27。Alpha 仍然是实验版本；事件/流、普通循环、完整
-Effect 类型系统和直接 Python import 会在后续里程碑中根据 conformance 和真实
-基准决定。
+Effect 类型系统和直接执行 Python/Go `import` 会在后续里程碑中根据 conformance
+和真实基准决定；当前使用 `require` 元数据配合 Python Host 的通用 dotted call。

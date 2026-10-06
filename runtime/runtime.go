@@ -93,8 +93,10 @@ func (e Effect) String() string {
 
 // Host is the Go interop boundary. Register operations before executing a Flow.
 type Host struct {
-	ops     map[string]Op
-	effects map[string]Effect
+	ops          map[string]Op
+	effects      map[string]Effect
+	python       *PythonWorker
+	pythonEffect Effect
 }
 
 func NewHost() Host {
@@ -136,6 +138,9 @@ func (h Host) EffectOf(name string) Effect {
 	if effect, ok := h.effects[name]; ok {
 		return effect
 	}
+	if h.python != nil {
+		return h.pythonEffect
+	}
 	return EffectUnknown
 }
 
@@ -148,9 +153,50 @@ func (h Host) Call(ctx context.Context, name string, args []Value) Result {
 	}
 	op, ok := h.ops[name]
 	if !ok {
+		if h.python != nil {
+			return h.python.Call(ctx, name, args)
+		}
 		return Failed(fmt.Errorf("unknown host operation %q", name))
 	}
 	return op(ctx, args)
+}
+
+// NewPythonHost creates the standard Host with a generic Python fallback. Any
+// unknown LIP operation is sent to Python as a dotted callable name, so a Flow
+// can write numpy.linalg.solve(...) or torch.nn.functional.relu(...) without
+// registering every library function in Go.
+func NewPythonHost(worker *PythonWorker) Host {
+	return DefaultHost().WithPython(worker)
+}
+
+// NewPythonPureHost creates a generic Python Host whose fallback is marked
+// Pure. Use it only for a worker contract containing deterministic, isolated
+// functions; NewPythonHost is the conservative default.
+func NewPythonPureHost(worker *PythonWorker) Host {
+	return DefaultHost().WithPythonPure(worker)
+}
+
+// WithPython attaches a generic, conservative ExternalWrite fallback to an
+// existing Host. Use WithPythonPure only when every dynamically called Python
+// operation is deterministic and free of external effects.
+func (h Host) WithPython(worker *PythonWorker) Host {
+	return h.WithPythonEffect(worker, EffectExternalWrite)
+}
+
+func (h Host) WithPythonPure(worker *PythonWorker) Host {
+	return h.WithPythonEffect(worker, EffectPure)
+}
+
+func (h Host) WithPythonEffect(worker *PythonWorker, effect Effect) Host {
+	if worker == nil {
+		panic("nil python worker")
+	}
+	if effect == EffectUnknown {
+		effect = EffectExternalWrite
+	}
+	h.python = worker
+	h.pythonEffect = effect
+	return h
 }
 
 func DefaultHost() Host {

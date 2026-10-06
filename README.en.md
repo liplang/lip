@@ -96,6 +96,8 @@ and reuse reasons in Trace.
 | Capability | Alpha 0.4 status |
 | --- | --- |
 | `flow`, expression `fn`, single-assignment bindings | Supported, with name, scope, and type checks |
+| Flow input/output contract | Strict entry parsing, at least one `return`, no invented defaults |
+| `require` dependency header | Python/Go/Host metadata, check output, and generated-library query |
 | `when` execution gates and `if` value selection | Supported with distinct semantics |
 | Dynamic Map | Runtime expansion, stable order, bounded concurrency |
 | Persistent Flow / State / Tick | `NewInstance`, `Tick`, `SetState`, and Trace |
@@ -103,6 +105,7 @@ and reuse reasons in Trace.
 | Retry / Feedback | Runtime policies with explicit finite limits |
 | Cancellation | Context, Await, Map, Retry, and Feedback propagation |
 | Effects / Ordering | Host effect classes and `NodeSpec.After` |
+| Python Worker Adapter | Resident JSONL Worker, dynamic Python library calls, timeout cancellation, and restart |
 | Ordinary `for` / `while`, event/stream DSL | Not in the Alpha language core |
 
 Each milestone has an explicit boundary:
@@ -148,6 +151,13 @@ lipc version
 in `.go`, emits Go source. The legacy shorthand `lipc file.lip` remains available
 for source generation.
 
+The generated entry point accepts exactly the arguments declared by the Flow, in
+declaration order. `string` values are passed through, `number` values must be
+finite decimal numbers, `bool` accepts only `true` or `false`, and `any` is JSON
+at the command-line boundary. The compiler does not read `LIP_INPUT` or invent
+values such as `World`, `1`, or `false`; the result therefore comes only from the
+source program and its inputs.
+
 Generated library packages provide:
 
 ```go
@@ -155,7 +165,25 @@ Run(ctx, host, inputs)
 RunSequential(ctx, host, inputs)
 RunParallel(ctx, host, inputs, limit)
 NewInstance(host, inputs)
+RequiredDependencies()
 ```
+
+A LIP file can record external requirements explicitly at its header:
+
+```lip
+require python "numpy>=1.26"
+require python "pandas"
+require go "github.com/acme/adapter"
+require host "load_profile"
+```
+
+These declarations are check and deployment metadata. They do not install or
+silently import anything. `lipc check` prints them, and generated library mode
+exposes `RequiredDependencies()`. The Python Worker still resolves any installed
+module through its real dotted path; a Go package must be imported and registered
+by the Go program that hosts the generated package.
+External calls without a matching `require` declaration fail during checking, so
+the source cannot hide a runtime capability.
 
 ## Persistent State and Logical Ticks
 
@@ -183,25 +211,27 @@ callback should not re-enter the same Instance.
 
 ## Go Host and the Python route
 
-LIP does not directly import Go or Python in its language syntax. Python scientific
+LIP does not execute Go or Python `import` in its language syntax; required packages
+can be recorded with `require` metadata. Python scientific
 computing enters through a Host Adapter:
 
 ```text
-LIP node → Go Adapter → Python Worker → NumPy / SciPy / Pandas / PyTorch
+LIP node → Go Adapter → Python Worker → installed Python libraries
 ```
 
-The planned conservative first step is a long-lived, independent Python Worker using
-a JSON-lines request/response protocol. Alpha 0.4 does not yet provide a
-`ProcessHost`; Go would own request IDs, deadlines, cancellation, restart,
-backpressure, and effect classification, while Python owns scientific computing.
-The concrete shape is one Python child process started by Go with `os/exec` and kept
-resident, using stdin/stdout pipes for JSONL. If multiplexing or independent
-connections become necessary, the transport can move to a Unix Domain Socket without
-changing request, cancellation, error, or session semantics. Gob is not the preferred
-cross-language wire format; large arrays should use memory-mapped files, Arrow, or
-shared memory, with only handles and shape metadata in the control message. Evaluate
-Unix socket/gRPC or embedded CPython only if benchmarks show that the process boundary
-is unacceptable.
+The first process-backed step is now available as `runtime.NewProcessHost` (an alias
+of `PythonWorker`) and `runtime.NewPythonHost`. Go starts
+one resident Python child with `os/exec`, exchanges JSONL over stdin/stdout, and owns
+request IDs, deadlines, cancellation, restart, backpressure, and effect
+classification; Python owns scientific computing. The `examples/python` Flow calls
+NumPy and Pandas and retrieves the result. The worker dynamically calls installed
+libraries by `module.submodule.callable`, so adding PyTorch, JAX, Scikit-learn, or
+Transformers does not require changing the LIP core. It also provides dependency-free
+`sum`, `mean`, `dot`, and matrix multiplication operations. P2 now provides a local
+read-only blob/mmap baseline with size, SHA-256, dtype, and shape metadata; real
+benchmarks will decide whether Arrow or shared memory is justified. The control
+message carries handles and shape metadata. Evaluate Unix socket/gRPC or
+embedded CPython only if benchmarks show that the process boundary is unacceptable.
 
 See [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md) for the route comparison,
 protocol constraints, data planes, and phase gates. Environments without Python can
@@ -217,6 +247,7 @@ model-service lifecycle.
 - [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md): Python route comparison and protocol;
 - [docs/CONSISTENCY-AUDIT.md](docs/CONSISTENCY-AUDIT.md): cross-check of implementation and design;
 - [docs/SPECS.md](docs/SPECS.md): index of the Alpha milestone specifications;
+- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md): next-version complete program contract and migration gates;
 - [examples/PROTOTYPES.md](examples/PROTOTYPES.md): coverage of 30 design prototypes;
 - [CHANGELOG.md](CHANGELOG.md): release changes and checks.
 
@@ -230,5 +261,6 @@ GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 ```
 
 The reference implementation targets Go 1.27. Alpha is experimental. Events/streams,
-ordinary loops, a complete effect type system, and direct Python imports remain future
-options whose priority depends on conformance results and measured workloads.
+ordinary loops, a complete effect type system, and executable Python/Go `import`
+semantics remain future options; `require` metadata and generic dotted calls through
+the Python Host are available now.

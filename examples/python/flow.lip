@@ -1,0 +1,10 @@
+# Dotted Python operations are resolved by the generic Python Host.
+require python "numpy"
+require python "pandas"
+flow Scientific(values: any) {
+    total = numpy.sum(values)
+    average = numpy.mean(values)
+    raw_stats = pandas.describe(values)
+    stats = python.to_json(raw_stats)
+    return [total, average, stats]
+}

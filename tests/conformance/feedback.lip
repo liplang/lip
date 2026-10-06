@@ -1,3 +1,7 @@
+require host "start"
+require host "revise"
+require host "verify"
+
 flow Verified(input: string) {
     result = feedback(start(input), revise, verify, 3)
     return result

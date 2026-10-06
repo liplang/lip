@@ -3,34 +3,32 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 
 	"lipalpha/runtime"
 )
 
-func sampleInput(typ string, index int) runtime.Value {
-	raw := os.Getenv("LIP_INPUT")
-	if len(os.Args) > index+1 {
-		raw = os.Args[index+1]
+type Dependency struct {
+	Kind string
+	Spec string
+}
+
+func RequiredDependencies() []Dependency { return []Dependency{} }
+
+func parseCLIInputs(args []string) (map[string]runtime.Value, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("usage: %s <input:any>", os.Args[0])
 	}
-	if raw == "" {
-		if typ == "number" {
-			return runtime.Value(float64(1))
-		}
-		if typ == "bool" {
-			return runtime.Value(false)
-		}
-		return runtime.Value("World")
+	inputs := map[string]runtime.Value{}
+	raw0 := args[0]
+	var value0 runtime.Value
+	if err := json.Unmarshal([]byte(raw0), &value0); err != nil {
+		return nil, fmt.Errorf("argument 1 (input): any input must be valid JSON: %w", err)
 	}
-	if n, err := strconv.ParseFloat(raw, 64); err == nil && typ != "string" {
-		return runtime.Value(n)
-	}
-	if typ == "bool" && (raw == "true" || raw == "false") {
-		return runtime.Value(raw == "true")
-	}
-	return runtime.Value(raw)
+	inputs["input"] = value0
+	return inputs, nil
 }
 
 func __lip_fn_twice(host runtime.Host) runtime.Op {
@@ -134,12 +132,17 @@ func main() {
 	ctx := context.Background()
 	host := runtime.DefaultHost()
 	inputs := map[string]runtime.Value{}
-	inputs["input"] = sampleInput("any", 0)
+	parsed, err := parseCLIInputs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	inputs = parsed
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
-		fmt.Println("error:", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
 		for _, event := range trace {
-			fmt.Printf("%s %s %s\n", event.Node, event.Status, event.Reason)
+			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Node, event.Status, event.Reason)
 		}
 		os.Exit(1)
 	}

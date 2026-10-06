@@ -5,6 +5,15 @@ import "lipalpha/compiler/token"
 type Program struct {
 	Functions []*Function
 	Flow      *Flow
+	// Dependencies are declarative environment requirements. They do not
+	// import code into the generated Go package or install anything.
+	Dependencies []Dependency
+}
+
+type Dependency struct {
+	Kind string // "python", "go", or "host"
+	Spec string
+	Pos  token.Pos
 }
 
 type Function struct {

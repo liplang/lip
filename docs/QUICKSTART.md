@@ -40,8 +40,13 @@ go run ./cmd/lipc build hello.lip
 像 `go run` 一样临时生成并运行：
 
 ```bash
-go run ./cmd/lipc run hello.lip
+go run ./cmd/lipc run hello.lip -- Alice
 ```
+
+`request: string` 是入口声明，因此运行时必须提供且只能提供一个位置参数。
+缺少参数、参数过多或类型不匹配都会以非零状态失败；编译器不会替程序补一个
+示例值。`number` 参数接受有限十进制数，`bool` 只接受 `true` 或 `false`，
+`any` 参数在命令行上必须是 JSON（例如 `'[1,2,3]'`）。
 
 需要审查或提交生成的 Go 时显式使用 `-emit-go`：
 
@@ -66,8 +71,31 @@ lipc hello.lip
 编译运行：
 
 ```bash
-go run hello_generated.go
+go run hello_generated.go Alice
 ```
+
+### 声明外部依赖
+
+LIP 不把 Python 解释器或 Go 包导入编译进语言核心。需要可复现地说明运行环境
+时，可以在文件头写声明：
+
+```lip
+require python "numpy>=1.26"
+require python "pandas"
+
+flow Scientific(values: any) {
+    total = numpy.sum(values)
+    return total
+}
+```
+
+`require python`、`require go` 和 `require host` 只是依赖元数据：`lipc check`
+会显示它们，库模式生成的 Go 也提供 `RequiredDependencies()`；它们不会联网安装
+包，也不会偷偷导入或替换 Python 环境。Python dotted call 仍可调用 Worker 环境中
+任意已安装模块，声明用于部署前检查和审查。`require go` 表示承载该 Flow 的 Go
+程序需要相应包并注册 Host adapter；LIP 源文件不能直接导入 Go 包。
+声明了 `require python` 的独立可执行入口会自动启动默认 Python Worker；生成库则
+仍由宿主显式创建 Worker，以便控制解释器、模块策略和生命周期。
 
 `request: string` 会让生成的入口检查输入类型；传入数字不会被偷偷转成
 字符串，而是返回错误。确实需要显式转换时写 `str(value)`：

@@ -75,24 +75,99 @@ Flow 语义。
 
 ### M12：Python / 外部 Worker Adapter
 
-先实现可替换的独立进程协议和 Go Adapter，再决定是否需要更紧的通信或嵌入式
-解释器。当前的比较结论是：
+P0/P1 已落地为可替换的独立进程协议和 Go Adapter；通用对象句柄也已经有最小
+可运行实现。下一步仍按数据规模和基准决定是否需要更紧的通信或嵌入式解释器。
+当前的阶段状态是：
 
-- P0 先做标准库 echo/失败/延迟 Worker，测量冷启动、长驻 Worker 的 p50/p95、
-  取消、重启、背压和协议损坏；
-- P1 采用 Go `os/exec` 启动并长期驻留的 stdin/stdout JSONL Worker，Go 负责 request
-  ID、deadline、有限队列、Worker 替换和 Effect 映射；不使用每次调用重新 launch；
-- P2 先用 memory-mapped `.npy` 处理大数组，再用真实矩阵/DataFrame/模型输入
-  比较 Arrow 或共享内存；
-- P3 只有在多路复用、跨机部署或 schema 演进成为真实需求时，才引入 Unix Domain
-  Socket/gRPC、session 和流式进度；Gob 不作为 Go/Python 的默认协议；
-- P4 只有基准证明 IPC/复制是瓶颈且能够接受 GIL、ABI、崩溃和取消限制时，才做
-  可选的 CPython/cgo 原型。
+- **P0/P1（已完成基线）：** `runtime.NewProcessHost`/`NewPythonWorker` 用 Go
+  `os/exec` 启动并长期驻留的 stdin/stdout JSONL Worker。握手、request ID、deadline、
+  有限队列、协作取消、Worker 回收/自动重启、协议错误和 Python 异常都有 Go 侧测试；
+  `NewPythonHost` 提供通用 fallback；`RegisterPythonPure`、`RegisterPythonReadOnly`
+  和 `RegisterPythonSession` 仍可把稳定领域接口及其效果映射到现有 Runtime。内置
+  Worker 提供标准库基线和通用 dotted operation（如
+  `numpy.sum`、`torch.nn.functional.relu`、`sklearn.preprocessing.scale`），真实
+  样例在 `examples/python`。新增库不需要改 Worker；只需确认 Python 环境和模块策略。
+- **P0/P1 的边界：** JSON 控制面承载标量、列表、对象和 session 句柄；每个 Worker
+  同时处理一个请求，队列有上限；取消无法安全打断扩展时直接回收进程，下一次调用
+  懒启动新 Worker。句柄和 blob 的大小/数量配额已属于 P2 基线，空闲回收和故障
+  重建仍待完成。
+- **P2（进行中）：数据面和句柄治理。** 当前先实现文件支持的只读 blob：使用私有
+  目录、原子发布、`fsync`、SHA-256、大小限制和只读 mmap；同时支持已有 `.npy` 文件
+  的 `mmap_mode="r"` 加载。下一步用真实矩阵、DataFrame 和模型输入比较 JSON、文件
+  映射、Arrow 与共享内存；当前已有 blob 大小、总数据、打开映射和对象句柄配额，下一步
+  补空闲回收、泄漏诊断，以及 Tensor、DataFrame、模型、优化器和 Figure 的明确生命周期。
+  当前已有通用对象句柄、
+  `python.call`、`python.to_json`、`python.release`。
+
+  P2 同时固定了两个边界：生成入口严格按 Flow 参数解析 CLI，不再注入示例输入；
+  `require python/go/host "..."` 提供可审计的依赖元数据，`lipc check` 和生成库的
+  `RequiredDependencies()` 都能取回它。声明不会自动安装包，Python 仍通过通用
+  dotted call 访问 Worker 环境中已安装的任意库，Go adapter 仍由宿主程序导入和注册。
+- **P3：多 Worker、可靠 session 和可替换传输。** 先测量单 Worker 在 LIP 并发下的
+  排队比例，再决定 Worker pool；为 session 增加创建、版本、空闲回收和故障重建事件，
+  分别限制池大小、Python 线程数和 BLAS/GPU 线程数。只有多路复用、跨机部署或协议
+  演进成为真实需求时，才把 JSONL 控制传输替换为 Unix Domain Socket/gRPC，并加入
+  流式进度。Gob 不作为 Go/Python 的默认协议。
+- **P4：嵌入式 CPython 评估。** 用同一组真实矩阵、DataFrame 和模型输入比较进程
+  边界与 cgo/CPython 的冷启动、warm p50/p95、吞吐、峰值内存、取消和崩溃恢复；只有
+  基准证明 IPC/复制是瓶颈，且能够接受 GIL、ABI、崩溃隔离和取消限制时，才做可选
+  原型，不把嵌入方案变成默认后端。
 
 每一阶段都保持 Host Adapter 可替换；Python 方案改变时，LIP 图、Tick、Effect
 和取消语义不变。完整矩阵见 [PYTHON-INTEGRATION.md](PYTHON-INTEGRATION.md)。
 
-### M13：事件与流（谨慎推进）
+### M13：Alpha 0.5 完整程序契约（规划中）
+
+这一里程碑先收紧语言边界，再扩展能力。目标是保证一份 `.lip` 文件自身就是可以
+检查、翻译和运行的完整主体，编译器不替例程猜测结果：
+
+1. **统一源文件头。** 顶层只允许 `require` 依赖声明、`fn` 声明和唯一 `flow`；
+   关键字采用单数 `require`，拒绝 `requires` 等人为别名。Python、Go 和 Host 的
+   依赖都进入同一份可查询元数据，禁止隐式安装和隐式导入。
+2. **完整输入/输出契约。** Flow 参数是唯一外部输入；所有边界参数显式写类型，
+   动态值写 `any`。目标语法为显式 Flow 返回类型，所有成功路径都有相容 `return`；
+   允许无值完成时显式写可选输出 `Type?`。缺少输入、额外输入、缺少输出和类型
+   错误必须在相应阶段失败。
+3. **忠实编译。** 删除样例值、环境变量注入和测试旁路；`lipc check`、`build`、
+   `run`、生成源码和库模式共用同一 AST/Graph。为未定义名、前向引用、重复绑定、
+   作用域逃逸、依赖重复和非法顶层结构建立 conformance 测试。
+4. **Python 一致边界。** `require python` 只声明环境能力；任意已安装库使用同一
+   dotted call、句柄和只读 blob 协议。独立入口可按声明启动 Worker，库模式由宿主
+   控制 Worker；科学计算、统计、机器学习、深度学习、视觉和 Transformers 不做
+   固定白名单。
+5. **迁移和诊断。** 为 Alpha 0.4 的省略类型和旧依赖关键字提供一次性诊断/迁移，
+   但 v0.5 不保留含糊的兼容语义。错误必须指出源位置、声明和修复方向。
+
+验收规范见 [ALPHA-0.5-SPEC.md](ALPHA-0.5-SPEC.md)。当前已经落地的是严格 CLI、
+`require` 元数据、外部调用声明检查、无默认输入、Flow 输出存在性检查和 Python
+独立入口激活；显式返回类型、完整迁移诊断和全部 conformance 仍是 v0.5 的后续实现工作。
+
+P1 验收命令：
+
+```bash
+GOCACHE=/tmp/lip-gocache go test ./runtime -run Python
+GOCACHE=/tmp/lip-gocache go test ./runtime -run '^$' -bench 'PythonWorker'
+GOCACHE=/tmp/lip-gocache go run ./examples/python
+```
+
+后续推进按这四个门槛执行：
+
+1. **P2 数据面：** 文件支持的只读 blob、`.npy` 映射、`dtype`、`shape`、字节数、
+   SHA-256 与释放责任已经有基线实现。下一步用真实矩阵、DataFrame 和模型输入测量
+   JSON 复制、文件映射、Arrow 与共享内存的 p95、峰值内存和恢复行为；只有证据显示
+   文件映射仍是瓶颈，才加入 Arrow/共享内存，控制面 API 保持不变。
+2. **P2 对象与模型句柄（基础已实现）：** Worker 已支持通用句柄、
+   `python.call`、`python.to_json`、`python.release` 以及 blob/映射/对象配额；下一步
+   为 Tensor、DataFrame、模型、优化器和 Figure 补充显式 session 创建、空闲回收、跨
+   Worker 重建和泄漏诊断。不得把 Python 对象指针伪装成 LIP State，也不得让句柄无限期
+   存活。
+3. **P3 多 Worker / session：** 先测量单 Worker 在 LIP 并发下的排队比例，再决定
+   Worker pool。session 必须有创建、版本、空闲回收和故障重建事件；池大小、Python
+   线程数和 BLAS/GPU 线程数分别设上限。
+4. **P4 嵌入评估：** 用同一组真实矩阵/DataFrame/模型输入比较冷启动、warm p50/p95、
+   吞吐、峰值内存、取消和崩溃恢复。没有数据证明 IPC 是瓶颈，就不引入 cgo/CPython。
+
+### M14：事件与流（谨慎推进）
 
 只有当 Host→Runtime→Tick 的手动触发模式在真实例子中不足时，才引入事件或
 Stream primitive。它们必须明确生命周期、背压、取消和 State 快照，不能直接把
@@ -101,7 +176,8 @@ Stream primitive。它们必须明确生命周期、背压、取消和 State 快
 ### 暂不推进
 
 - 完整 Effect Type System；
-- 直接在 LIP 中 import 任意 Go/Python 包；
+- 直接在 LIP 中执行 Python/Go `import` 或自动安装任意包；依赖声明使用
+  `require python/go/host "..."` 元数据，实际导入和注册仍由 Worker/Go 宿主负责；
 - 无界 Feedback、自动 detach/background；
 - 为了“看起来像 Agent”而增加 Agent 专用语法；
 - 自定义 VM、GC 或绕过 Go 工具链的后端。

@@ -43,6 +43,11 @@ lipc build -emit-go -o hello.go hello.lip
 `build` 只有在使用 `-emit-go` 或输出路径以 `.go` 结尾时才写 Go 源文件；否则
 它调用 Go 工具链生成可执行文件。`lipc file.lip` 保留为生成源码的兼容简写。
 
+生成的可执行入口严格按照 `flow` 参数声明解析命令行：参数按声明顺序传入，不能
+缺少或多传。`string` 原样传递，`number` 是有限十进制数，`bool` 只能是
+`true`/`false`，`any` 必须传 JSON。生成程序不会读取 `LIP_INPUT`，也不会注入
+默认值；这保证 `lipc` 只翻译和执行源程序实际声明的输入。
+
 ## 两种生成模式
 
 ### 可执行模式
@@ -51,7 +56,7 @@ lipc build -emit-go -o hello.go hello.lip
 
 ```bash
 go run ./cmd/lipc build -o generated.go examples/hello.lip
-go run generated.go
+go run generated.go Alice
 ```
 
 生成文件暴露：
@@ -60,6 +65,7 @@ go run generated.go
 func Run(context.Context, runtime.Host, map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error)
 func RunSequential(context.Context, runtime.Host, map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error)
 func RunParallel(context.Context, runtime.Host, map[string]runtime.Value, int) (runtime.Value, []runtime.TraceEvent, error)
+func RequiredDependencies() []Dependency
 ```
 
 ### 库模式
@@ -80,17 +86,61 @@ host.Register("write_file", writeFileAdapter)
 value, trace, err := hostflow.Run(ctx, host, inputs)
 ```
 
+调用名也可以是 dotted path，例如 `numpy.linalg.solve(matrix, vector)`。
+编译器把它作为一个 Host operation 原样写入生成的 Go；使用
+`runtime.NewPythonHost(worker)` 时，Python Worker 会动态导入并调用该路径，
+因此新增 Python 库不需要修改编译器。
+
+如果 Flow 依赖外部环境，可以在文件头显式声明依赖：
+
+```lip
+require python "numpy>=1.26"
+require python "scipy"
+require go "github.com/acme/adapter"
+require host "load_profile"
+```
+
+`require` 是可审计的元数据，不是 LIP 内的 Python/Go `import`，也不会触发安装。
+`lipc check` 会逐条打印声明；生成库提供 `RequiredDependencies()`，由部署程序
+据此检查 Python 环境、Go module 和 Host 注册。Python 依赖按包/版本写出，调用仍
+使用真实模块路径（如 `sklearn.preprocessing.scale`）；Worker 继续允许任意已安装
+库，是否限制模块由 `AllowedModules`/`DeniedModules` 决定。Go 包必须由承载生成包
+的 Go 程序导入和注册，LIP 编译器不会凭一个声明猜测 adapter 实现。
+
+编译器还会检查外部调用是否有对应声明：dotted 调用默认要求匹配的 Python 模块，
+bare 调用要求 `require host`；内置 `str`、`print`、`state`、`retry`、`feedback`
+和 Python 控制面操作属于语言/Runtime 边界。缺少声明在 `check` 阶段报错。
+
+包含 `require python` 的独立可执行程序会在 `main` 中启动默认 Python Worker；没有
+这条声明时，生成入口只使用 `runtime.DefaultHost()`。库模式始终由宿主显式创建
+Worker 和 Host，这样 Python 进程的解释器、策略和生命周期不会被藏在库初始化中。
+声明 `require host` 或 `require go` 的程序必须使用库模式；独立入口会明确报错，
+不会假装已经拥有未注册的 adapter。
+
+调用参数当前使用普通位置参数。为了保持 Graph 节点边界清晰，参数中的函数调用
+需要先绑定到一个节点，再作为下一个调用的输入；例如先写
+`tensor = torch.tensor(values)`，再写 `relu = torch.nn.functional.relu(tensor)`。
+关键字参数语法、嵌套调用和大对象零拷贝传输分别属于后续语言/数据面工作，复杂
+Python 返回值可以先通过 Worker 句柄和 `python.to_json` 取回。
+
 ## Graph 节点粒度
 
 下面的 LIP：
 
 ```lip
+require host "load_a"
+require host "load_b"
+require host "combine"
+
 a = load_a()
 b = load_b()
 c = combine(a, b)
 ```
 
 生成三个图节点：`a`、`b`、`c`。`a` 和 `b` 独立，`c` 等待两者。
+Flow 参数在 `flow (...)` 中声明；普通局部变量使用一次 `name = expression`
+绑定即声明，并且是单赋值。未定义名、前向引用、重复绑定和从 `when` 块逃逸的
+绑定都会在 `lipc check` 阶段报错，不存在运行时隐式变量注入。
 `fn` 内部的局部表达式不是图节点，避免 Runtime 被普通算法的细节淹没。
 副作用调用可以直接写成语句，例如 `print(value)`；它会成为一个没有
 Flow 返回值的图节点。普通的无用表达式不允许单独出现。

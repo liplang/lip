@@ -78,6 +78,8 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.Then
 		case "else":
 			kind = token.Else
+		case "require":
+			kind = token.Require
 		case "true":
 			kind = token.True
 		case "false":

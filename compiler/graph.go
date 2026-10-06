@@ -12,11 +12,12 @@ import (
 )
 
 type Graph struct {
-	Flow       string
-	Params     []string
-	ParamTypes map[string]string
-	Functions  []*ast.Function
-	Nodes      []Node
+	Flow         string
+	Params       []string
+	ParamTypes   map[string]string
+	Dependencies []ast.Dependency
+	Functions    []*ast.Function
+	Nodes        []Node
 }
 
 type Node struct {
@@ -50,7 +51,18 @@ func Build(program *ast.Program) (*Graph, error) {
 		return nil, fmt.Errorf("program has no flow")
 	}
 	f := program.Flow
-	g := &Graph{Flow: f.Name, Params: append([]string(nil), f.Params...), ParamTypes: f.ParamTypes, Functions: program.Functions}
+	g := &Graph{Flow: f.Name, Params: append([]string(nil), f.Params...), ParamTypes: f.ParamTypes, Dependencies: append([]ast.Dependency(nil), program.Dependencies...), Functions: program.Functions}
+	seenDependencies := make(map[string]bool, len(g.Dependencies))
+	for _, dependency := range g.Dependencies {
+		if dependency.Kind != "python" && dependency.Kind != "go" && dependency.Kind != "host" {
+			return nil, fmt.Errorf("%d:%d: unknown dependency kind %q", dependency.Pos.Line, dependency.Pos.Column, dependency.Kind)
+		}
+		key := dependency.Kind + "\x00" + dependency.Spec
+		if seenDependencies[key] {
+			return nil, fmt.Errorf("%d:%d: duplicate %s dependency %q", dependency.Pos.Line, dependency.Pos.Column, dependency.Kind, dependency.Spec)
+		}
+		seenDependencies[key] = true
+	}
 	functionNames := make(map[string]bool)
 	for _, fn := range program.Functions {
 		if functionNames[fn.Name] {
@@ -60,6 +72,9 @@ func Build(program *ast.Program) (*Graph, error) {
 		if err := validateFunction(fn); err != nil {
 			return nil, fmt.Errorf("function %s: %w", fn.Name, err)
 		}
+	}
+	if err := validateOperationDependencies(program, functionNames, g.Dependencies); err != nil {
+		return nil, err
 	}
 	known := make(map[string]bool)
 	allNames := make(map[string]bool)
@@ -118,7 +133,196 @@ func Build(program *ast.Program) (*Graph, error) {
 	if len(g.Nodes) == 0 {
 		return nil, fmt.Errorf("flow %q has no executable statements", f.Name)
 	}
+	hasOutput := false
+	for _, node := range g.Nodes {
+		if node.Output {
+			hasOutput = true
+			break
+		}
+	}
+	if !hasOutput {
+		return nil, fmt.Errorf("flow %q has no return value; every Flow must declare an output with return", f.Name)
+	}
 	return g, nil
+}
+
+// validateOperationDependencies keeps a source file honest about the external
+// capabilities it uses. Local fn calls and the small built-in control/value
+// operations do not need a declaration. Every other bare operation is a Host
+// requirement, while dotted operations default to Python module requirements.
+func validateOperationDependencies(program *ast.Program, functionNames map[string]bool, dependencies []ast.Dependency) error {
+	pythonRoots := make([]string, 0)
+	hostOps := make([]string, 0)
+	for _, dependency := range dependencies {
+		switch dependency.Kind {
+		case "python":
+			if root := dependencyRoot(dependency.Spec); root != "" {
+				pythonRoots = append(pythonRoots, root)
+			}
+		case "host":
+			hostOps = append(hostOps, dependency.Spec)
+		}
+	}
+	hasPython := func(name string) bool {
+		for _, root := range pythonRoots {
+			if name == root || strings.HasPrefix(name, root+".") {
+				return true
+			}
+		}
+		return false
+	}
+	hasHost := func(name string) bool {
+		for _, operation := range hostOps {
+			if operation == name {
+				return true
+			}
+			if strings.HasSuffix(operation, ".*") {
+				base := strings.TrimSuffix(operation, ".*")
+				if name == base || strings.HasPrefix(name, base+".") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	checkOperation := func(name string, pos token.Pos) error {
+		if functionNames[name] || name == "str" || name == "print" || name == "state" || name == "retry" || name == "feedback" {
+			return nil
+		}
+		if strings.HasPrefix(name, "python.") && isPythonControlOperation(name) {
+			return nil
+		}
+		if strings.Contains(name, ".") {
+			if hasPython(name) || hasHost(name) {
+				return nil
+			}
+			return fmt.Errorf("%d:%d: Python operation %q is not declared; add require python %q or require host %q", pos.Line, pos.Column, name, strings.SplitN(name, ".", 2)[0], name)
+		}
+		if hasHost(name) {
+			return nil
+		}
+		return fmt.Errorf("%d:%d: Host operation %q is not declared; add require host %q", pos.Line, pos.Column, name, name)
+	}
+	var visitExpr func(ast.Expr) error
+	visitExpr = func(expr ast.Expr) error {
+		switch value := expr.(type) {
+		case *ast.CallExpr:
+			switch value.Name {
+			case "retry":
+				if len(value.Args) > 0 {
+					return visitExpr(value.Args[0])
+				}
+			case "feedback":
+				if len(value.Args) > 0 {
+					if err := visitExpr(value.Args[0]); err != nil {
+						return err
+					}
+				}
+				for _, index := range []int{1, 2} {
+					if index >= len(value.Args) {
+						continue
+					}
+					operation, ok := value.Args[index].(*ast.IdentExpr)
+					if ok {
+						if err := checkOperation(operation.Name, operation.Pos); err != nil {
+							return err
+						}
+					}
+				}
+			default:
+				if err := checkOperation(value.Name, value.Pos); err != nil {
+					return err
+				}
+				for _, arg := range value.Args {
+					if err := visitExpr(arg); err != nil {
+						return err
+					}
+				}
+			}
+		case *ast.BinaryExpr:
+			if err := visitExpr(value.Left); err != nil {
+				return err
+			}
+			return visitExpr(value.Right)
+		case *ast.IfExpr:
+			for _, part := range []ast.Expr{value.Cond, value.Then, value.Else} {
+				if err := visitExpr(part); err != nil {
+					return err
+				}
+			}
+		case *ast.ListExpr:
+			for _, item := range value.Items {
+				if err := visitExpr(item); err != nil {
+					return err
+				}
+			}
+		case *ast.ComprehensionExpr:
+			if err := visitExpr(value.Source); err != nil {
+				return err
+			}
+			return visitExpr(value.Element)
+		case *ast.FieldExpr:
+			return visitExpr(value.Object)
+		case *ast.IndexExpr:
+			if err := visitExpr(value.Object); err != nil {
+				return err
+			}
+			return visitExpr(value.Index)
+		}
+		return nil
+	}
+	var visitStmts func([]ast.Stmt) error
+	visitStmts = func(statements []ast.Stmt) error {
+		for _, statement := range statements {
+			switch value := statement.(type) {
+			case *ast.BindStmt:
+				if err := visitExpr(value.Expr); err != nil {
+					return err
+				}
+			case *ast.ExprStmt:
+				if err := visitExpr(value.Expr); err != nil {
+					return err
+				}
+			case *ast.ReturnStmt:
+				if err := visitExpr(value.Expr); err != nil {
+					return err
+				}
+			case *ast.WhenStmt:
+				if err := visitExpr(value.Cond); err != nil {
+					return err
+				}
+				if err := visitStmts(value.Body); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, fn := range program.Functions {
+		if err := visitExpr(fn.Return); err != nil {
+			return fmt.Errorf("function %s: %w", fn.Name, err)
+		}
+	}
+	return visitStmts(program.Flow.Body)
+}
+
+func dependencyRoot(spec string) string {
+	spec = strings.TrimSpace(spec)
+	for index, character := range spec {
+		if strings.ContainsRune("<>!=~[,; \t", character) {
+			return spec[:index]
+		}
+	}
+	return spec
+}
+
+func isPythonControlOperation(name string) bool {
+	switch name {
+	case "python.call", "python.to_json", "python.release", "python.module_available", "python.open_blob", "python.put_blob", "python.release_blob":
+		return true
+	default:
+		return false
+	}
 }
 
 type builder struct {

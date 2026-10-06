@@ -19,7 +19,7 @@ GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version
 test "$(tr -d '\n' < VERSION)" = "$(GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version)"
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc help >/dev/null
 
-for f in examples/*.lip; do
+for f in examples/*.lip tests/conformance/*.lip; do
   GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc check "$f" || exit 1
 done
 for f in tests/conformance/*.lip; do
@@ -35,16 +35,16 @@ for f in examples/*.lip; do
   GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc build -o "$tmpdir/$(basename "${f%.lip}").go" "$f" || exit 1
 done
 
-GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/hello
-GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/gated
-GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/fanout
-GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/language
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/hello Alice
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/gated 1
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/fanout 3
+GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/language null
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/host_adapter
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./examples/map
 
 # Verify Go-like executable build and temporary run paths.
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc build -o "$tmpdir/hello" examples/hello.lip
-GOCACHE=/tmp/lip-gocache "$tmpdir/hello"
+GOCACHE=/tmp/lip-gocache "$tmpdir/hello" Alice
 GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc run examples/hello.lip -- Alice
 ```
 
@@ -58,7 +58,8 @@ GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc run examples/hello.li
 
 Alpha 0.4 支持持久 State/Tick、受限 Retry/Feedback、取消传播和 Runtime
 Effect/Ordering。普通 loops、事件/streams、detach/background、完整 Effect
-类型系统和直接 Go import 仍不在本版本边界内。
+完整 Effect 类型系统和直接执行 Go/Python import 仍不在本版本边界内；外部依赖
+使用 `require` 元数据声明，实际 adapter 由 Go 宿主注册。
 
 ## 审计结论
 

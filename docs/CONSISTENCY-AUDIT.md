@@ -33,25 +33,32 @@
   的顺序屏障已经分别写入 0.3/0.4 规范。
 - `Graph` 和 `Instance` 的公共执行/观察方法已串行化，避免复用对象时的竞态；
   Host 仍须在执行前完成注册，Host operation 自己负责保护内部共享状态。
+- 生成入口只接受声明的参数；所有 Flow 至少有一个 `return`，外部示例用 `require
+  host`/`require python` 写出 adapter 或 Python 环境边界，未声明的外部调用在
+  `check` 失败，缺失时不再由编译器补值。
 
 ## 有意保留的边界
 
-- 普通 `for`/`while`、事件/流、detach/background、完整 Effect 类型系统、直接
-  Python import 尚未进入 Alpha 0.4；这些是后续候选，不是隐藏能力。
+- 普通 `for`/`while`、事件/流、detach/background、完整 Effect 类型系统，以及
+  直接执行 Python/Go `import` 尚未进入 Alpha 0.4；文件头的 `require` 依赖元数据
+  已进入，用于环境声明而不触发安装或导入；通用 dotted Host call
+  已经通过 Python Worker 提供。
 - Unknown Host effect 按 ExternalWrite 处理，牺牲部分并行换取安全顺序。
 - Map 的结果保持输入顺序；Map 元素可以并行，但 effectful Map 按顺序执行。
 - 当前一次 `Run`/`Tick` 是 fail-fast 的：节点错误会停止新的独立工作，未开始
   的节点记为 `Skipped`。这比“只传播到数据下游”更保守，是 Alpha 的明确执行策略。
 - Instance 的并发调用会串行化；Host callback 不应重入同一个 Instance 的锁定方法。
-- Python 集成先走独立进程协议，不把解释器、GIL 或 Python 包管理引入 LIP 编译核心。
+- Python 集成先走独立进程协议，不把解释器、GIL 或 Python 包管理引入 LIP 编译核心；
+  `require python "..."` 只记录包/版本要求，实际模块仍由 Worker 环境解析。
 - Python 文档把调用通道（JSONL、Unix socket/gRPC、HTTP）和数据通道（映射文件、
-  Arrow、共享内存）分开；推荐路线与当前实现边界一致，尚未把规划中的
-  `ProcessHost` 误写成已存在的 API。
+  Arrow、共享内存）分开；当前 `ProcessHost` 已实现 P0/P1 的 JSONL 控制面，P2
+  数据面和 P3 传输升级仍保持为后续阶段。
 - Python 路线的默认形态已经明确为 `os/exec` 启动一次、Worker 常驻、stdin/stdout
   JSONL；Unix Domain Socket 是后续可替换传输，Gob 不作为跨语言默认协议，大数组
   走独立数据面。
-- 中文 README 和 `README.en.md` 共享同一 Alpha 0.4 能力边界；Python、事件/流和
-  完整 Effect 类型系统仍标为后续候选。
+- 中文 README 和 `README.en.md` 共享同一 Alpha 0.4 能力边界；Python Worker 的
+  进程 Adapter 和通用 dotted call 已加入实现能力，直接 LIP `import`、事件/流和
+  完整 Effect 类型系统仍标为后续候选；依赖元数据通过 `require` 声明。
 
 ## 验证
 

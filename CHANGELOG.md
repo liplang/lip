@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — M12/P2 Python control plane and v0.5 contract groundwork
+
+- added a resident `runtime.ProcessHost`/`PythonWorker` JSONL adapter with handshake,
+  request IDs, bounded queueing, deadlines, cancellation, restart, and Python errors;
+- added generic dotted Python calls through `runtime.NewPythonHost`, explicit
+  Pure/ReadOnly/session Host registration, configurable module policy, and generic
+  Python object handles (`python.call`, `python.to_json`, `python.release`);
+- added a runnable scientific LIP Flow under `examples/python`, protocol tests, and
+  cold-start/warm-call benchmarks. The Worker does not maintain a fixed library list:
+  any installed package reachable by a dotted callable path can be used.
+- started the P2 local data plane with atomic, checksummed, size-limited blob files,
+  read-only raw/`.npy` mappings, explicit release, tamper detection, and JSON-versus-
+  mapped-array benchmarks.
+- made generated entry points strict: Flow parameters are required positional inputs,
+  typed values are parsed without defaults or `LIP_INPUT`, and `any` uses JSON;
+- added top-level singular `require python/go/host "..."` dependency metadata, `lipc check`
+  reporting, generated `RequiredDependencies()`, and automatic Python Worker startup
+  for standalone programs that declare a Python requirement.
+- rejected Flows without any `return` output and declared Host requirements in the
+  prototype/conformance sources so examples no longer hide their external boundary.
+- made undeclared external calls a `lipc check` error: dotted calls need a Python (or
+  explicit Host) requirement, and bare calls need a Host requirement.
+
 ## 0.4.0 — Alpha 0.4
 
 Specification: [ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md)

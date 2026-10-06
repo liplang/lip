@@ -39,8 +39,8 @@ flow Hello(request: string) {
 
 ```bash
 go run ./cmd/lipc check hello.lip
-go run ./cmd/lipc hello.lip
-go run Hello_generated.go
+go run ./cmd/lipc run hello.lip -- Alice
+go run Hello_generated.go Alice
 ```
 
 也可以直接安装编译命令：
@@ -213,11 +213,16 @@ Tick 都有递增的 `TickCount`，Trace 会把复用节点标记为 `Completed`
 
 Retry 是有界的：
 
+文件头声明 `require host "fetch"`。
+
 ```lip
 result = retry(fetch(input), 3)
 ```
 
 Agent 式验证也可以用受限 Feedback：
+
+文件头声明 `require host "start"`、`require host "revise"` 和
+`require host "verify"`。
 
 ```lip
 result = feedback(start(input), revise, verify, 3)
