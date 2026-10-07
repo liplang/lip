@@ -1,87 +1,66 @@
-# Alpha 0.5 实现一致性审计
+# Alpha 0.6.1 实现一致性审计
 
-审计对象：当前 `compiler/`、`runtime/`、`cmd/lipc/`、生成示例、规范文档，
-以及 `../playaround/01-TestingExamples.md`、`02-AlphaDesign.md`、
-`03-AlphaRoadmap.md` 的设计主线。
+当前契约为 [ALPHA-0.6-SPEC.md](ALPHA-0.6-SPEC.md) 与
+[LIST-LIBRARY.md](LIST-LIBRARY.md)、[STRING-LIBRARY.md](STRING-LIBRARY.md)。本次审计把核心、已有 Runtime policy 和
+外部 adapter 的规则与实现对应起来。
 
-## 已对齐
+## 核心闭环与证据
 
-| 设计主张 | 实现证据 | 结论 |
-| --- | --- | --- |
-| AST 与 Graph 分离 | `compiler/ast` → `compiler/graph` → `NodeSpec` | 一致 |
-| 数据依赖表达等待 | `refsOf`、`dependencies`、下游阻塞 | 一致 |
-| `if` 与 `when` 不同 | `IfExpr` 值计算、`Gates` 执行资格 | 一致 |
-| Static Structure + Dynamic Expansion | `MapSpec`、运行时 slice/array 展开 | 一致 |
-| State/Tick/增量重算 | `runtime.Instance`、依赖快照、`SetState` | 一致 |
-| Retry/Feedback 有界 | 正整数 attempts 校验、Runtime 上限 | 一致 |
-| Cancellation 属于 Runtime | Context、Await、Map、Retry、Feedback | 一致 |
-| Effect/Ordering 是轻量 metadata | `Effect`、Host 注册、`NodeSpec.After` | 一致 |
-| 并发是机会而非保证 | bounded scheduler、效果屏障、顺序 API | 一致 |
-| Go 是 Alpha 后端 | 生成 Go、Host Adapter、标准 Go 工具链 | 一致 |
+| 契约 | 实现与验证 |
+| --- | --- |
+| 构造数据与完整边界 | ObjectExpr/UnaryExpr/null，list/object 参数与可选 null 输出；三条 CLI 路径 conformance |
+| Rust 优先的表达式风格 | 唯一块式 if、// 行注释、显式 Flow 边界；拒绝旧语法的回归测试 |
+| range/Map/fold | 半开区间、数量上限、稳定 Map、顺序归约、空输入、错误索引和取消测试 |
+| 纯递归 | 递归环结果类型验证、每次调用的 Context/256 深度检查；直接/间接及经 list.map 的递归 conformance |
+| 34 个纯 list 操作 | internal/listops 共用签名，全部目录项正面测试；空输入、分组/排序稳定性、形状、取消、错误与不修改输入 |
+| 19 个纯 string 操作 | internal/stringops 共用签名；Unicode、空项、字面匹配、解析、资源/错误与组合验证 |
+| 明确失败与类型 | fail 不产值，内部 never 保留成功分支类型，Host 不可覆盖；编译/生成/惰性分支验证 |
+| 统一资源约束 | 字符串边界/len/索引/+/*/库统一 UTF-8/16 MiB；Map/fold 处理前拒绝超量 |
+| 嵌套组合与真实依赖 | callback 名不产生数据边；对象值与数据参数产生真实边；生成库的分组→映射→聚合通过三种调度路径 |
+| Incremental 保持身份 | 纯列表节点未变化时复用，State/Tick 和现有取消/效果测试继续通过 |
+| 独立观察 | inspect graph.v1 与 trace.v1；成功/执行失败/写入失败/输入失败及 stdout/退出码检查 |
+| 忠实生成与清理 | 失败时执行 Worker defer；Host/Go 独立入口只生成明确报错路径，不残留不可达执行代码 |
+| 可读可写可验证 | 21 节教程、14 份逐字核对源码、23 个实际结果/错误样例、完整宿主程序 |
+| Go/Python/库自然组合 | 同一 Flow 的调用/native 值，三种调度一致；所有外部调用遵循相同纯性规则 |
+| Python 数据完整性 | 非有限、键碰撞、无序 set 不隐式丢信息；失败转换回收新句柄 |
+| AI 修复接口 | diagnostics.v1、位置/源行/hints/退出码实际 CLI 测试，仍检查首个错误 |
 
-## Alpha 0.5 契约修正
+list 标准库不是新增控制流或 Host 操作集合；纯调用由生成代码直接分派，不能
+被宿主同名 operation 重定义。list.map 顺序执行，Map 推导式保留 Runtime 展开和
+并行能力。大区间、大组合结果、非矩形转置和过深递归均明确失败。
 
-- 多个条件 return 的“最后一个输出获胜”规则改为单一输出点；条件值用 `if`，门控
-  无值完成显式写 `Type?`。这使输出契约与图执行模型一致。
-- 边界参数不再省略类型；Flow 必须声明返回类型，动态结果在完成时校验，包括 Await。
-  一次性库输入拒绝额外字段，Tick 拒绝未知或错误类型的更新，State 保持基础类型。
-- 局部 fn 纯计算且允许组合，外部调用必须可见于图。局部 Host 注册使用副本，避免
-  并发运行或多个生成包覆盖调用方操作。
-- CLI 的三条路径共用输入解析与 JSON 输出，迁移命令输出通过正常编译检查的程序。
-- 删除 `pandas.describe` 替身，使用 Pandas Series 的真实方法；Worker 身份进入句柄，
-  重启后旧句柄失败，已打开 blob 的复用也重新校验文件内容。
+## 收敛决定
 
-## 已修复的矛盾或易误读点
+- 版本、规范入口、README、教程与示例使用同一套现行规则。
+- Python adapter 统一使用 PythonWorker/PythonWorkerConfig，配置入口为 Python/Script。
+- Runtime 节点效果统一使用 Effect，Map 从节点和 Host 注册获取效果分类。
+- 所有 CLI 工具选项使用长形式并位于入口文件前，文件后全部是程序输入。
+- 删除旧语法解析、迁移入口、隐式源码生成与过期规范，版本历史集中在 CHANGELOG。
+- 新的数据操作进入独立纯标准库和统一目录，语法不为每个列表操作增加关键字。
+- 普通循环、闭包、泛型 iterator 与新后端延后；用实际项目缺口决定下一步。
+- 字符串索引改为 Unicode 字符字符串，与 len 一致；这是显式记录的 Alpha 语义变更。
 
-- README 过去只列功能，没有说明 LIP 的根本模型；现在明确依赖、Runtime、
-  State/Tick、增量和 Host 边界。
-- CLI 过去只有 `version/check/build`，且 `build` 只写源文件；现在提供
-  `help/run`，`build` 默认产出可执行文件，`-emit-go` 保留源码生成路径。
-- 文档过去只把 `RegisterPure` 描述为可并行；当前 `RegisterReadOnly` 也可并行，
-  但每个 Instance Tick 仍会重新执行。
-- playaround 同时使用“Ready 状态”和 `Result.Ready`；当前实现把 Ready 保留为
-  结果构造器，Node `Status` 只记录生命周期状态，避免把调度状态暴露成 LIP 值。
-- State 的初值、SetState 的消费时机、Retry/Feedback 的次数含义、ExternalWrite
-  的顺序屏障已经分别写入 0.3/0.4 规范。
-- `Graph` 和 `Instance` 的公共执行/观察方法已串行化，避免复用对象时的竞态；
-  Host 仍须在执行前完成注册，Host operation 自己负责保护内部共享状态。
-- 生成入口只接受声明的参数；所有 Flow 显式声明输入/输出类型，恰好一个 `return`，外部示例用 `require
-  host`/`require python` 写出 adapter 或 Python 环境边界，未声明的外部调用在
-  `check` 失败，缺失时不再由编译器补值。
-
-## 有意保留的边界
-
-- 普通 `for`/`while`、事件/流、detach/background、完整 Effect 类型系统，以及
-  直接执行 Python/Go `import` 尚未进入 Alpha 0.5；文件头的 `require` 依赖元数据
-  已进入，用于环境声明而不触发安装或导入；通用 dotted Host call
-  已经通过 Python Worker 提供。
-- Unknown Host effect 按 ExternalWrite 处理，牺牲部分并行换取安全顺序。
-- Map 的结果保持输入顺序；Map 元素可以并行，但 effectful Map 按顺序执行。
-- 当前一次 `Run`/`Tick` 是 fail-fast 的：节点错误会停止新的独立工作，未开始
-  的节点记为 `Skipped`。这比“只传播到数据下游”更保守，是 Alpha 的明确执行策略。
-- Instance 的并发调用会串行化；Host callback 不应重入同一个 Instance 的锁定方法。
-- Python 集成先走独立进程协议，不把解释器、GIL 或 Python 包管理引入 LIP 编译核心；
-  `require python "..."` 只记录包/版本要求，实际模块仍由 Worker 环境解析。
-- Python 文档把调用通道（JSONL、Unix socket/gRPC、HTTP）和数据通道（映射文件、
-  Arrow、共享内存）分开；当前 `ProcessHost` 已实现 P0/P1 的 JSONL 控制面，P2
-  只读 blob/mmap 数据面已落地，P3 传输升级仍保持为后续阶段。
-- Python 路线的默认形态已经明确为 `os/exec` 启动一次、Worker 常驻、stdin/stdout
-  JSONL；Unix Domain Socket 是后续可替换传输，Gob 不作为跨语言默认协议，大数组
-  走独立数据面。
-- 中文 README 和 `README.en.md` 共享同一 Alpha 0.5 能力边界；Python Worker 的
-  进程 Adapter 和通用 dotted call 已加入实现能力，直接 LIP `import`、事件/流和
-  完整 Effect 类型系统仍标为后续候选；依赖元数据通过 `require` 声明。
-
-## 验证
-
-以下检查在本次审计中通过：
+## 验证入口
 
 ```bash
-go test ./...
-go test -race ./...
-go vet ./...
-go build -buildvcs=false ./...
-for f in examples/*.lip tests/conformance/*.lip; do lipc check "$f"; done
-lipc build -o /tmp/lip-example examples/hello.lip
-lipc run examples/hello.lip -- Alice
+bash scripts/verify-release.sh
 ```
+
+脚本执行 tests/race/vet/build、全部示例与 conformance 的检查/Go 生成/构建/vet，
+以及 core/range/tree/lists 的独立运行验收。最新结果见 [RELEASE.md](../RELEASE.md)。
+0.6.0 完整验收为 33 份源程序；0.6.1 扩至 47 份，最新完整执行结果记录在
+RELEASE：2026-10-07 tests/race/vet/build 与 47 份源程序全部通过。
+额外 compiler fuzz 设置 10 秒、2 worker，通过 240,582 次执行，
+检查随机输入无崩溃、接受的程序能生成可格式化 Go。
+
+实际修正：字符串 * 仅防整数溢出仍可巨量分配；Map/fold 缺输入上限；文件
+读取误注册 Pure；Python 非有限静默变 null、键碰撞覆盖、set 无序变 list、
+失败转换泄漏句柄；测试把 Worker 启动故障当缺环境跳过。修正都有失败或
+组合验证，没有减少检查来掩盖问题。
+
+list/object 在边界检查外层形状，动态元素在运算时检查。Host 通过 Context
+协作取消并保护共享资源，外部写入完成后保留其结果。
+
+生成代码的 vet 曾发现 Host/Go 入口提前返回后的不可达分支，现已通过生成器
+结构修正，而不是跳过 vet。Python 科学包缺失时对应环境测试明确跳过；独立核心
+不以科学包为前提。

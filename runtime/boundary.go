@@ -7,6 +7,7 @@ import (
 	"math"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // Input declares one positional CLI parameter. Libraries pass native Go values
@@ -21,7 +22,19 @@ var decimalNumber = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?
 
 func ParseCLIInputs(args []string, params []Input) (map[string]Value, error) {
 	if len(args) != len(params) {
-		return nil, fmt.Errorf("expected %d arguments, got %d", len(params), len(args))
+		noun := "arguments"
+		if len(params) == 1 {
+			noun = "argument"
+		}
+		message := fmt.Sprintf("expected %d %s, got %d", len(params), noun, len(args))
+		if len(args) < len(params) {
+			missing := make([]string, 0, len(params)-len(args))
+			for _, param := range params[len(args):] {
+				missing = append(missing, param.Name+":"+param.Type)
+			}
+			message += "; missing " + strings.Join(missing, ", ")
+		}
+		return nil, fmt.Errorf("%s", message)
 	}
 	inputs := make(map[string]Value, len(params))
 	for i, param := range params {
@@ -43,13 +56,16 @@ func ParseCLIInputs(args []string, params []Input) (map[string]Value, error) {
 				err = fmt.Errorf("expected true or false, got %q", raw)
 			}
 			value = raw == "true"
-		case "any":
+		case "any", "list", "object":
 			err = json.Unmarshal([]byte(raw), &value)
 			if err != nil {
-				err = fmt.Errorf("any input must be valid JSON: %w", err)
+				err = fmt.Errorf("%s input must be valid JSON: %w", param.Type, err)
 			}
 		default:
 			err = fmt.Errorf("unknown input type %q", param.Type)
+		}
+		if err == nil {
+			err = CheckType(value, param.Type)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("argument %d (%s): %w", i+1, param.Name, err)

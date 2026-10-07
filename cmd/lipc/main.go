@@ -1,215 +1,260 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/format"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	stdruntime "runtime"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"lipalpha/compiler"
+	"lipalpha/runtime"
 )
 
-const version = "0.5.0"
+const version = "0.6.1"
 
 func main() {
-	args := os.Args[1:]
+	os.Exit(execute(os.Args[1:]))
+}
+
+func execute(args []string) int {
 	if len(args) == 0 {
-		usage()
-		os.Exit(2)
+		return help(nil)
 	}
 	switch args[0] {
-	case "version", "--version", "-v":
+	case "version", "--version":
+		if len(args) == 2 && args[1] == "--help" {
+			return help([]string{"version"})
+		}
+		if len(args) != 1 {
+			return usageError("version", "version does not accept arguments")
+		}
 		fmt.Println(version)
-	case "help", "--help", "-h":
-		help(args[1:])
+		return 0
+	case "help", "--help":
+		if len(args) == 2 && args[1] == "--help" {
+			return help([]string{"help"})
+		}
+		return help(args[1:])
 	case "check":
-		check(args[1:])
-	case "migrate":
-		migrate(args[1:])
+		return check(args[1:])
+	case "inspect":
+		return inspect(args[1:])
 	case "build":
-		build(args[1:])
+		return build(args[1:])
 	case "run":
-		if code := run(args[1:]); code != 0 {
-			os.Exit(code)
-		}
+		return run(args[1:])
 	default:
-		// Shorthand keeps the original source-generation workflow:
-		// `lipc file.lip [-o generated.go]`.
-		if hasLipFile(args) {
-			build(append([]string{"-emit-go"}, args...))
-			return
+		if strings.HasPrefix(args[0], "-") {
+			return usageError("", fmt.Sprintf("unknown option %q", args[0]))
 		}
-		usage()
-		os.Exit(2)
+		return usageError("", fmt.Sprintf("unknown command %q", args[0]))
 	}
 }
 
-func migrate(args []string) {
-	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	output := fs.String("o", "", "write migrated source to this path (default: stdout)")
-	if err := fs.Parse(moveLipFileLast(args)); err != nil {
-		if err == flag.ErrHelp {
-			return
-		}
-		fail(err)
+func check(args []string) int {
+	fs := commandFlags("check")
+	structured := fs.Bool("json", false, "print lip.diagnostics.v1 JSON for humans and agents")
+	if err := parseFlags(fs, args); err != nil {
+		return flagFailure(fs, err)
 	}
 	if fs.NArg() != 1 {
-		fail(fmt.Errorf("migrate expects one .lip file"))
+		return usageError("check", "check expects one source file")
 	}
-	source, err := os.ReadFile(fs.Arg(0))
+	if *structured {
+		report := compiler.CheckFile(fs.Arg(0))
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			fmt.Fprintln(os.Stderr, "lipc:", err)
+			return 1
+		}
+		if !report.OK {
+			return 1
+		}
+		return 0
+	}
+	graph, err := compiler.CompileFile(fs.Arg(0))
 	if err != nil {
-		fail(err)
-	}
-	updated, report, err := compiler.MigrateSource(string(source))
-	if err != nil {
-		fail(err)
-	}
-	fmt.Fprintln(os.Stderr, compiler.MigrationReport(report))
-	if *output == "" {
-		fmt.Print(updated)
-	} else if err := writeFile(*output, []byte(updated)); err != nil {
-		fail(err)
-	}
-}
-
-func check(args []string) {
-	if len(args) != 1 {
-		fail(fmt.Errorf("check expects one .lip file"))
-	}
-	graph, err := compiler.CompileFile(args[0])
-	if err != nil {
-		fail(err)
+		fmt.Fprintln(os.Stderr, "lipc:", err)
+		return 1
 	}
 	fmt.Printf("ok: flow %s, %d graph nodes\n", graph.Flow, len(graph.Nodes))
 	for _, dependency := range graph.Dependencies {
 		fmt.Printf("require: %s:%s\n", dependency.Kind, dependency.Spec)
 	}
+	return 0
 }
 
-func build(args []string) {
-	fs := flag.NewFlagSet("build", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	out := fs.String("o", "", "output executable or generated Go file")
+func build(args []string) int {
+	fs := commandFlags("build")
+	out := fs.String("output", "", "output executable or generated Go file")
 	pkg := fs.String("package", "main", "generated Go package name")
 	noMain := fs.Bool("no-main", false, "generate a library package without main")
 	emitGo := fs.Bool("emit-go", false, "write generated Go source instead of compiling an executable")
-	args = moveLipFileLast(args)
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return
-		}
-		fail(err)
+	if err := parseFlags(fs, args); err != nil {
+		return flagFailure(fs, err)
 	}
 	if fs.NArg() != 1 {
-		fail(fmt.Errorf("build expects one .lip file"))
+		return usageError("build", "build expects one source file")
 	}
 	input := fs.Arg(0)
+	includeMain := !*noMain
+	if includeMain && *pkg != "main" {
+		return usageError("build", fmt.Sprintf("package %q requires --no-main", *pkg))
+	}
+	emitSource := *emitGo || *noMain
 	graph, err := compiler.CompileFile(input)
 	if err != nil {
-		fail(err)
-	}
-	includeMain := !*noMain
-	if !includeMain && !*emitGo && !strings.HasSuffix(*out, ".go") {
-		fail(fmt.Errorf("-no-main requires -emit-go or a .go output path"))
-	}
-	if !*emitGo && !strings.HasSuffix(*out, ".go") && *pkg != "main" {
-		fail(fmt.Errorf("an executable build requires -package main"))
-	}
-	if !includeMain && *out == "" {
-		*emitGo = true
+		return fail(err)
 	}
 	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: *pkg, IncludeMain: includeMain})
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 	formatted, err := format.Source([]byte(code))
 	if err != nil {
-		fail(fmt.Errorf("format generated Go: %w", err))
+		return fail(fmt.Errorf("format generated Go: %w", err))
 	}
 	output := *out
-	if *emitGo || strings.HasSuffix(output, ".go") {
-		if output == "" {
-			output = filepath.Join(filepath.Dir(input), graph.Flow+"_generated.go")
-		}
-		if err := writeFile(output, formatted); err != nil {
-			fail(err)
-		}
-		fmt.Printf("generated %s -> %s\n", input, output)
-		return
+	name := executableName(graph.Flow)
+	if emitSource {
+		name = graph.Flow + "_generated.go"
 	}
 	if output == "" {
-		output = filepath.Join(mustWorkingDir(), graph.Flow)
+		output = name
+		if emitSource {
+			output = filepath.Join(filepath.Dir(input), name)
+		}
+	} else if outputDirectory(output) {
+		output = filepath.Join(output, name)
 	}
-	if err := compileGenerated(formatted, input, output); err != nil {
-		fail(err)
+	if err := distinctOutput(input, output); err != nil {
+		return usageError("build", err.Error())
+	}
+	if emitSource {
+		if err := writeFile(output, formatted); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("generated %s -> %s\n", input, output)
+		return 0
+	}
+	if err := compileGenerated(formatted, output); err != nil {
+		return fail(err)
 	}
 	fmt.Printf("built %s -> %s\n", input, output)
+	return 0
 }
 
 func run(args []string) int {
-	if len(args) == 0 {
-		fail(fmt.Errorf("run expects one .lip file"))
+	fs := commandFlags("run")
+	tracePath := fs.String("trace", "", "write execution trace JSON to this file")
+	// flag.Parse stops at the first positional argument: the entry file.
+	// Everything after it belongs to the program, including option-like values.
+	if err := parseFlags(fs, args); err != nil {
+		return flagFailure(fs, err)
 	}
-	inputIndex := len(args)
-	for i, arg := range args {
-		if arg == "--" {
-			inputIndex = i
-			break
+	if fs.NArg() < 1 {
+		return usageError("run", "run expects a source file followed by program inputs")
+	}
+	input := fs.Arg(0)
+	programArgs := fs.Args()[1:]
+	if *tracePath != "" {
+		absolute, err := filepath.Abs(*tracePath)
+		if err != nil {
+			return fail(err)
 		}
-	}
-	if inputIndex == 0 {
-		fail(fmt.Errorf("run expects one .lip file"))
-	}
-	if inputIndex < len(args) && inputIndex != 1 {
-		fail(fmt.Errorf("run expects exactly one .lip file before --"))
-	}
-	input := args[0]
-	if !strings.HasSuffix(input, ".lip") {
-		fail(fmt.Errorf("run expects a .lip file"))
-	}
-	if inputIndex == len(args) && len(args) > 1 {
-		fail(fmt.Errorf("run program arguments must follow --"))
-	}
-	programArgs := []string{}
-	if inputIndex < len(args) {
-		programArgs = args[inputIndex+1:]
+		*tracePath = absolute
+		if err := distinctOutput(input, *tracePath); err != nil {
+			return usageError("run", err.Error())
+		}
 	}
 	graph, err := compiler.CompileFile(input)
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
-	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: "main", IncludeMain: true})
+	params := make([]runtime.Input, len(graph.Params))
+	for i, name := range graph.Params {
+		params[i] = runtime.Input{Name: name, Type: graph.ParamTypes[name]}
+	}
+	if _, err := runtime.ParseCLIInputs(programArgs, params); err != nil {
+		fmt.Fprintln(os.Stderr, "lipc:", err)
+		fmt.Fprintf(os.Stderr, "usage: lipc run %s", displayArgument(input))
+		for _, param := range params {
+			fmt.Fprintf(os.Stderr, " <%s:%s>", param.Name, param.Type)
+		}
+		fmt.Fprintln(os.Stderr)
+		return 2
+	}
+	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: "main", IncludeMain: true, TracePath: *tracePath})
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 	formatted, err := format.Source([]byte(code))
 	if err != nil {
-		fail(fmt.Errorf("format generated Go: %w", err))
+		return fail(fmt.Errorf("format generated Go: %w", err))
 	}
-	temp, root, cleanup, err := temporarySource(formatted, input)
+	directory, err := os.MkdirTemp("", "lipc-run-")
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
-	defer cleanup()
-	commandArgs := []string{"run", "-buildvcs=false", temp}
-	if len(programArgs) > 0 {
-		commandArgs = append(commandArgs, programArgs...)
-	}
-	command := exec.Command("go", commandArgs...)
-	command.Dir = root
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			return exitError.ExitCode()
-		}
+	defer os.RemoveAll(directory)
+	binary := filepath.Join(directory, executableName("program"))
+	if err := compileGenerated(formatted, binary); err != nil {
 		fmt.Fprintln(os.Stderr, "lipc:", err)
 		return 1
 	}
+	command := exec.Command(binary, programArgs...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	if err := command.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "lipc:", err)
+		return 1
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	for {
+		select {
+		case received := <-signals:
+			_ = command.Process.Signal(received)
+		case err := <-done:
+			if err == nil {
+				return 0
+			}
+			if exitError, ok := err.(*exec.ExitError); ok {
+				return exitError.ExitCode()
+			}
+			fmt.Fprintln(os.Stderr, "lipc:", err)
+			return 1
+		}
+	}
+}
+
+func inspect(args []string) int {
+	fs := commandFlags("inspect")
+	if err := parseFlags(fs, args); err != nil {
+		return flagFailure(fs, err)
+	}
+	if fs.NArg() != 1 {
+		return usageError("inspect", "inspect expects one source file")
+	}
+	graph, err := compiler.CompileFile(fs.Arg(0))
+	if err != nil {
+		return fail(err)
+	}
+	data, err := compiler.InspectJSON(graph)
+	if err != nil {
+		return fail(err)
+	}
+	fmt.Println(string(data))
 	return 0
 }
 
@@ -220,8 +265,11 @@ func writeFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-func compileGenerated(code []byte, input, output string) error {
-	temp, root, cleanup, err := temporarySource(code, input)
+func compileGenerated(code []byte, output string) error {
+	if _, err := exec.LookPath("go"); err != nil {
+		return fmt.Errorf("building LIP programs requires Go 1.27 or newer: %w", err)
+	}
+	root, cleanup, err := temporarySource(code)
 	if err != nil {
 		return err
 	}
@@ -233,138 +281,194 @@ func compileGenerated(code []byte, input, output string) error {
 	if err := os.MkdirAll(filepath.Dir(absoluteOutput), 0o755); err != nil {
 		return err
 	}
-	command := exec.Command("go", "build", "-buildvcs=false", "-o", absoluteOutput, temp)
+	command := exec.Command("go", "build", "-buildvcs=false", "-mod=readonly", "-o", absoluteOutput, ".")
 	command.Dir = root
+	command.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	return command.Run()
 }
 
-func temporarySource(code []byte, input string) (path, root string, cleanup func(), err error) {
-	root = moduleRoot(input)
-	file, err := os.CreateTemp(root, "lipc-build-*.go")
+func temporarySource(code []byte) (root string, cleanup func(), err error) {
+	root, err = os.MkdirTemp("", "lipc-build-")
 	if err != nil {
-		return "", "", func() {}, err
+		return "", func() {}, err
 	}
-	path = file.Name()
-	cleanup = func() { _ = os.Remove(path) }
-	if _, err := file.Write(code); err != nil {
-		_ = file.Close()
+	cleanup = func() { _ = os.RemoveAll(root) }
+	if err := runtime.WriteBuildModule(root); err != nil {
 		cleanup()
-		return "", "", func() {}, err
+		return "", func() {}, err
 	}
-	if err := file.Close(); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "main.go"), code, 0o644); err != nil {
 		cleanup()
-		return "", "", func() {}, err
+		return "", func() {}, err
 	}
-	return path, root, cleanup, nil
+	return root, cleanup, nil
 }
 
-func moduleRoot(input string) string {
-	start, err := filepath.Abs(input)
-	if err != nil {
-		return mustWorkingDir()
-	}
-	if info, err := os.Stat(start); err == nil && !info.IsDir() {
-		start = filepath.Dir(start)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(start, "go.mod")); err == nil {
-			return start
-		}
-		parent := filepath.Dir(start)
-		if parent == start {
-			return mustWorkingDir()
-		}
-		start = parent
-	}
+func commandFlags(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	return fs
 }
 
-func mustWorkingDir() string {
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return "."
-	}
-	return workingDir
-}
-
-func hasLipFile(args []string) bool {
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		if arg == "-o" || arg == "-package" {
-			if index+1 < len(args) {
-				index++
-				continue
-			}
-		}
-		if strings.HasSuffix(arg, ".lip") {
-			return true
-		}
-	}
-	return false
-}
-
-func moveLipFileLast(args []string) []string {
+// The entry file ends tool options for every command. Option values are
+// consumed before looking for that boundary; program inputs remain untouched.
+func parseFlags(fs *flag.FlagSet, args []string) error {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "-o" || arg == "-package" {
-			i++
-			continue
+		if arg == "--" || arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
 		}
-		if !strings.HasSuffix(arg, ".lip") {
-			continue
+		if !strings.HasPrefix(arg, "--") {
+			return fmt.Errorf("unknown option %q; tool options start with --", arg)
 		}
-		out := make([]string, 0, len(args))
-		out = append(out, args[:i]...)
-		out = append(out, args[i+1:]...)
-		out = append(out, arg)
-		return out
+		name, _, inline := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		option := fs.Lookup(name)
+		if option == nil {
+			break // Let flag report unknown options and --help.
+		}
+		if !inline {
+			boolean, ok := option.Value.(interface{ IsBoolFlag() bool })
+			if !(ok && boolean.IsBoolFlag()) {
+				i++
+			}
+		}
 	}
-	return args
+	return fs.Parse(args)
+}
+
+func flagFailure(fs *flag.FlagSet, err error) int {
+	if err == flag.ErrHelp {
+		return help([]string{fs.Name()})
+	}
+	message := err.Error()
+	if name, ok := strings.CutPrefix(message, "flag provided but not defined: -"); ok {
+		message = "unknown option --" + name
+	} else if name, ok := strings.CutPrefix(message, "flag needs an argument: -"); ok {
+		message = "option --" + name + " requires a value"
+	} else {
+		message = strings.ReplaceAll(message, "for flag -", "for option --")
+	}
+	return usageError(fs.Name(), message)
+}
+
+func usageError(command, message string) int {
+	fmt.Fprintln(os.Stderr, "lipc:", message)
+	if command == "" {
+		fmt.Fprintln(os.Stderr, "See 'lipc help' for available commands.")
+	} else {
+		fmt.Fprintf(os.Stderr, "See 'lipc help %s' for usage.\n", command)
+	}
+	return 2
+}
+
+func outputDirectory(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return (err == nil && info.IsDir()) || os.IsPathSeparator(path[len(path)-1])
+}
+
+func executableName(name string) string {
+	goos := os.Getenv("GOOS")
+	if goos == "" {
+		goos = stdruntime.GOOS
+	}
+	if goos == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func distinctOutput(input, output string) error {
+	sourcePath, err := filepath.Abs(input)
+	if err != nil {
+		return err
+	}
+	outputPath, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	sourceInfo, sourceErr := os.Stat(sourcePath)
+	outputInfo, outputErr := os.Stat(outputPath)
+	if sourcePath == outputPath || (sourceErr == nil && outputErr == nil && os.SameFile(sourceInfo, outputInfo)) {
+		return fmt.Errorf("output %q would overwrite the source; choose a different path", output)
+	}
+	return nil
+}
+
+func displayArgument(arg string) string {
+	if strings.ContainsAny(arg, " \t\r\n\"'") {
+		return strconv.Quote(arg)
+	}
+	return arg
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  lipc version")
-	fmt.Fprintln(os.Stderr, "  lipc help [command]")
-	fmt.Fprintln(os.Stderr, "  lipc run file.lip [-- program-args...]")
-	fmt.Fprintln(os.Stderr, "  lipc build file.lip [-o executable]")
-	fmt.Fprintln(os.Stderr, "  lipc build -emit-go file.lip [-o generated.go]")
-	fmt.Fprintln(os.Stderr, "  lipc check file.lip")
-	fmt.Fprintln(os.Stderr, "  lipc migrate file.lip [-o migrated.lip]")
-	fmt.Fprintln(os.Stderr, "  lipc file.lip [-o generated.go]  # compatibility shorthand")
+	fmt.Print("usage: lipc <command> [options]\n\n")
+	for _, command := range [][3]string{
+		{"run", "[--trace path.json] file.lip [inputs...]", "Compile and run"},
+		{"build", "[--output path] file.lip", "Build an executable"},
+		{"check", "[--json] file.lip", "Check a program"},
+		{"inspect", "file.lip", "Show its dependency graph"},
+		{"version", "", "Show the version"},
+		{"help", "[command]", "Show help"},
+	} {
+		fmt.Printf("  %-9s %-40s %s\n", command[0], command[1], command[2])
+	}
 }
 
-func help(args []string) {
+func help(args []string) int {
+	if len(args) > 1 {
+		return usageError("help", "help accepts one command name")
+	}
 	if len(args) == 0 {
-		fmt.Println("lipc — compile and run LIP programs")
+		fmt.Printf("lipc %s — compile and run LIP programs\n", version)
 		fmt.Println()
 		usage()
 		fmt.Println()
-		fmt.Println("Use 'lipc help build' or 'lipc help run' for command details.")
-		return
+		fmt.Println("Start with: lipc run hello.lip 小林")
+		fmt.Println("Use 'lipc help <command>' for options and examples.")
+		return 0
 	}
 	switch args[0] {
-	case "migrate":
-		fmt.Println("lipc migrate file.lip reports syntax changes on stderr and prints checked Alpha 0.5 source on stdout.")
-		fmt.Println("Use -o path to save it; omitted parameter types become any, output types are inferred, and dependency directives become require.")
 	case "version":
-		fmt.Println("lipc version prints the compiler version.")
+		fmt.Println("usage: lipc version")
+		fmt.Println("Show the compiler version.")
+	case "inspect":
+		fmt.Println("usage: lipc inspect file.lip")
+		fmt.Println("Check the program and print its dependency graph as lip.graph.v1 JSON; no execution.")
 	case "check":
-		fmt.Println("lipc check file.lip validates syntax, names, types, dependencies and graph structure.")
+		fmt.Println("usage: lipc check [--json] file.lip")
+		fmt.Println("Check syntax, names, types and dependencies; errors include their source location and a hint.")
+		fmt.Println("Use --json for lip.diagnostics.v1. Checking stops at the first error.")
 	case "build":
-		fmt.Println("lipc build file.lip compiles a standalone executable.")
-		fmt.Println("Use -o path to choose the executable; use -emit-go or a .go output path to emit source.")
-		fmt.Println("Library generation: lipc build -emit-go -no-main -package name -o flow.go file.lip")
+		fmt.Println("usage: lipc build [--output path] [--emit-go] [--no-main] [--package name] file.lip")
+		fmt.Println("Build an executable with Go 1.27 or newer; runtime sources are bundled.")
+		fmt.Println("The default executable is named after the Flow in the current directory (.exe on Windows).")
+		fmt.Println("Use --emit-go for Go source; --no-main generates library source directly.")
+		fmt.Println("Source defaults to <Flow>_generated.go next to the input. --output also accepts a directory.")
+		fmt.Println("Library: lipc build --no-main --package hostflow --output flow.go file.lip")
 	case "run":
-		fmt.Println("lipc run file.lip compiles a temporary executable and runs it.")
-		fmt.Println("Arguments after -- are passed in Flow parameter order; missing or extra arguments fail.")
+		fmt.Println("usage: lipc run [--trace path.json] file.lip [inputs...]")
+		fmt.Println("Compile and run in the current directory with Go 1.27 or newer; temporary files are cleaned up.")
+		fmt.Println("Tool options go before the file; everything after it is passed in Flow parameter order, including --help or --trace.")
+		fmt.Println("Example: lipc run --trace trace.json file.lip args...")
+		fmt.Println("Use --trace to record success or execution failure; normal output still goes to stdout.")
+		fmt.Println("Inputs bind by position. Missing, extra or invalid inputs are reported before compilation.")
+	case "help":
+		fmt.Println("usage: lipc help [command]")
+		fmt.Println("Show available commands or help for one command; --help works on each command too.")
 	default:
-		usage()
+		return usageError("", fmt.Sprintf("unknown command %q", args[0]))
 	}
+	return 0
 }
 
-func fail(err error) {
+func fail(err error) int {
 	fmt.Fprintln(os.Stderr, "lipc:", err)
-	os.Exit(1)
+	return 1
 }

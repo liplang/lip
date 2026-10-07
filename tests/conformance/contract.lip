@@ -1,6 +1,6 @@
 fn twice(x: number) -> number { return x * 2 }
 
 flow Contract(name: string, value: number, enabled: bool, payload: any) -> any {
-    description = if enabled then name + ":" + str(twice(value)) else "disabled"
+    description = if enabled { name + ":" + str(twice(value)) } else { "disabled" }
     return [description, payload]
 }

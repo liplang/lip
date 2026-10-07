@@ -1,16 +1,9 @@
-# LIP 规范索引
+# LIP 规范
 
-这些文档定义各个 Alpha 里程碑的语言与 Runtime 边界。后一个版本延续已有模型，并在文档中标明新增或收紧的规则；v0.5 的完整契约
-优先于历史版本的省略类型、多输出和隐式 nil 规则。
+[语言与执行规范](ALPHA-0.6-SPEC.md) 统一定义文件结构、类型、表达式、依赖图、
+调度、State/Tick 和命令行。标准库的详细契约见
+[列表库](LIST-LIBRARY.md)与[字符串库](STRING-LIBRARY.md)。
 
-| 规范 | 主要边界 |
-| --- | --- |
-| [Alpha 0.1](ALPHA-0.1-SPEC.md) | 基础语法、依赖图、Host 边界与确定性调度 |
-| [Alpha 0.2](ALPHA-0.2-SPEC.md) | Dynamic Map 与有界并行 |
-| [Alpha 0.3](ALPHA-0.3-SPEC.md) | 持久 Instance、State、Logical Tick 与增量重算 |
-| [Alpha 0.4](ALPHA-0.4-SPEC.md) | Retry、Feedback、取消、Effect/Ordering、严格输入与依赖声明 |
-| [Alpha 0.5](ALPHA-0.5-SPEC.md) | 完整程序契约、`require` 依赖头、显式输入/输出、忠实翻译与 Python 边界 |
-
-当前参考实现版本为 `0.5.0`，版本源文件见仓库根目录的 [VERSION](../VERSION)。
-发布检查项见 [RELEASE.md](../RELEASE.md)，版本变更见
-[CHANGELOG.md](../CHANGELOG.md)。
+参考实现版本为 `0.6.1`，版本源见 [VERSION](../VERSION)。
+从[快速入门](QUICKSTART.md)开始，或阅读[完整教程](TUTORIAL.md)。
+验证入口见[发布清单](../RELEASE.md)，版本历史保留在[变更记录](../CHANGELOG.md)。

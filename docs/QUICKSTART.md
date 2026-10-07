@@ -1,221 +1,182 @@
-# LIP Alpha 0.5 快速入门
+# LIP Alpha 0.6.1 快速入门
 
-LIP Alpha 0.5 需要 Go 1.27。
+需要 Go 1.27 或更高版本。
 
-查看当前编译器实现版本：
+## 安装
 
-```bash
-GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version
-```
-
-## 1. 验证仓库
+在仓库根目录安装工具：
 
 ```bash
-GOCACHE=/tmp/lip-gocache go test ./...
-GOCACHE=/tmp/lip-gocache go vet ./...
-GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
+go install ./cmd/lipc
 ```
 
-## 2. 写一个 Flow
+安装位置跟随 Go 配置：GOBIN 非空时用 GOBIN，否则用第一个 GOPATH 目录下的
+`bin`。可用 `go env GOBIN GOPATH` 查看实际位置。
+
+工具目录已在 PATH 中时，直接运行：
+
+```bash
+lipc help
+```
+
+也可以直接用安装路径，无需修改 PATH。未自定义 Go 配置时，Linux/macOS
+常见位置是 `~/go/bin/lipc`，例如：
+
+```bash
+~/go/bin/lipc help
+```
+
+Windows 的常见位置是用户目录下的 `go\bin\lipc.exe`。未自定义时，PowerShell
+可直接调用：
+
+```powershell
+& "$env:USERPROFILE\go\bin\lipc.exe" help
+```
+
+已有 GOBIN/GOPATH 配置时，使用自己的实际安装路径即可。后文用 `lipc` 表示
+工具，可以按习惯使用命令名或完整路径；示例文件路径以仓库根目录为基准。
+编译器内置 Runtime，在自己的项目里也能 `run/build`，无需保留仓库或创建
+`go.mod`。构建仍需 Go；编译出的核心程序无需 Go。
+
+工具选项放在文件前，程序输入放在文件后：`lipc run hello.lip 小林`，或
+`lipc run --trace trace.json hello.lip 小林`。按这个顺序传入即可。
+
+## 1. 先打个招呼
+
+```bash
+lipc run examples/tutorial/01_hello.lip 小林
+# 你好，小林！
+```
+
+它的完整源码只有几行：
 
 ```lip
-flow Hello(request: string) -> string {
-    greeting = "Hello, " + request
+flow Hello(name: string) -> string {
+    greeting = "你好，" + name + "！"
     return greeting
 }
 ```
 
-保存为 `hello.lip`，先检查：
+`小林` 是 name 的输入，结果直接显示在终端。按顺序传入声明的参数即可。逐步解释见[编程教程](TUTORIAL.md)。
 
-```bash
-go run ./cmd/lipc check hello.lip
-```
+## 2. 列表变换与聚合
 
-像 `go build` 一样生成可执行文件：
-
-```bash
-go run ./cmd/lipc build hello.lip
-```
-
-像 `go run` 一样临时生成并运行：
-
-```bash
-go run ./cmd/lipc run hello.lip -- Alice
-```
-
-`request: string` 与 `-> string` 声明输入和输出，因此运行时必须提供且只能提供一个
-位置参数。所有参数必须显式写类型；每个 Flow 恰好一个 `return`。
-缺少参数、参数过多或类型不匹配都会以非零状态失败；编译器不会替程序补一个
-示例值。`number` 参数接受有限十进制数，`bool` 只接受 `true` 或 `false`，
-`any` 参数在命令行上必须是 JSON（例如 `'[1,2,3]'`）。
-
-需要审查或提交生成的 Go 时显式使用 `-emit-go`：
-
-```bash
-go run ./cmd/lipc build -emit-go -o hello_generated.go hello.lip
-```
-
-直接传 `.lip` 文件仍保留为生成源码的兼容简写：
-
-```bash
-go run ./cmd/lipc hello.lip
-```
-
-如果已经安装命令，也可以省略 `go run ./cmd/lipc`：
-
-```bash
-go install ./cmd/lipc
-lipc hello.lip
-```
-
-字符串连接使用普通的 `+`，`return` 是 Flow 的结果。生成文件可以直接
-编译运行：
-
-```bash
-go run hello_generated.go Alice
-```
-
-### 声明外部依赖
-
-LIP 不把 Python 解释器或 Go 包导入编译进语言核心。需要可复现地说明运行环境
-时，可以在文件头写声明：
+[examples/core.lip](../examples/core.lip) 接收列表，变换、聚合并返回对象：
 
 ```lip
-require python "numpy>=1.26"
-require python "pandas"
+fn add(total: number, value: number) -> number { return total + value }
 
-flow Scientific(values: any) -> any {
-    total = numpy.sum(values)
-    return total
+flow Report(values: list) -> object {
+    doubled = [x * 2 for x in values]
+    total = fold(doubled, 0, add)
+    return {
+        count: len(values), values: doubled, total: total,
+        average: if len(values) == 0 { null } else { total / len(values) }
+    }
 }
 ```
-
-`require python`、`require go` 和 `require host` 只是依赖元数据：`lipc check`
-会显示它们，库模式生成的 Go 也提供 `RequiredDependencies()`；它们不会联网安装
-包，也不会偷偷导入或替换 Python 环境。Python dotted call 仍可调用 Worker 环境中
-任意已安装模块，声明用于部署前检查和审查。`require go` 表示承载该 Flow 的 Go
-程序需要相应包并注册 Host adapter；LIP 源文件不能直接导入 Go 包。
-声明了 `require python` 的独立可执行入口会自动启动默认 Python Worker；生成库则
-仍由宿主显式创建 Worker，以便控制解释器、模块策略和生命周期。
-
-`request: string` 会让生成的入口检查输入类型；传入数字不会被偷偷转成
-字符串，而是返回错误。确实需要显式转换时写 `str(value)`：
-
-```lip
-flow Describe(value: any) -> string {
-    return "value=" + str(value)
-}
-```
-
-## 3. 函数、列表和字段
-
-```lip
-fn twice(x: number) {
-    return x * 2
-}
-
-flow Example() -> number {
-    values = [1, 2, 3]
-    selected = values[1]
-    result = twice(selected)
-    return result
-}
-```
-
-`fn` 是局部表达式计算；Flow 中的绑定才是依赖图节点。数字使用 `+ - * /`、
-比较使用 `> >= < <= == !=`，逻辑使用 `&& ||`。`print(value)` 是默认 Host 提供的
-控制台操作，用来产生控制台副作用；它不负责返回 Flow 结果。
-
-## 4. 使用 Go Host Adapter
-
-LIP 只描述操作名称，Go 负责实现真实能力：
-
-```go
-import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "os"
-
-    "lipalpha/runtime"
-)
-
-host := runtime.DefaultHost()
-host.RegisterPure("load_profile", func(ctx context.Context, args []runtime.Value) runtime.Result {
-    if len(args) != 1 {
-        return runtime.Failed(fmt.Errorf("load_profile expects one path"))
-    }
-    path, ok := args[0].(string)
-    if !ok {
-        return runtime.Failed(fmt.Errorf("load_profile expects a string path"))
-    }
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return runtime.Failed(err)
-    }
-    var profile map[string]any
-    if err := json.Unmarshal(data, &profile); err != nil {
-        return runtime.Failed(err)
-    }
-    return runtime.Ready(profile)
-})
-```
-
-使用库模式生成 Flow：
 
 ```bash
-go run ./cmd/lipc examples/host_adapter/flow.lip \
-  -o examples/host_adapter/flow/flow_gen.go \
-  -package hostflow -no-main
-go run ./examples/host_adapter
+lipc check examples/core.lip
+lipc run examples/core.lip '[1,2,3]'
+# {"average":4,"count":3,"total":12,"values":[2,4,6]}
+lipc run examples/core.lip '[]'
+# {"average":null,"count":0,"total":0,"values":[]}
 ```
 
-完整示例见 [examples/host_adapter](../examples/host_adapter)。
+参数类型和 Flow 输出写在声明中，`return` 给出结果。`list`、`object` 和 `any`
+输入使用 JSON；string 原样传入，number 使用有限十进制数，bool 使用
+true/false。列表与对象检查外层形状，动态元素在运算中校验。
 
-## 5. 自动调度与有限并行
+## 3. 区间、Map 与聚合
 
-默认的 `Run` 会自动调度独立纯节点和只读节点。只有明确标记为纯/只读的操作
-才具备并行资格：
-
-```go
-value, trace, err := hostflow.Run(ctx, host, inputs)
+```bash
+lipc run examples/range.lip 5
+# {"total":30,"values":[0,1,4,9,16]}
 ```
 
-需要显式控制最大并行度时使用：
+`range(start, end[, step])` 使用半开区间，允许负步长；0 步长或超过 1,000,000
+个元素报错。Map 推导式先绑定区间；fold/list.* 可嵌套纯表达式。`fold(list, seed, fn)`
+按输入顺序归约，fn 是本地二参数纯函数；空列表返回 seed。
 
-```go
-value, trace, err := hostflow.RunParallel(ctx, host, inputs, 2)
-```
+## 4. 分组、合并和转置
 
-普通 `host.Register` 操作保持顺序执行；严格基准模式使用
-`hostflow.RunSequential(...)`。
-
-## 6. 动态 Map
-
-Alpha 0.5 支持受限列表推导式：
+`list.*` 标准库提供 34 个纯操作，不需要 Host。比如：
 
 ```lip
-fn twice(x: number) { return x * 2 }
+list.concat([1, 2], [3, 4])
+list.transpose([[1, 2], [3, 4]])
+list.partition([1, 2, 3], 2, 1)
+```
 
-flow MapNumbers() -> any {
-    values = [1, 2, 3]
-    doubled = [twice(x) for x in values]
-    return doubled
+callback 使用本地纯函数：`list.group_by(rows, department)`、
+`list.filter(rows, positive)`、`list.sort_by(rows, amount)`。完整程序见
+[examples/lists.lip](../examples/lists.lip)，签名和边界见
+[LIST-LIBRARY.md](LIST-LIBRARY.md)。
+
+## 5. 字符串与修复诊断
+
+文本处理无需 Host：
+
+```bash
+lipc check --json examples/strings.lip
+lipc run examples/strings.lip ' Rust, LIP, rust, ,你好 '
+# {"count":3,"label":"rust / lip / 你好","tags":["rust","lip","你好"]}
+```
+
+19 个 string 操作覆盖清理、分割、合并、查询、替换和数值解析；错误业务分支
+用 fail(message)。细致的逐步教程见 [TUTORIAL.md](TUTORIAL.md)，AI 编写/修复
+约定见 [VIBE-CODING.md](VIBE-CODING.md)。
+
+## 6. 纯递归
+
+```lip
+fn factorial(n: number) -> number {
+    return if n <= 1 { 1 } else { n * factorial(n - 1) }
 }
 ```
 
-Map 的输入必须是 Go slice 或 array，输出保持输入顺序。`RunSequential`
-逐个处理；`Run` 和 `RunParallel` 对纯 Map 元素使用调用方提供的并发上限。
-Map 不引入持久状态、反馈或事件语义。完整边界见
-[ALPHA-0.2-SPEC.md](ALPHA-0.2-SPEC.md)、[ALPHA-0.3-SPEC.md](ALPHA-0.3-SPEC.md)
-和 [ALPHA-0.4-SPEC.md](ALPHA-0.4-SPEC.md)。
-
-## 迁移旧程序
+直接或间接递归环中的函数必须显式声明返回类型。每次本地调用检查取消，最大
+深度 256。树结构的可运行示例：
 
 ```bash
-lipc migrate old.lip -o migrated.lip
-lipc check migrated.lip
+lipc run examples/tree.lip '{"value":1,"left":{"value":2,"left":null,"right":null},"right":null}'
+# 3
 ```
 
-默认迁移结果写 stdout、报告写 stderr。省略的参数类型补为 `any`，输出类型由源表达式
-推导，门控输出加 `?`；缺少 return 或语义不完整的程序仍报错。
+集合遍历用 Map/fold，树与分治用递归。
+
+## 7. 看图和错误
+
+```bash
+lipc inspect examples/core.lip
+lipc run --trace core-trace.json examples/core.lip '[1,2,3]'
+lipc run --trace error-trace.json examples/core.lip '[1,"bad"]'
+```
+
+inspect 只检查并输出 `lip.graph.v1`，不执行 Host。trace 的 `lip.trace.v1` 记录
+节点状态、Tick 和原因，成功与执行失败都写到指定文件；输入或编译失败尚未
+执行图。相对 trace 路径相对于调用 lipc 的目录。run 原样保留程序的退出码，
+正常结果仍输出 stdout。
+
+## 8. 构建与外部能力
+
+```bash
+lipc build examples/core.lip
+./Report '[1,2,3]'
+```
+
+默认以 Flow 名称生成可执行文件；Windows 下生成 `Report.exe`，使用
+`.\Report.exe '[1,2,3]'` 运行。用 `--output 路径` 可以另选文件名或输出目录。
+Go 源码生成与库模式见[编译器文档](COMPILER.md#两种生成模式)。
+
+外部能力通过 `require` 声明。Host/Go 程序使用生成库和 adapter；Python
+程序使用常驻 Worker。详见
+[COMPILER.md](COMPILER.md)、[Host 示例](../examples/host_adapter) 和
+[Python 集成](PYTHON-INTEGRATION.md)。
+
+完整语言规则见[规范](ALPHA-0.6-SPEC.md)。运行仓库验证：
+
+```bash
+bash scripts/verify-release.sh
+```

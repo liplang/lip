@@ -1,0 +1,15 @@
+fn square(x: number) -> number { return x * x }
+fn add(total: number, x: number) -> number { return total + x }
+fn positive(x: number) -> bool { return x > 0 }
+
+flow ListConformance(stop: number) -> object {
+    values = range(0, stop)
+    return {
+        mapped: list.map(range(0, stop), square),
+        total: fold(range(0, stop), 0, add),
+        groups: list.group_by(values, positive),
+        cumulative: list.scan(values, 0, add),
+        merged: list.concat([1, 2], [3]),
+        transposed: list.transpose([[1, 2], [3, 4]])
+    }
+}

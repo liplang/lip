@@ -10,6 +10,8 @@ import (
 	"lipalpha/compiler/lexer"
 	"lipalpha/compiler/parser"
 	"lipalpha/compiler/token"
+	"lipalpha/internal/listops"
+	"lipalpha/internal/stringops"
 )
 
 type Graph struct {
@@ -38,26 +40,30 @@ type Node struct {
 }
 
 func ParseAndBuild(src string) (*Graph, error) {
+	graph, _, err := parseSource(src)
+	return graph, err
+}
+
+func parseSource(src string) (*Graph, string, error) {
 	tokens, err := lexer.New(src).Lex()
 	if err != nil {
-		return nil, err
+		return nil, "LIP_LEX_ERROR", err
 	}
 	program, err := parser.New(tokens).Parse()
 	if err != nil {
-		return nil, err
+		return nil, "LIP_SYNTAX_ERROR", err
 	}
-	return Build(program)
+	graph, err := Build(program)
+	return graph, "LIP_CHECK_ERROR", err
 }
 
-func Build(program *ast.Program) (*Graph, error) { return build(program, false) }
-
-func build(program *ast.Program, legacy bool) (*Graph, error) {
+func Build(program *ast.Program) (*Graph, error) {
 	if program == nil || program.Flow == nil {
 		return nil, fmt.Errorf("program has no flow")
 	}
 	f := program.Flow
 	g := &Graph{Flow: f.Name, Params: append([]string(nil), f.Params...), ParamTypes: f.ParamTypes, ReturnType: f.ReturnType, Dependencies: append([]ast.Dependency(nil), program.Dependencies...), Functions: program.Functions}
-	if !legacy && !validOutputType(f.ReturnType) {
+	if !validOutputType(f.ReturnType) {
 		return nil, fmt.Errorf("%d:%d: flow %q needs a valid explicit output type", f.Pos.Line, f.Pos.Column, f.Name)
 	}
 	seenDependencies := make(map[string]bool, len(g.Dependencies))
@@ -97,7 +103,7 @@ func build(program *ast.Program, legacy bool) (*Graph, error) {
 	allNames := make(map[string]bool)
 	types := make(map[string]string)
 	for _, p := range f.Params {
-		if !legacy && f.ParamTypes[p] == "" {
+		if f.ParamTypes[p] == "" {
 			return nil, fmt.Errorf("%d:%d: parameter %q needs an explicit type", f.Pos.Line, f.Pos.Column, p)
 		}
 		if reservedName(p) {
@@ -181,25 +187,16 @@ func build(program *ast.Program, legacy bool) (*Graph, error) {
 		return nil, fmt.Errorf("%d:%d: flow %q has no return value; every Flow must declare an output with return", f.Pos.Line, f.Pos.Column, f.Name)
 	}
 	if b.outputID != 1 {
-		return nil, fmt.Errorf("%d:%d: flow %q must have exactly one return; select a conditional value with if ... then ... else ...", f.Pos.Line, f.Pos.Column, f.Name)
+		return nil, fmt.Errorf("%d:%d: flow %q must have exactly one return; select a conditional value with if condition { value } else { other_value }", f.Pos.Line, f.Pos.Column, f.Name)
 	}
 	for _, n := range g.Nodes {
 		if !n.Output {
 			continue
 		}
-		if legacy && g.ReturnType == "" {
-			g.ReturnType = n.Type
-			if !validTypeName(g.ReturnType) {
-				g.ReturnType = "any"
-			}
-			if len(n.Gates) > 0 {
-				g.ReturnType += "?"
-			}
-		}
 		if len(n.Gates) > 0 && !strings.HasSuffix(g.ReturnType, "?") {
 			return nil, b.err(n.Pos, "gated return may produce no value; declare -> %s? or move return outside when", g.ReturnType)
 		}
-		if !compatibleType(strings.TrimSuffix(g.ReturnType, "?"), n.Type) {
+		if !compatibleType(g.ReturnType, n.Type) {
 			return nil, b.err(n.Pos, "return has type %s, declared output is %s", n.Type, g.ReturnType)
 		}
 	}
@@ -246,8 +243,14 @@ func validateOperationDependencies(program *ast.Program, functionNames map[strin
 		return false
 	}
 	checkOperation := func(name string, pos token.Pos) error {
-		if functionNames[name] || name == "str" || name == "print" || name == "state" || name == "retry" || name == "feedback" {
+		if functionNames[name] || builtinName(name) {
 			return nil
+		}
+		if strings.HasPrefix(name, "list.") {
+			return fmt.Errorf("%d:%d: unknown list operation %q; see the list standard library", pos.Line, pos.Column, name)
+		}
+		if strings.HasPrefix(name, "string.") {
+			return fmt.Errorf("%d:%d: unknown string operation %q; see the string standard library", pos.Line, pos.Column, name)
 		}
 		if strings.HasPrefix(name, "python.") && isPythonControlOperation(name) {
 			if len(pythonRoots) > 0 || hasHost(name) {
@@ -300,6 +303,14 @@ func validateOperationDependencies(program *ast.Program, functionNames map[strin
 					if err := visitExpr(arg); err != nil {
 						return err
 					}
+				}
+			}
+		case *ast.UnaryExpr:
+			return visitExpr(value.Operand)
+		case *ast.ObjectExpr:
+			for _, field := range value.Fields {
+				if err := visitExpr(field.Value); err != nil {
+					return err
 				}
 			}
 		case *ast.BinaryExpr:
@@ -461,7 +472,7 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			}
 			if typ, err := inferExprType(s.Cond, b.types, b.fnTypes, b.fnParams); err != nil {
 				return b.err(s.Pos, "%v", err)
-			} else if typ != "any" && typ != "bool" {
+			} else if !compatibleType("bool", typ) {
 				return b.err(s.Pos, "when condition must be bool, got %s", typ)
 			}
 			gate, _ := gateName(s.Cond)
@@ -514,7 +525,7 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			if err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
-			if err := validateDeclaredResult(s.Expr, strings.TrimSuffix(b.graph.ReturnType, "?"), b.types, b.fnTypes, b.fnParams); err != nil {
+			if err := validateDeclaredResult(s.Expr, b.graph.ReturnType, b.types, b.fnTypes, b.fnParams); err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
 			name := fmt.Sprintf("__return_%d", b.outputID)
@@ -675,6 +686,20 @@ func validateExpr(expr ast.Expr) error {
 			}
 		}
 		return nil
+	case *ast.UnaryExpr:
+		return validateSimpleExpr(e.Operand)
+	case *ast.ObjectExpr:
+		seen := map[string]bool{}
+		for _, field := range e.Fields {
+			if seen[field.Name] {
+				return fmt.Errorf("duplicate object key %q", field.Name)
+			}
+			seen[field.Name] = true
+			if err := validateSimpleExpr(field.Value); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *ast.BinaryExpr:
 		if err := validateSimpleExpr(e.Left); err != nil {
 			return err
@@ -724,6 +749,20 @@ func validateExpr(expr ast.Expr) error {
 func validateSimpleExpr(expr ast.Expr) error {
 	switch e := expr.(type) {
 	case *ast.IdentExpr, *ast.LiteralExpr:
+		return nil
+	case *ast.UnaryExpr:
+		return validateSimpleExpr(e.Operand)
+	case *ast.ObjectExpr:
+		seen := map[string]bool{}
+		for _, field := range e.Fields {
+			if seen[field.Name] {
+				return fmt.Errorf("duplicate object key %q", field.Name)
+			}
+			seen[field.Name] = true
+			if err := validateSimpleExpr(field.Value); err != nil {
+				return err
+			}
+		}
 		return nil
 	case *ast.BinaryExpr:
 		if err := validateSimpleExpr(e.Left); err != nil {
@@ -780,11 +819,20 @@ func refsOf(expr ast.Expr) []string {
 			}
 		case *ast.CallExpr:
 			args := x.Args
+			if index := callbackIndex(x); index >= 0 {
+				args = args[:index]
+			}
 			if x.Name == "feedback" && len(args) > 0 {
 				args = args[:1]
 			}
 			for _, a := range args {
 				visit(a, bound)
+			}
+		case *ast.UnaryExpr:
+			visit(x.Operand, bound)
+		case *ast.ObjectExpr:
+			for _, field := range x.Fields {
+				visit(field.Value, bound)
 			}
 		case *ast.BinaryExpr:
 			visit(x.Left, bound)
@@ -915,6 +963,8 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		return paramType(env, e.Name), nil
 	case *ast.LiteralExpr:
 		switch e.Value.(type) {
+		case nil:
+			return "null", nil
 		case string:
 			return "string", nil
 		case bool:
@@ -931,6 +981,30 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 				return "any", err
 			}
 			return "string", nil
+		}
+		if e.Name == "fail" {
+			if len(e.Args) != 1 {
+				return "any", fmt.Errorf("fail expects 1 string argument, got %d", len(e.Args))
+			}
+			actual, err := inferExprType(e.Args[0], env, fnTypes, fnParams)
+			if err != nil {
+				return "any", err
+			}
+			if !compatibleType("string", actual) {
+				return "any", fmt.Errorf("fail expects string, got %s", actual)
+			}
+			// An internal bottom type preserves the successful branch's type;
+			// it is not a source-level type or a dynamic-check escape hatch.
+			return "never", nil
+		}
+		if _, ok := listops.Lookup(e.Name); ok {
+			return inferListCall(e, env, fnTypes, fnParams)
+		}
+		if _, ok := stringops.Lookup(e.Name); ok {
+			return inferStringCall(e, env, fnTypes, fnParams)
+		}
+		if e.Name == "len" || e.Name == "range" || e.Name == "fold" {
+			return inferCollectionCall(e, env, fnTypes, fnParams)
 		}
 		if e.Name == "state" {
 			if len(e.Args) != 1 {
@@ -986,7 +1060,7 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 				if err != nil {
 					return "any", err
 				}
-				if expected[i] != "any" && actual != "any" && expected[i] != actual {
+				if !compatibleType(expected[i], actual) {
 					return "any", fmt.Errorf("function %s argument %d expects %s, got %s", e.Name, i+1, expected[i], actual)
 				}
 			}
@@ -995,6 +1069,25 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 			return typ, nil
 		}
 		return "any", nil
+	case *ast.UnaryExpr:
+		typ, err := inferExprType(e.Operand, env, fnTypes, fnParams)
+		if err != nil {
+			return "any", err
+		}
+		if typ == "never" {
+			return "never", nil
+		}
+		if typ != "any" && typ != "bool" {
+			return "any", fmt.Errorf("operator ! expects bool, got %s", typ)
+		}
+		return "bool", nil
+	case *ast.ObjectExpr:
+		for _, field := range e.Fields {
+			if _, err := inferExprType(field.Value, env, fnTypes, fnParams); err != nil {
+				return "any", err
+			}
+		}
+		return "object", nil
 	case *ast.BinaryExpr:
 		left, err := inferExprType(e.Left, env, fnTypes, fnParams)
 		if err != nil {
@@ -1010,7 +1103,7 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		if err != nil {
 			return "any", err
 		}
-		if cond != "any" && cond != "bool" {
+		if cond != "any" && cond != "bool" && cond != "never" {
 			return "any", fmt.Errorf("if condition must be bool, got %s", cond)
 		}
 		thenType, err := inferExprType(e.Then, env, fnTypes, fnParams)
@@ -1021,8 +1114,25 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		if err != nil {
 			return "any", err
 		}
+		if thenType == "never" {
+			return elseType, nil
+		}
+		if elseType == "never" {
+			return thenType, nil
+		}
 		if thenType == "any" || elseType == "any" {
 			return "any", nil
+		}
+		if thenType == "null" && validOutputType(elseType) {
+			return strings.TrimSuffix(elseType, "?") + "?", nil
+		}
+		if elseType == "null" && validOutputType(thenType) {
+			return strings.TrimSuffix(thenType, "?") + "?", nil
+		}
+		if strings.TrimSuffix(thenType, "?") == strings.TrimSuffix(elseType, "?") {
+			if strings.HasSuffix(thenType, "?") || strings.HasSuffix(elseType, "?") {
+				return strings.TrimSuffix(thenType, "?") + "?", nil
+			}
 		}
 		if thenType != elseType {
 			return "any", fmt.Errorf("if branches have incompatible types %s and %s", thenType, elseType)
@@ -1040,7 +1150,7 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		if err != nil {
 			return "any", err
 		}
-		if sourceType != "any" && sourceType != "list" {
+		if sourceType != "never" && sourceType != "any" && sourceType != "list" {
 			return "any", fmt.Errorf("comprehension source must be a list, got %s", sourceType)
 		}
 		next := cloneStringMap(env)
@@ -1066,6 +1176,18 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 }
 
 func inferBinaryType(op, left, right string) (string, error) {
+	if left == "never" {
+		return "never", nil
+	}
+	if right == "never" {
+		if op != "&&" && op != "||" {
+			return "never", nil
+		}
+		if compatibleType("bool", left) {
+			return "bool", nil
+		}
+		return "any", fmt.Errorf("operator %s expects booleans, got %s", op, left)
+	}
 	known := func(t string) bool { return t != "any" }
 	switch op {
 	case "+":
@@ -1112,7 +1234,7 @@ func inferBinaryType(op, left, right string) (string, error) {
 		}
 		return "bool", nil
 	case "==", "!=":
-		if known(left) && known(right) && left != right {
+		if known(left) && known(right) && left != right && left != "null" && right != "null" {
 			return "any", fmt.Errorf("operator %s cannot compare %s and %s", op, left, right)
 		}
 		return "bool", nil
@@ -1127,7 +1249,7 @@ func (b *builder) err(pos token.Pos, format string, args ...any) error {
 
 func validTypeName(name string) bool {
 	switch name {
-	case "any", "string", "number", "bool":
+	case "any", "string", "number", "bool", "list", "object":
 		return true
 	default:
 		return false
@@ -1140,10 +1262,16 @@ func reservedName(name string) bool {
 
 func validOutputType(typ string) bool { return validTypeName(strings.TrimSuffix(typ, "?")) }
 func compatibleType(expected, actual string) bool {
-	return expected == "any" || actual == "any" || expected == actual
+	return actual == "never" || strings.TrimSuffix(expected, "?") == "any" || actual == "any" || expected == actual || strings.HasSuffix(expected, "?") && (actual == "null" || strings.TrimSuffix(expected, "?") == actual)
 }
+func pureBuiltinName(name string) bool {
+	_, list := listops.Lookup(name)
+	_, text := stringops.Lookup(name)
+	return list || text || name == "str" || name == "len" || name == "range" || name == "fold" || name == "fail"
+}
+
 func builtinName(name string) bool {
-	return name == "str" || name == "print" || name == "state" || name == "retry" || name == "feedback"
+	return pureBuiltinName(name) || name == "print" || name == "state" || name == "retry" || name == "feedback"
 }
 
 // Pure local functions may compose other local functions and str. External
@@ -1154,18 +1282,30 @@ func validatePureFunctions(functions []*ast.Function, names map[string]bool) err
 		byName[fn.Name] = fn
 	}
 	state := map[string]int{}
+	var stack []string
 	var visit func(string) error
 	visit = func(name string) error {
 		fn := byName[name]
 		if state[name] == 1 {
-			return fmt.Errorf("%d:%d: recursive function %q is not supported", fn.Pos.Line, fn.Pos.Column, name)
+			start := 0
+			for stack[start] != name {
+				start++
+			}
+			for _, member := range stack[start:] {
+				if byName[member].ReturnType == "" {
+					f := byName[member]
+					return fmt.Errorf("%d:%d: recursive function %q needs an explicit return type", f.Pos.Line, f.Pos.Column, member)
+				}
+			}
+			return nil
 		}
 		if state[name] == 2 {
 			return nil
 		}
 		state[name] = 1
+		stack = append(stack, name)
 		for _, called := range callNames(fn.Return) {
-			if called == "str" {
+			if pureBuiltinName(called) {
 				continue
 			}
 			if !names[called] {
@@ -1175,6 +1315,7 @@ func validatePureFunctions(functions []*ast.Function, names map[string]bool) err
 				return err
 			}
 		}
+		stack = stack[:len(stack)-1]
 		state[name] = 2
 		return nil
 	}
@@ -1221,11 +1362,27 @@ func (b *builder) validateCalls(expr ast.Expr, root bool) error {
 			if !root {
 				return fmt.Errorf("state is only supported as a Flow binding")
 			}
-		} else if !root && !b.functionNames[e.Name] && e.Name != "str" {
+		} else if !root && !b.functionNames[e.Name] && !pureBuiltinName(e.Name) {
 			return fmt.Errorf("nested external call %q must be assigned to a Flow binding first", e.Name)
 		}
-		for _, arg := range e.Args {
+		args := e.Args
+		if index := callbackIndex(e); index >= 0 {
+			fn, ok := args[index].(*ast.IdentExpr)
+			if !ok || !b.functionNames[fn.Name] {
+				return fmt.Errorf("%s callback/reducer must name a local pure function", e.Name)
+			}
+			args = args[:index]
+		}
+		for _, arg := range args {
 			if err := b.validateCalls(arg, false); err != nil {
+				return err
+			}
+		}
+	case *ast.UnaryExpr:
+		return b.validateCalls(e.Operand, false)
+	case *ast.ObjectExpr:
+		for _, field := range e.Fields {
+			if err := b.validateCalls(field.Value, false); err != nil {
 				return err
 			}
 		}

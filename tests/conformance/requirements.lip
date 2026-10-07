@@ -1,4 +1,4 @@
-# Dependency metadata is part of the source program and is checked before the Flow.
+// Dependency metadata is part of the source program and is checked before the Flow.
 require python "math"
 
 flow RequiredInput(input: number) -> any {

@@ -1,26 +1,26 @@
 # Python 科学计算与进程集成设计
 
-Python 是 LIP 的 Host 能力，不是 LIP 编译器的语言依赖。LIP 负责依赖图、
-Logical Tick、取消和调度；Python 负责 Worker 环境中安装的科学计算、数据处理、
-机器学习和用户自定义库。这样即使没有安装 Python，普通 `.lip` 文件仍然可以被
-检查、编译和运行。
+Go/Python/纯库组合从[教程](TUTORIAL.md)第 19 节的 mixed Flow 开始。
+有限标量、list/tuple/object 自动进入 LIP 值域，长期对象使用句柄。
+set/frozenset 保留句柄，需要有序列表时调用 builtins.sorted。
+非有限数值和字符串化后冲突的对象键会报告错误。
 
-这份文档比较不同的集成路线。结论是有条件的：先采用可替换的进程协议，只有
-基准数据证明进程边界已经成为瓶颈时，才考虑更紧的耦合。
+LIP 负责依赖图、Logical Tick、取消和调度，Python 提供 Worker 环境中
+已安装的科学计算、数据处理、机器学习和自定义库。
+`runtime.PythonWorker` 用 `os/exec` 管理常驻进程，通过
+`runtime.NewPythonHost` 或 `Host.RegisterPython*` 接入图。
 
-当前实现已经完成 P0/P1 的本机控制面：`runtime.PythonWorker`（也以
-`runtime.ProcessHost` 别名提供）用 `os/exec` 管理一个长期运行的 Python Worker，
-并通过 `runtime.Host.RegisterPython*` 把它接入 LIP。Worker 支持握手、request ID、
-deadline、有限队列、协作取消、进程回收/自动重启和 Python 异常返回。P2 的文件 blob
-基线已经开始，Arrow/共享内存评估以及句柄的容量/回收治理、P3 的 Worker
-pool/session/Socket 仍然是后续阶段；基础对象句柄操作已经可用。
+当前协议使用 stdin/stdout JSONL，包含握手、request ID、deadline、有限队列、
+协作取消、异常返回和进程回收/重启。较大数据通过只读文件 blob 传递，支持
+校验和、大小与数量配额。下面的阶段表区分已实现能力与后续评估方向，
+语言的整体计划见[路线图](ROADMAP.md)。
 
 路线可以按四个阶段阅读：
 
 | 阶段 | 状态 | 主要工作 | 进入下一阶段的依据 |
 | --- | --- | --- | --- |
 | P0 | 已完成 | JSONL 握手、request ID、错误、超时、取消、重启、背压和协议损坏处理 | 控制面测试稳定通过 |
-| P1 | 已完成 | `ProcessHost`、通用 dotted call、动态导入、效果映射、示例和基准入口 | 能在真实 Flow 中调用已安装库并取回结果 |
+| P1 | 已完成 | `PythonWorker`、通用 dotted call、动态导入、效果映射、示例和基准入口 | 能在真实 Flow 中调用已安装库并取回结果 |
 | P2 | 进行中 | 文件支持的只读 blob、`.npy` 映射、校验和、大小/映射/对象句柄配额；随后补 Arrow/共享内存评估、空闲回收、泄漏诊断和复杂对象生命周期 | JSON 复制成为 p95 或峰值内存瓶颈，且数据面基准可复现 |
 | P3 | 后续 | Worker pool、session 版本与故障重建、并发配额、Unix socket/gRPC 和流式进度 | 单 Worker 排队或跨机/协议演进需求被真实工作负载证实 |
 | P4 | 评估项 | cgo/嵌入 CPython 的性能、取消、崩溃隔离和 ABI 对比 | 基准证明进程边界是主要瓶颈，并接受更高耦合成本 |
@@ -62,7 +62,7 @@ Go Host 启用 Python fallback，LIP 中的 dotted operation 原样传到 Worker
 Python 代码：
 
 ```go
-worker, err := runtime.NewProcessHost(ctx, runtime.ProcessHostConfig{})
+worker, err := runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{})
 if err != nil { /* Python 不可用或握手失败 */ }
 defer worker.Close()
 
@@ -139,7 +139,7 @@ host.RegisterPythonReadOnly("transformer_log_level", worker, "transformers.utils
 部署方可以收紧模块策略，而不改变 LIP Flow：
 
 ```go
-worker, err := runtime.NewProcessHost(ctx, runtime.ProcessHostConfig{
+worker, err := runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{
     AllowedModules: []string{"torch", "transformers", "sklearn"},
 })
 ```
@@ -360,7 +360,7 @@ Worker 不得任意执行宿主命令，也不得绕过 Runtime 的取消和权�
 
 - **P0/P1（已完成控制面）：** 内置标准库 Worker 提供 echo、失败、延迟和数值
   基线；测试覆盖 request ID、超时、取消、重启、有限队列、协议握手错误和异常
-  返回。`ProcessHost` 通过 `os/exec` 长期运行 stdin/stdout JSONL Worker，Host
+  返回。`PythonWorker` 通过 `os/exec` 长期运行 stdin/stdout JSONL Worker，Host
   注册时显式声明 Pure/ReadOnly/ExternalWrite。`runtime/python_benchmark_test.go`
   提供 cold-start 与 warm-call 基准；发布前需要用目标机器运行它并记录 p50/p95，
   不用未经测量的数字作承诺。

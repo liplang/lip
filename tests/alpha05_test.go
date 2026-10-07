@@ -22,7 +22,7 @@ func TestAlpha05Diagnostics(t *testing.T) {
 		{"duplicate", "flow Bad() -> any { a = 1\n a = 2\n return a }", "duplicate binding"},
 		{"scope", "flow Bad() -> any { when true { a = 1 }\n return a }", "scoped to a when"},
 		{"untyped function", `fn f(x) { return x } flow Bad() -> number { return f(1) }`, "explicit type"},
-		{"wrong dynamic branch", `flow Bad(x: any) -> string { return if true then x else 1 }`, "declared output"},
+		{"wrong dynamic branch", `flow Bad(x: any) -> string { return if true { x } else { 1 } }`, "declared output"},
 		{"wrong output", `flow Bad() -> string { return 1 }`, "declared output"},
 		{"wrong function output", `fn f(x: number) -> string { return x } flow Bad() -> any { return f(1) }`, "declared string"},
 		{"gated output", `flow Bad(x: bool) -> number { when x { return 1 } }`, "may produce no value"},
@@ -59,30 +59,28 @@ func TestAlpha05Diagnostics(t *testing.T) {
 	}
 }
 
-func TestAlpha05Migration(t *testing.T) {
-	source := "# 保留注释\nrequires host \"fetch\"\nfn twice(x) { return x * 2 }\nflow Older(input) {\n gate = true\n when gate { return twice(input) }\n}\n"
-	updated, report, err := compiler.MigrateSource(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"# 保留注释", `require host "fetch"`, "twice(x: any)", "Older(input: any) -> any?"} {
-		if !strings.Contains(updated, want) {
-			t.Fatalf("migration lost %q: %s", want, updated)
+func TestCurrentSyntax(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{"# old comment\nflow Example() -> number { return 1 }", "unexpected character"},
+		{`flow Example() -> number { return if true then 1 else 2 }`, "expected {"},
+		{`flow Example { return 1 }`, "explicit parameter list"},
+		{`flow Example(value) -> any { return value }`, "explicit type"},
+		{`flow Example() { return 1 }`, "explicit output type"},
+	} {
+		_, err := compiler.ParseAndBuild(tc.source)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: got %v, want %s", tc.source, err, tc.want)
 		}
 	}
-	if len(report) < 3 {
-		t.Fatalf("report=%v", report)
-	}
-	second, _, err := compiler.MigrateSource(updated)
-	if err != nil || updated != second {
-		t.Fatalf("migration is not idempotent: %v\n%s", err, second)
-	}
-	constant, _, err := compiler.MigrateSource("flow Constant{ return 2 }\n")
-	if err != nil || !strings.Contains(constant, "Constant() -> number") {
-		t.Fatalf("empty input migration: %q %v", constant, err)
-	}
-	if _, _, err := compiler.MigrateSource(`flow Incomplete(input) { x = input }`); err == nil {
-		t.Fatal("migration invented a return")
+	// Comment markers and former keywords inside strings remain ordinary data.
+	source := `// A single comment syntax, including 中文.
+fn choose(value: bool) { return if value { {text: "# then //"} } else { {text: "else"} } }
+flow Example(value: bool) -> object {
+    then = choose(value) // Inline comment.
+    return if value { then } else { if true { {text: "nested"} } else { then } }
+}`
+	if _, err := compiler.ParseAndBuild(source); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -115,7 +113,7 @@ func TestAlpha05GeneratedLibrary(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `require host "fetch"
 fn twice(x: number) -> number { return x * 2 }
-fn choose(x: number) -> string { return if x > 0 then str(twice(x)) else "nonpositive" }
+fn choose(x: number) -> string { return if x > 0 { str(twice(x)) } else { "nonpositive" } }
 flow Checked(x: number) -> string {
  count = state(1)
  raw = fetch(x)
@@ -174,12 +172,12 @@ func TestAlpha05EndToEnd(t *testing.T) {
 		source := filepath.Join(root, "examples", "hello.lip")
 		binary := filepath.Join(dir, "hello")
 		goSource := filepath.Join(dir, "hello.go")
-		for _, args := range [][]string{{lipc, "build", "-o", binary, source}, {lipc, "build", "-emit-go", "-o", goSource, source}} {
+		for _, args := range [][]string{{lipc, "build", "--output", binary, source}, {lipc, "build", "--emit-go", "--output", goSource, source}} {
 			if out, err := command(args...); err != nil {
 				t.Fatalf("%v: %v\n%s", args, err, out)
 			}
 		}
-		for _, prefix := range [][]string{{binary}, {lipc, "run", source, "--"}, {"go", "run", goSource}} {
+		for _, prefix := range [][]string{{binary}, {lipc, "run", source}, {"go", "run", goSource}} {
 			out, err := command(append(append([]string{}, prefix...), "Alice")...)
 			if err != nil || out != "Hello, Alice\n" {
 				t.Fatalf("hello %v: %q %v", prefix, out, err)
@@ -196,12 +194,12 @@ func TestAlpha05EndToEnd(t *testing.T) {
 		source := filepath.Join(dir, "typed.lip")
 		writeTestFile(t, source, `flow Typed(text: string, n: number, enabled: bool, data: any) -> any { return [text, n, enabled, data] }`)
 		binary, goSource := filepath.Join(dir, "typed"), filepath.Join(dir, "typed.go")
-		for _, args := range [][]string{{lipc, "build", "-o", binary, source}, {lipc, "build", "-emit-go", "-o", goSource, source}} {
+		for _, args := range [][]string{{lipc, "build", "--output", binary, source}, {lipc, "build", "--emit-go", "--output", goSource, source}} {
 			if out, err := command(args...); err != nil {
 				t.Fatalf("%v: %v\n%s", args, err, out)
 			}
 		}
-		for _, prefix := range [][]string{{binary}, {lipc, "run", source, "--"}, {"go", "run", goSource}} {
+		for _, prefix := range [][]string{{binary}, {lipc, "run", source}, {"go", "run", goSource}} {
 			args := []string{"Alice", "-1.25e2", "true", `{"items":[1,2]}`}
 			out, err := command(append(append([]string{}, prefix...), args...)...)
 			if err != nil || out != "[\"Alice\",-125,true,{\"items\":[1,2]}]\n" {
@@ -239,7 +237,7 @@ func TestAlpha05EndToEnd(t *testing.T) {
 				if tc.name == "real attribute path" {
 					input = "2026-10-07"
 				}
-				out, err := command(lipc, "run", source, "--", input)
+				out, err := command(lipc, "run", source, input)
 				if tc.failure {
 					if err == nil || !strings.Contains(out, tc.want) {
 						t.Fatalf("missing module: %q %v", out, err)
@@ -254,7 +252,7 @@ func TestAlpha05EndToEnd(t *testing.T) {
 			return
 		}
 		source := filepath.Join(root, "examples", "python", "flow.lip")
-		out, err := command(lipc, "run", source, "--", "[1,2,3,4,5]")
+		out, err := command(lipc, "run", source, "[1,2,3,4,5]")
 		var actual []any
 		decodeErr := json.Unmarshal([]byte(out), &actual)
 		if err != nil || decodeErr != nil || len(actual) != 3 || actual[0] != float64(15) || actual[1] != float64(3) {
@@ -317,7 +315,7 @@ func TestAlpha05OptionalAndExpressions(t *testing.T) {
 	dir := t.TempDir()
 	for _, tc := range []struct{ name, source, want string }{
 		{"optional", `flow Optional() -> number? { when false { return 2 } }`, "null\n"},
-		{"lazy if", `flow Lazy() -> number { return if true then -2 * 3 else 1 / 0 }`, "-6\n"},
+		{"lazy if", `flow Lazy() -> number { return if true { -2 * 3 } else { 1 / 0 } }`, "-6\n"},
 		{"short circuit and", `flow And() -> bool { return false && (1 / 0 > 0) }`, "false\n"},
 		{"short circuit or", `flow Or() -> bool { return true || (1 / 0 > 0) }`, "true\n"},
 		{"large number", `flow Large() -> number { return 1e100 }`, "1e+100\n"},

@@ -9,6 +9,7 @@ const (
 	String
 	True
 	False
+	Null
 	Flow
 	Fn
 	Return
@@ -16,7 +17,6 @@ const (
 	For
 	In
 	If
-	Then
 	Else
 	Require
 	Arrow
@@ -43,6 +43,7 @@ const (
 	LessEqual
 	And
 	Or
+	Not
 )
 
 type Pos struct {
@@ -60,11 +61,11 @@ type Token struct {
 func (k Kind) String() string {
 	names := map[Kind]string{
 		EOF: "EOF", Ident: "identifier", Number: "number", String: "string",
-		True: "true", False: "false", Flow: "flow", Fn: "fn", Return: "return", When: "when",
-		If: "if", Then: "then", Else: "else", Require: "require", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
+		True: "true", False: "false", Null: "null", Flow: "flow", Fn: "fn", Return: "return", When: "when",
+		If: "if", Else: "else", Require: "require", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
 		LBrace: "{", RBrace: "}", LBracket: "[", RBracket: "]", Comma: ",", Colon: ":", Dot: ".", Plus: "+", Minus: "-", Star: "*", Slash: "/",
 		Equal: "==", NotEqual: "!=", Greater: ">", GreaterEqual: ">=", Less: "<", LessEqual: "<=",
-		And: "&&", Or: "||", Arrow: "->", Question: "?",
+		And: "&&", Or: "||", Not: "!", Arrow: "->", Question: "?",
 	}
 	if s, ok := names[k]; ok {
 		return s

@@ -1,275 +1,165 @@
-# LIP Alpha 0.5
+# LIP Alpha 0.6
 
-[中文版 README](README.md)
+[中文版 README](README.md) · Reference implementation `0.6.1` ([VERSION](VERSION))
 
-Reference implementation version: `0.5.0` (see [VERSION](VERSION)).
+LIP (Logical / Incremental / Parallel) is a small dependency-oriented language:
+**Describe dependencies; let the Runtime decide execution.** Compose data,
+selection, Map, aggregation and pure recursion with immutable bindings, then
+inspect the graph and execution trace.
 
-LIP (Logical / Incremental / Parallel) is a dependency-oriented language. Its
-central idea is one sentence:
-
-> **Describe dependencies; let the Runtime decide execution.**
-
-You write bindings, functions, and expressions that say what each result depends on.
-The compiler turns them into a Dependency Graph. The Runtime then schedules work
-according to data dependencies, gates, state changes, cancellation, and effect
-constraints:
+Syntax follows Rust, and ranges follow Python conventions. Here is a complete
+data program:
 
 ```lip
-user = load_user(id)
-orders = load_orders(id)
-answer = combine(user, orders)
-return answer
-```
+fn add(total: number, value: number) -> number {
+    return total + value
+}
 
-`user` and `orders` are independent, so they may run concurrently; `answer`
-waits for both. Source order helps define and diagnose the program, but it is not
-automatically an execution order. Actual concurrency remains subject to Runtime
-resources, Host effects, and ordering constraints.
-
-## The LIP computation model
-
-LIP has two connected layers:
-
-- **Source code** expresses bindings, calls, value selection, and execution gates in a
-  familiar form.
-- **The Runtime** maintains graph nodes, dependency snapshots, Logical Ticks,
-  cancellation state, and effect metadata.
-
-These layers establish a few stable semantic boundaries:
-
-- **Dependencies are semantics.** Variable references form edges; fan-out, fan-in, and
-  joins need no special pipeline syntax.
-- **Source order is not a scheduling command.** Independent nodes may run in parallel.
-  Data dependencies, `NodeSpec.After`, or Host effects express required ordering.
-- **Static structure can expand dynamically.** `[expr for item in source]` is one Map
-  node in the graph. The Runtime expands it for the actual collection, preserves input
-  order, and applies a concurrency bound.
-- **State changes propagate through Ticks.** A persistent `Instance` stores State and
-  dependency snapshots. Pure nodes can be reused when their inputs are unchanged;
-  external reads and writes follow their effect policy.
-- **Execution policy belongs to the Runtime.** Concurrency, waiting, retry,
-  cancellation, and resource limits are runtime decisions. A Flow does not require
-  hand-written goroutines, thread pools, joins, or unbounded background tasks.
-- **Host is the boundary.** Files, networks, databases, and scientific computing enter
-  through Go Host Adapters. The language remains checkable while deployment controls
-  permissions, timeouts, and isolation.
-
-The design is advanced in properties that can be tested, rather than in a promise that
-everything will run faster:
-
-1. With the declared Effect/Ordering constraints satisfied, the same dependency
-   structure can run sequentially or with bounded parallelism without changing result
-   semantics.
-2. State, Ticks, cache reuse, and cancellation reasons are observable in Trace.
-3. Dynamic Map does not require one static node per runtime element.
-4. Pure computation, read-only external access, and external writes have distinct
-   caching and ordering rules.
-5. Generated code is ordinary Go and can use Go's compiler, tests, deployment, and
-   diagnostics.
-
-## A convenient authoring experience
-
-A typical Flow remains close to ordinary code:
-
-```lip
-flow Hello(request: string) -> string {
-    greeting = "Hello, " + request
-    return greeting
+flow Report(values: list) -> object {
+    doubled = [x * 2 for x in values]
+    total = fold(doubled, 0, add)
+    return {
+        count: len(values),
+        values: doubled,
+        total: total,
+        average: if len(values) == 0 { null } else { total / len(values) }
+    }
 }
 ```
 
-You describe the computation relationship instead of designing an asynchronous API for
-each step. Real capabilities are registered as Go Host operations:
-
-```go
-host.RegisterPure("load_profile", loadProfile)
-host.RegisterReadOnly("load_model", loadModel)
-host.Register("write_file", writeFile)
-```
-
-The compiler checks syntax, names, types, and graph structure. The Runtime executes the
-graph. You can catch structural errors with `check`, then inspect node states, Ticks,
-and reuse reasons in Trace.
-
-## Current capabilities
-
-| Capability | Alpha 0.5 status |
-| --- | --- |
-| `flow`, expression `fn`, single-assignment bindings | Supported, with name, scope, and type checks |
-| Flow input/output contract | Explicit input/output types, one `return`, optional gated output, no invented defaults |
-| `require` dependency header | Python/Go/Host metadata, check output, and generated-library query |
-| `when` execution gates and `if` value selection | Supported with distinct semantics |
-| Dynamic Map | Runtime expansion, stable order, bounded concurrency |
-| Persistent Flow / State / Tick | `NewInstance`, `Tick`, `SetState`, and Trace |
-| Incremental recomputation | Pure-node dependency cache; effects control external re-execution |
-| Retry / Feedback | Runtime policies with explicit finite limits |
-| Cancellation | Context, Await, Map, Retry, and Feedback propagation |
-| Effects / Ordering | Host effect classes and `NodeSpec.After` |
-| Python Worker Adapter | Resident JSONL Worker, dynamic Python library calls, timeout cancellation, and restart |
-| Ordinary `for` / `while`, event/stream DSL | Not in the Alpha language core |
-
-Each milestone has an explicit boundary:
-The [specification index](docs/SPECS.md) collects
-[ALPHA-0.1-SPEC.md](docs/ALPHA-0.1-SPEC.md),
-[ALPHA-0.2-SPEC.md](docs/ALPHA-0.2-SPEC.md),
-[ALPHA-0.3-SPEC.md](docs/ALPHA-0.3-SPEC.md), and
-[ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md) and
-[ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md).
-
-## lipc: check, build, and run like Go
-
-Install the command:
+Go 1.27 or newer is required. Install from the repository root:
 
 ```bash
 go install ./cmd/lipc
 ```
 
-Or invoke it from a checkout with `go run ./cmd/lipc`. Common commands:
+The destination follows your Go configuration: GOBIN, or `bin` under the first
+GOPATH entry when GOBIN is empty. Use `lipc` if that directory is already on PATH,
+or invoke the installed file directly. Examples below use `lipc` for the tool:
 
 ```bash
-# Check syntax, names, types, and the dependency graph
-lipc check examples/hello.lip
-
-# Build an executable; the default output is the Flow name
-lipc build examples/hello.lip
-lipc build -o /tmp/hello examples/hello.lip
-
-# Compile temporarily and run; arguments after -- go to the generated program
-lipc run examples/hello.lip -- Alice
-
-# Emit Go source for review or a checked-in library
-lipc build -emit-go -o hello_generated.go examples/hello.lip
-lipc build -emit-go -no-main -package hostflow \
-  -o flow/flow_gen.go flow.lip
-
-# Show help and version
-lipc help
-lipc help build
-lipc version
+lipc check examples/core.lip
+lipc run examples/core.lip '[1,2,3]'
+# {"average":4,"count":3,"total":12,"values":[2,4,6]}
+lipc run examples/core.lip '[]'
+# {"average":null,"count":0,"total":0,"values":[]}
 ```
 
-`lipc build` normally produces an executable. `-emit-go`, or an output path ending
-in `.go`, emits Go source. The legacy shorthand `lipc file.lip` remains available
-for source generation.
+With uncustomized Go settings, the usual path is `~/go/bin/lipc`, so
+`~/go/bin/lipc help` also works. On Windows it is usually `go\bin\lipc.exe` under
+your user directory. See [quickstart](docs/QUICKSTART.md#安装) for direct invocation.
 
-The generated entry point accepts exactly the arguments declared by the Flow, in
-declaration order. `string` values are passed through, `number` values must be
-finite decimal numbers, `bool` accepts only `true` or `false`, and `any` is JSON
-at the command-line boundary. The compiler does not read `LIP_INPUT` or invent
-values such as `World`, `1`, or `false`; the result therefore comes only from the
-source program and its inputs.
+`lipc` bundles its runtime sources, so installed `run/build` commands work in any
+project directory without a LIP checkout or project `go.mod`. Both still require
+the Go toolchain; compiled core executables run independently.
+Place tool options before the file and program inputs directly after it.
 
-A Flow declares its full boundary with `flow Name(args) -> Type`. Parameters are explicitly
-typed; dynamic values use `any`. Each Flow has one `return`. Conditional values use
-`if ... then ... else ...`, and a gated output that can be absent uses `Type?`. Local `fn`
-functions are pure and composable; external calls remain explicit Flow nodes.
+## Language and runtime
 
-Use `lipc migrate old.lip -o migrated.lip` to update older syntax without inventing input
-values or returns. Strings print as text; other results print as JSON.
+| Capability | 0.6 contract |
+| --- | --- |
+| Complete program | Requirements, pure fn, one flow, explicit inputs/output, one return |
+| Data | null, bool, number, string, list, object; nested construction |
+| Composition | Immutable bindings, operators, Rust-style if, when gates, Map |
+| Pure operations | str, len, half-open range, ordered fold with an explicit seed, explicit fail |
+| List library | 34 pure functions for grouping, merging, transpose, windows, filtering, sorting, uniqueness, scans and Cartesian products |
+| String library | 19 pure operations for cleanup, splitting, joining, searching, slicing, replacement and decimal parsing |
+| Recursion | Direct/mutual pure recursion; cycle result types required, call depth at most 256 |
+| Execution | Automatic/sequential/bounded parallel scheduling, effects, cancellation, State/Tick, pure dependency reuse |
+| Observation | inspect graph JSON, run --trace lifecycle JSON |
+| Existing extensions | Host Adapters, Await, bounded Retry/Feedback, Python Worker |
 
-Generated library packages provide:
+`range(start, end[, step])` materializes at most 1,000,000 elements. Map comprehensions
+require a bound source; fold/list.* also accept nested pure expressions. The [list library](docs/LIST-LIBRARY.md) adds collection
+operations without new syntax. A fold reducer is a local two-parameter pure fn; an empty
+list returns its seed. Prefer Map/fold for collection traversal and recursion for
+trees or divide-and-conquer.
+
+list/object annotations validate outer shape; dynamic element types are checked
+when used. CLI strings are literal, numbers finite decimal, booleans true/false,
+and any/list/object inputs JSON. A Flow output `T?` accepts null or no value from a
+closed gate.
+
+## Dependencies determine execution
+
+Flow bindings become graph nodes; variable references become dependencies. Pure
+expressions inside fn do not become graph nodes. Independent nodes may run in
+parallel; consumers wait for their dependencies. if selects a value, when gates
+execution. Short-circuit expressions do not cancel separately bound external work.
+
+Host adapters provide real capabilities:
 
 ```go
-Run(ctx, host, inputs)
-RunSequential(ctx, host, inputs)
-RunParallel(ctx, host, inputs, limit)
-NewInstance(host, inputs)
-RequiredDependencies()
+host := runtime.DefaultHost()
+host.RegisterPure("compute", compute)
+host.RegisterReadOnly("load_profile", loadProfile)
+host.Register("write_file", writeFile)
 ```
 
-A LIP file can record external requirements explicitly at its header:
+Pure nodes may be reused on unchanged Ticks. ReadOnly nodes can run concurrently
+but execute every Tick; writes form ordered barriers. Adapters must declare
+accurate effects, cooperate with cancellation and protect shared state. Treat
+values handed to a Flow as immutable. Completed external writes are not rolled back.
 
-```lip
-require python "numpy>=1.26"
-require python "pandas"
-require go "github.com/acme/adapter"
-require host "load_profile"
-```
+Persistent instances expose `NewInstance`, `SetState` and `Tick`; the host advances
+each computation. One-shot `Run`, `RunSequential` and `RunParallel` share the same input
+and result contracts.
 
-These declarations are check and deployment metadata. They do not install or
-silently import anything. `lipc check` prints them, and generated library mode
-exposes `RequiredDependencies()`. The Python Worker still resolves any installed
-module through its real dotted path; a Go package must be imported and registered
-by the Go program that hosts the generated package.
-External calls without a matching `require` declaration fail during checking, so
-the source cannot hide a runtime capability.
+## Check, run and inspect
 
-## Persistent State and Logical Ticks
+0.6.1 adds 19 pure `string.*` operations, explicit `fail(message)`, and structured
+`lipc check --json` diagnostics (`lip.diagnostics.v1`). The expanded [tutorial](docs/TUTORIAL.md)
+has progressive, runnable examples with tested outputs and failures. String
+boundaries/operators share a 16 MiB UTF-8 limit; Map/fold sources are capped at
+1,000,000 elements before expansion. See the [string reference](docs/STRING-LIBRARY.md)
+and [generation/verification workflow](docs/VIBE-CODING.md).
 
-```lip
-flow Counter(input: number) -> number {
-    count = state(0)
-    doubled = count * 2
-    return doubled + input
-}
-```
-
-```go
-instance, err := counter.NewInstance(host, map[string]runtime.Value{"input": 1})
-value, trace, err := instance.Tick(ctx, nil)
-
-err = instance.SetState("count", 3)
-value, trace, err = instance.Tick(ctx, nil)
-```
-
-The initial State value is committed on the first Tick. Later Ticks reuse unaffected
-pure nodes. Each Tick has a monotonically increasing logical count, and
-`TraceEvent` records node status and the `reused` reason so the Runtime's choices
-can be explained. Instance execution and observation methods are serialized; a Host
-callback should not re-enter the same Instance.
-
-## Go Host and the Python route
-
-LIP does not execute Go or Python `import` in its language syntax; required packages
-can be recorded with `require` metadata. Python scientific
-computing enters through a Host Adapter:
-
-```text
-LIP node → Go Adapter → Python Worker → installed Python libraries
-```
-
-The first process-backed step is now available as `runtime.NewProcessHost` (an alias
-of `PythonWorker`) and `runtime.NewPythonHost`. Go starts
-one resident Python child with `os/exec`, exchanges JSONL over stdin/stdout, and owns
-request IDs, deadlines, cancellation, restart, backpressure, and effect
-classification; Python owns scientific computing. The `examples/python` Flow calls
-NumPy and Pandas and retrieves the result. The worker dynamically calls installed
-libraries by `module.submodule.callable`, so adding PyTorch, JAX, Scikit-learn, or
-Transformers does not require changing the LIP core. It also provides dependency-free
-`sum`, `mean`, `dot`, and matrix multiplication operations. P2 now provides a local
-read-only blob/mmap baseline with size, SHA-256, dtype, and shape metadata; real
-benchmarks will decide whether Arrow or shared memory is justified. The control
-message carries handles and shape metadata. Evaluate Unix socket/gRPC or
-embedded CPython only if benchmarks show that the process boundary is unacceptable.
-
-See [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md) for the route comparison,
-protocol constraints, data planes, and phase gates. Environments without Python can
-still compile LIP, and the compiler core does not acquire the GIL, Python packaging, or
-model-service lifecycle.
-
-## Documentation
-
-- [docs/QUICKSTART.md](docs/QUICKSTART.md): from checking to generation and execution;
-- [docs/TUTORIAL.md](docs/TUTORIAL.md): language and Runtime tutorial;
-- [docs/COMPILER.md](docs/COMPILER.md): AST, Graph, Scheduler, and generated code;
-- [docs/ROADMAP.md](docs/ROADMAP.md): next milestones and acceptance criteria;
-- [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md): Python route comparison and protocol;
-- [docs/CONSISTENCY-AUDIT.md](docs/CONSISTENCY-AUDIT.md): cross-check of implementation and design;
-- [docs/SPECS.md](docs/SPECS.md): index of the Alpha milestone specifications;
-- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md): current complete program contract and migration gates;
-- [examples/PROTOTYPES.md](examples/PROTOTYPES.md): coverage of 30 design prototypes;
-- [CHANGELOG.md](CHANGELOG.md): release changes and checks.
-
-## Verifying the implementation
+Go Host, Python and pure libraries use the same calls and value dependencies.
+Ordinary Python values compose directly; [mixed.lip](examples/tutorial/mixed.lip)
+combines Go file reading, text parsing, Python math and pure aggregation. Run
+`go run ./examples/tutorial/mixed_demo` with standard Python, without scientific packages.
+Python NaN/Inf and colliding object keys fail; sets require explicit ordering.
 
 ```bash
-GOCACHE=/tmp/lip-gocache go test ./...
-GOCACHE=/tmp/lip-gocache go test -race ./...
-GOCACHE=/tmp/lip-gocache go vet ./...
-GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
+lipc check --json examples/strings.lip
+lipc run examples/strings.lip ' Rust, LIP, rust, ,你好 '
+lipc inspect examples/core.lip
+lipc run --trace report-trace.json examples/core.lip '[1,2,3]'
+lipc run examples/range.lip 5
+lipc run examples/lists.lip '[{"department":"A","amount":3},{"department":"B","amount":2}]'
+lipc run examples/tree.lip '{"value":1,"left":{"value":2,"left":null,"right":null},"right":null}'
+
+lipc build examples/core.lip
+./Report '[1,2,3]'
 ```
 
-The reference implementation targets Go 1.27. Alpha is experimental. Events/streams,
-ordinary loops, a complete effect type system, and executable Python/Go `import`
-semantics remain future options; `require` metadata and generic dotted calls through
-the Python Host are available now.
+On Windows, run `.\Report.exe '[1,2,3]'`. See the [compiler guide](docs/COMPILER.md#lipc-命令)
+for output paths and Go source generation.
+
+inspect does not execute Host work and emits `lip.graph.v1`. Trace writes
+`lip.trace.v1` states, Ticks and reasons to a separate file on success or execution
+failure, preserving ordinary result output.
+
+Declare external work with `require`. Generate libraries with `--no-main
+--package name` for Host/Go adapters. Python requirements enable a resident
+Worker using installed packages. See the [Host example](examples/host_adapter)
+and [Python integration](docs/PYTHON-INTEGRATION.md).
+
+## Specification and verification
+
+The [language specification](docs/ALPHA-0.6-SPEC.md) defines the current rules.
+Use `//` for line comments, block-style `if` to select values, and `when` to gate
+execution. See the [roadmap](docs/ROADMAP.md) for future directions.
+
+```bash
+bash scripts/verify-release.sh
+```
+
+This runs tests, race checks, vet, builds, all LIP example checks/generation and
+core execution acceptance. Python tests run when their environment is available;
+independent core examples need no Python.
+
+- [Quickstart](docs/QUICKSTART.md) · [Tutorial](docs/TUTORIAL.md)
+- [Compiler and Host API](docs/COMPILER.md) · [Specifications](docs/SPECS.md)
+- [Roadmap](docs/ROADMAP.md) · [Consistency audit](docs/CONSISTENCY-AUDIT.md)
+- [Prototype coverage](examples/PROTOTYPES.md) · [Changelog](CHANGELOG.md) · [Release checklist](RELEASE.md)

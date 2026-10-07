@@ -10,9 +10,10 @@ func CompileFile(path string) (*Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	graph, err := ParseAndBuild(string(src))
+	graph, stage, err := parseSource(string(src))
 	if err != nil {
-		return nil, fmt.Errorf("%s:%w", path, err)
+		report := failedCheck(path, string(src), stage, err)
+		return nil, fmt.Errorf("%s:%w%s", path, err, diagnosticContext(report.Diagnostics[0]))
 	}
 	return graph, nil
 }

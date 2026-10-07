@@ -294,7 +294,7 @@ def json_value(value, session, force=False):
     """Turn common scientific Python values into JSON-safe values."""
     if value is None or isinstance(value, (str, bool, int, float)):
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-            return None
+            raise ValueError("Python result must be finite; NaN/Inf cannot become LIP null")
         return value
     if isinstance(value, numbers.Number):
         if hasattr(value, "item"):
@@ -303,8 +303,18 @@ def json_value(value, session, force=False):
             return str(value)
         return handle_object(value, session)
     if isinstance(value, dict):
-        return {str(key): json_value(item, session, force) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
+        result = {}
+        for key, item in value.items():
+            name = str(key)
+            if name in result:
+                raise ValueError("Python dictionary keys collide as LIP object key %r" % name)
+            result[name] = json_value(item, session, force)
+        return result
+    if isinstance(value, (set, frozenset)):
+        if force:
+            raise ValueError("Python set has no LIP list order; use sorted before conversion")
+        return handle_object(value, session)
+    if isinstance(value, (list, tuple)):
         return [json_value(item, session, force) for item in value]
     if force:
         if hasattr(value, "tolist"):
@@ -316,6 +326,21 @@ def json_value(value, session, force=False):
                 return json_value(value.to_dict(), session, True)
         return str(value)
     return handle_object(value, session)
+
+
+def encode_result(value, session, force=False):
+    """A failed conversion must not leave unreachable object handles behind."""
+    global HANDLE_COUNT
+    objects = session_objects(session)
+    before = set(objects)
+    try:
+        return json_value(value, session, force)
+    except Exception:
+        for handle in set(objects) - before:
+            del objects[handle]
+            HANDLE_BLOBS.pop(((session or "default"), handle), None)
+            HANDLE_COUNT -= 1
+        raise
 
 
 def builtin(name, args, session):
@@ -466,7 +491,7 @@ for line in sys.stdin:
                 result = args[0]
             else:
                 result = call_operation(operation, args, session)
-        respond({"id": request["id"], "ok": True, "value": json_value(result, session, force_json)})
+        respond({"id": request["id"], "ok": True, "value": encode_result(result, session, force_json)})
     except Exception as error:
         if request is None or "id" not in request:
             print("invalid request: %s" % error, file=sys.stderr)

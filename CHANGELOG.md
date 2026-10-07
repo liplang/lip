@@ -1,8 +1,87 @@
 # Changelog
 
-## 0.5.0 — Alpha 0.5 complete program contract
+## Unreleased
 
-Specification: [ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)
+- consolidated line comments to `//` and conditionals to block-style `if`;
+  removed legacy syntax parsing, migration, source-generation shorthand and short options;
+- consolidated Python adapter names to PythonWorker/PythonWorkerConfig and Python/Script;
+  replaced legacy NodeSpec/MapSpec purity flags with NodeSpec.Effect;
+- consolidated specifications into the current language and library references,
+  keeping release history here; simplified tutorials around the current rules;
+- unified help on stdout, concise usage errors on stderr and exit code 2 across
+  commands; bare `lipc` shows help and `inspect --help` works;
+- validated run inputs before invoking Go, naming missing inputs and showing the
+  source command; added source excerpts and a repair hint to terminal diagnostics;
+- unified command options before the entry file, including inline values; allowed
+  explicit source paths without a .lip suffix, and made --no-main select library source;
+- supported build output directories, Windows default .exe names and trace parent
+  directories; prevented build/trace output from overwriting source aliases;
+- simplified beginner examples to hello/run/build, using local output paths and
+  keeping Go source integration in the compiler guide;
+- documented installation via `go install ./cmd/lipc` following existing GOBIN/GOPATH
+  settings, with PATH lookup or direct invocation according to user preference;
+- made the run entry file the argument boundary: `lipc run [--trace path.json]
+  file.lip args...`; tool options precede it, program inputs follow it, and
+  `--` after the file is an ordinary input; tool options use double hyphens;
+- merged standalone build sources, installation guidance and regression coverage
+  into existing runtime/catalog, quickstart, release script and test files;
+- bundled version-matched runtime sources into lipc so run/build work outside the
+  checkout, using temporary modules isolated from the caller's go.mod/go.work;
+- preserved the caller's working directory for execution and local Python imports;
+- verified offline builds, toolchain-free core executables and temporary-file cleanup.
+
+## 0.6.1 — Text processing, verified tutorials and consistent boundaries
+
+- added 19 fixed pure string operations with shared compiler/runtime signatures,
+  Unicode character positions, explicit decimal parsing and bounded allocation;
+- added pure `fail(message)` with internal bottom-type inference so failure
+  branches preserve the successful result type;
+- added `lipc check --json` (`lip.diagnostics.v1`) with source location, context,
+  stable diagnostic categories and repair guidance;
+- expanded the tutorial to 21 progressive sections, checked source snippets,
+  actual output/failure cases, and complete State/Host/Python demonstrations;
+- verified one Flow composing Go IO, pure parsing, Python calculation and pure
+  aggregation in sequential, automatic and bounded parallel execution;
+- bounded string operators/typed boundaries at 16 MiB and Map/fold sources at
+  1,000,000 elements before expansion; fixed the file-reading example's effect;
+- rejected Python nonfinite-to-null conversion and colliding dictionary keys;
+  kept unordered sets as handles and rejected implicit ordered-list conversion;
+- reclaimed handles allocated during failed Python result conversion; Python
+  startup failures no longer masquerade as missing-interpreter test skips;
+- added compiler fuzzing, resource-boundary tests and repeatable acceptance.
+
+Alpha behavior changes: invalid UTF-8/oversized strings now fail consistently;
+oversized Map/fold inputs fail; Python NaN/Inf no longer become null, and sets
+must be explicitly ordered (for example with `builtins.sorted`) before conversion.
+No new language keywords, hot reload, automatic AI calls or performance promises.
+
+## 0.6.0 — Small, complete core
+
+Specification: [ALPHA-0.6-SPEC.md](docs/ALPHA-0.6-SPEC.md)
+
+- froze a self-contained core and deferred Worker pools, embedded Python, streams,
+  new backends and unrelated DSL extensions; retained existing adapters;
+- added source-ordered object literals, null, explicit list/object boundary types,
+  optional null results, boolean negation and consistent Unicode string indexing;
+- added Rust-style `if condition { value } else { value }`, retaining 0.5 syntax;
+- added fixed pure `len`, bounded half-open `range` and ordered seeded `fold`;
+- added a 34-operation pure list library inspired by Mathematica, with a shared
+  signature catalog, stable grouping/sorting, shape transforms, filtering and scans;
+- enabled direct/mutual pure recursion with declared cycle result types, cancellation
+  checks and a maximum local call depth of 256;
+- added stable `lipc inspect` graph JSON and `lipc run --trace path.json` lifecycle JSON;
+- preserved program exit codes by running a temporary binary, forwarded interrupts,
+  and made standalone cleanup execute on failure as well as success;
+- added dependency-free report, range/Map/fold and recursive tree and list-processing examples, negative
+  and end-to-end conformance tests, and `scripts/verify-release.sh`.
+
+Go string indexing now returns one Unicode character as a string rather than a byte
+number; use a Host adapter when raw byte operations are required. Collection types
+check outer shape; ordinary loops, closures and a generic iterator protocol remain
+outside this release. Range is capped at 1,000,000 elements; recursion has no tail-call
+optimization. This is Alpha 0.6, not a 1.0 compatibility commitment.
+
+## 0.5.0 — Alpha 0.5 complete program contract
 
 - required explicit Flow/function parameter types and Flow output types, with one
   return and explicit optional gated outputs (`Type?`);
@@ -42,8 +121,6 @@ Python control/data plane included in this release:
 
 ## 0.4.0 — Alpha 0.4
 
-Specification: [ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md)
-
 Alpha 0.4 completes the next runtime milestone on top of persistent Alpha 0.3
 instances.
 
@@ -55,7 +132,7 @@ Included:
 - `EffectPure`, `EffectReadOnly` and `EffectExternalWrite` metadata;
 - concurrent read-only Host operations and sequential external-write barriers;
 - explicit `NodeSpec.After` ordering constraints;
-- Go-like `lipc help`, executable `build`, temporary `run` and `-emit-go` source mode;
+- Go-like `lipc help`, executable `build`, temporary `run` and `--emit-go` source mode;
 - serialized Graph/Instance observation and execution for safe object reuse;
 - State/Tick and incremental cache tests, examples and specifications.
 
@@ -63,8 +140,6 @@ The language still keeps effect metadata at the Go Runtime boundary rather than
 introducing a full effect type system.
 
 ## 0.3.0 — Alpha 0.3
-
-Specification: [ALPHA-0.3-SPEC.md](docs/ALPHA-0.3-SPEC.md)
 
 Included:
 
@@ -74,8 +149,6 @@ Included:
 - per-tick Trace events and stateful examples.
 
 ## 0.2.0 — Alpha 0.2
-
-Specification: [ALPHA-0.2-SPEC.md](docs/ALPHA-0.2-SPEC.md)
 
 Alpha 0.2 adds one-shot dynamic Map execution while keeping Flow invocations
 independent and the language core small.
@@ -106,8 +179,6 @@ GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 ```
 
 ## 0.1.0 — Alpha 0.1
-
-Specification: [ALPHA-0.1-SPEC.md](docs/ALPHA-0.1-SPEC.md)
 
 This is the first publishable Alpha release of LIP.
 

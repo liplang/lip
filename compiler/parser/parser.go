@@ -12,12 +12,9 @@ import (
 type Parser struct {
 	tokens []token.Token
 	i      int
-	legacy bool // Used only by the explicit migration command.
 }
 
 func New(tokens []token.Token) *Parser { return &Parser{tokens: tokens} }
-
-func NewLegacy(tokens []token.Token) *Parser { return &Parser{tokens: tokens, legacy: true} }
 
 func (p *Parser) Parse() (*ast.Program, error) {
 	if err := p.checkDirective(); err != nil {
@@ -113,34 +110,9 @@ func (p *Parser) parseFunction() (*ast.Function, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(token.LParen); err != nil {
+	params, paramTypes, err := p.parseParameters()
+	if err != nil {
 		return nil, err
-	}
-	params := []string{}
-	paramTypes := map[string]string{}
-	if !p.match(token.RParen) {
-		for {
-			param, e := p.expect(token.Ident)
-			if e != nil {
-				return nil, e
-			}
-			params = append(params, param.Text)
-			if p.match(token.Colon) {
-				typ, e := p.parseType(false)
-				if e != nil {
-					return nil, e
-				}
-				paramTypes[param.Text] = typ
-			} else if !p.legacy {
-				return nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values (lipc migrate can update older sources)", param.Text)
-			}
-			if p.match(token.RParen) {
-				break
-			}
-			if _, e := p.expect(token.Comma); e != nil {
-				return nil, e
-			}
-		}
 	}
 	returnType := ""
 	if p.match(token.Arrow) {
@@ -174,35 +146,12 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 	if err != nil {
 		return nil, err
 	}
-	params := []string{}
-	paramTypes := map[string]string{}
-	if p.match(token.LParen) {
-		if !p.match(token.RParen) {
-			for {
-				param, e := p.expect(token.Ident)
-				if e != nil {
-					return nil, e
-				}
-				params = append(params, param.Text)
-				if p.match(token.Colon) {
-					typ, e := p.parseType(false)
-					if e != nil {
-						return nil, e
-					}
-					paramTypes[param.Text] = typ
-				} else if !p.legacy {
-					return nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values (lipc migrate can update older sources)", param.Text)
-				}
-				if p.match(token.RParen) {
-					break
-				}
-				if _, e := p.expect(token.Comma); e != nil {
-					return nil, e
-				}
-			}
-		}
-	} else if !p.legacy {
+	if p.peek().Kind != token.LParen {
 		return nil, p.errorf(p.peek(), "flow needs an explicit parameter list; use () when it has no inputs")
+	}
+	params, paramTypes, err := p.parseParameters()
+	if err != nil {
+		return nil, err
 	}
 	returnType := ""
 	if p.match(token.Arrow) {
@@ -210,8 +159,8 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 		if err != nil {
 			return nil, err
 		}
-	} else if !p.legacy {
-		return nil, p.errorf(p.peek(), "flow %q needs an explicit output type; add -> Type (lipc migrate can update older sources)", name.Text)
+	} else {
+		return nil, p.errorf(p.peek(), "flow %q needs an explicit output type; add -> Type", name.Text)
 	}
 	if _, err := p.expect(token.LBrace); err != nil {
 		return nil, err
@@ -223,9 +172,41 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 	return &ast.Flow{Name: name.Text, Params: params, ParamTypes: paramTypes, ReturnType: returnType, Body: body, Pos: kw.Pos}, nil
 }
 
+func (p *Parser) parseParameters() ([]string, map[string]string, error) {
+	if _, err := p.expect(token.LParen); err != nil {
+		return nil, nil, err
+	}
+	params := []string{}
+	paramTypes := map[string]string{}
+	if p.match(token.RParen) {
+		return params, paramTypes, nil
+	}
+	for {
+		param, err := p.expect(token.Ident)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !p.match(token.Colon) {
+			return nil, nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values", param.Text)
+		}
+		typ, err := p.parseType(false)
+		if err != nil {
+			return nil, nil, err
+		}
+		params = append(params, param.Text)
+		paramTypes[param.Text] = typ
+		if p.match(token.RParen) {
+			return params, paramTypes, nil
+		}
+		if _, err := p.expect(token.Comma); err != nil {
+			return nil, nil, err
+		}
+	}
+}
+
 func validTypeName(name string) bool {
 	switch name {
-	case "any", "string", "number", "bool":
+	case "any", "string", "number", "bool", "list", "object":
 		return true
 	default:
 		return false
@@ -339,29 +320,76 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			return nil, err
 		}
 		expr = &ast.BinaryExpr{Op: t.Text, Left: &ast.LiteralExpr{Value: float64(0), Raw: "0", Pos: t.Pos}, Right: operand, Pos: t.Pos}
+	case token.Not:
+		operand, err := p.parseExpr(7)
+		if err != nil {
+			return nil, err
+		}
+		expr = &ast.UnaryExpr{Op: t.Text, Operand: operand, Pos: t.Pos}
 	case token.String:
 		expr = &ast.LiteralExpr{Value: t.Text, Raw: t.Text, Pos: t.Pos}
 	case token.True:
 		expr = &ast.LiteralExpr{Value: true, Raw: t.Text, Pos: t.Pos}
 	case token.False:
 		expr = &ast.LiteralExpr{Value: false, Raw: t.Text, Pos: t.Pos}
+	case token.Null:
+		expr = &ast.LiteralExpr{Value: nil, Raw: t.Text, Pos: t.Pos}
+	case token.LBrace:
+		fields := []ast.ObjectField{}
+		seen := map[string]bool{}
+		if !p.match(token.RBrace) {
+			for {
+				key := p.next()
+				if key.Kind != token.Ident && key.Kind != token.String {
+					return nil, p.errorf(key, "object key must be an identifier or string")
+				}
+				if seen[key.Text] {
+					return nil, p.errorf(key, "duplicate object key %q", key.Text)
+				}
+				seen[key.Text] = true
+				if _, err := p.expect(token.Colon); err != nil {
+					return nil, err
+				}
+				value, err := p.parseExpr(0)
+				if err != nil {
+					return nil, err
+				}
+				fields = append(fields, ast.ObjectField{Name: key.Text, Value: value, Pos: key.Pos})
+				if p.match(token.RBrace) {
+					break
+				}
+				if _, err := p.expect(token.Comma); err != nil {
+					return nil, err
+				}
+			}
+		}
+		expr = &ast.ObjectExpr{Fields: fields, Pos: t.Pos}
 	case token.If:
 		cond, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(token.Then); err != nil {
+		if _, err = p.expect(token.LBrace); err != nil {
 			return nil, err
 		}
 		thenExpr, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
 		}
+		if _, err = p.expect(token.RBrace); err != nil {
+			return nil, err
+		}
 		if _, err = p.expect(token.Else); err != nil {
+			return nil, err
+		}
+		if _, err = p.expect(token.LBrace); err != nil {
 			return nil, err
 		}
 		elseExpr, err := p.parseExpr(0)
 		if err != nil {
+			return nil, err
+		}
+		if _, err = p.expect(token.RBrace); err != nil {
 			return nil, err
 		}
 		expr = &ast.IfExpr{Cond: cond, Then: thenExpr, Else: elseExpr, Pos: t.Pos}

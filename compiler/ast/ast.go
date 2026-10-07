@@ -105,6 +105,14 @@ type BinaryExpr struct {
 
 func (*BinaryExpr) exprNode() {}
 
+type UnaryExpr struct {
+	Op      string
+	Operand Expr
+	Pos     token.Pos
+}
+
+func (*UnaryExpr) exprNode() {}
+
 type IfExpr struct {
 	Cond, Then, Else Expr
 	Pos              token.Pos
@@ -118,6 +126,20 @@ type ListExpr struct {
 }
 
 func (*ListExpr) exprNode() {}
+
+// Fields keep source order for deterministic evaluation and diagnostics.
+type ObjectExpr struct {
+	Fields []ObjectField
+	Pos    token.Pos
+}
+
+type ObjectField struct {
+	Name  string
+	Value Expr
+	Pos   token.Pos
+}
+
+func (*ObjectExpr) exprNode() {}
 
 // ComprehensionExpr is the Alpha 0.2 one-shot dynamic map form:
 // [Element for Variable in Source]. The compiler keeps this as one graph node

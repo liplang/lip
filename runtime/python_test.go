@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,9 +16,12 @@ import (
 
 func newTestPythonWorker(t *testing.T) *PythonWorker {
 	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 is unavailable: %v", err)
+	}
 	worker, err := NewPythonWorker(context.Background(), PythonWorkerConfig{Python: "python3"})
 	if err != nil {
-		t.Skipf("python3 is unavailable: %v", err)
+		t.Fatalf("python3 is present but worker startup failed: %v", err)
 	}
 	t.Cleanup(func() { _ = worker.Close() })
 	return worker
@@ -367,7 +371,7 @@ func TestPythonWorkerRegistersOnHostAndRunsInGraph(t *testing.T) {
 	host.RegisterPythonPure("python_sum", worker, "sum")
 	host.RegisterPythonReadOnly("python_mean", worker, "mean")
 	graph := NewGraph()
-	graph.Add(NodeSpec{Name: "sum", Op: "python_sum", Pure: true, Output: true, Eval: func(ctx context.Context, values map[string]Value) Result {
+	graph.Add(NodeSpec{Name: "sum", Op: "python_sum", Effect: EffectPure, Output: true, Eval: func(ctx context.Context, values map[string]Value) Result {
 		return host.Call(ctx, "python_sum", []Value{values["numbers"]})
 	}})
 	value, _, err := graph.RunAuto(context.Background(), host, map[string]Value{"numbers": []int{1, 2, 3, 4}})

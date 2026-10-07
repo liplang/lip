@@ -3,16 +3,62 @@ package runtime
 
 import (
 	"context"
+	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	stdruntime "runtime"
 	"strings"
 	"sync"
+
+	"lipalpha/internal/listops"
+	"lipalpha/internal/stringops"
 )
+
+//go:embed *.go python_worker.py
+var buildSources embed.FS
+
+// WriteBuildModule materializes the installed runtime for an isolated lipc build.
+func WriteBuildModule(directory string) error {
+	write := func(name string, data []byte) error {
+		path := filepath.Join(directory, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, data, 0o644)
+	}
+	files, err := buildSources.ReadDir(".")
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if file.IsDir() || strings.HasSuffix(file.Name(), "_test.go") {
+			continue
+		}
+		data, err := buildSources.ReadFile(file.Name())
+		if err != nil {
+			return err
+		}
+		if err := write("runtime/"+file.Name(), data); err != nil {
+			return err
+		}
+	}
+	for name, source := range map[string]string{
+		"go.mod":                        "module lipalpha\n\ngo 1.27\n",
+		"internal/listops/catalog.go":   listops.Source,
+		"internal/stringops/catalog.go": stringops.Source,
+	} {
+		if err := write(name, []byte(source)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type Value = any
 
@@ -287,6 +333,8 @@ func rawNumber(v Value) (float64, error) {
 		return float64(n), nil
 	case float64:
 		return n, nil
+	case json.Number:
+		return n.Float64()
 	}
 	return 0, fmt.Errorf("expected number, got %T (%v)", v, v)
 }
@@ -302,12 +350,19 @@ func Bool(v Value) (bool, error) {
 // CheckType validates an explicitly annotated Alpha input or function
 // argument. "any" deliberately accepts every value, including nil.
 func CheckType(v Value, typ string) error {
+	if strings.HasSuffix(typ, "?") {
+		if v == nil {
+			return nil
+		}
+		typ = strings.TrimSuffix(typ, "?")
+	}
 	switch typ {
 	case "any", "":
 		return nil
 	case "string":
 		if _, ok := v.(string); ok {
-			return nil
+			_, err := stringInput(v)
+			return err
 		}
 	case "number":
 		if n, err := Number(v); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
@@ -316,6 +371,20 @@ func CheckType(v Value, typ string) error {
 	case "bool":
 		if _, ok := v.(bool); ok {
 			return nil
+		}
+	case "list":
+		if v != nil {
+			kind := reflect.TypeOf(v).Kind()
+			if kind == reflect.Slice || kind == reflect.Array {
+				return nil
+			}
+		}
+	case "object":
+		if v != nil {
+			t := reflect.TypeOf(v)
+			if t.Kind() == reflect.Map && t.Key().Kind() == reflect.String {
+				return nil
+			}
 		}
 	default:
 		return fmt.Errorf("unknown type %q", typ)
@@ -370,7 +439,20 @@ func Index(object, index Value) (Value, error) {
 		v = v.Elem()
 	}
 	switch v.Kind() {
-	case reflect.Slice, reflect.Array, reflect.String:
+	case reflect.String:
+		if _, err := stringInput(v.String()); err != nil {
+			return nil, err
+		}
+		n, err := integer(index)
+		if err != nil {
+			return nil, err
+		}
+		runes := []rune(v.String())
+		if n < 0 || n >= len(runes) {
+			return nil, fmt.Errorf("index %d out of range", n)
+		}
+		return string(runes[n]), nil
+	case reflect.Slice, reflect.Array:
 		n, err := integer(index)
 		if err != nil {
 			return nil, err
@@ -380,6 +462,11 @@ func Index(object, index Value) (Value, error) {
 		}
 		return v.Index(n).Interface(), nil
 	case reflect.Map:
+		if v.Type().Key().Kind() == reflect.String {
+			if _, ok := index.(string); !ok {
+				return nil, fmt.Errorf("object index must be string, got %T", index)
+			}
+		}
 		key := reflect.ValueOf(index)
 		if !key.IsValid() || !key.Type().AssignableTo(v.Type().Key()) {
 			if key.IsValid() && key.Type().ConvertibleTo(v.Type().Key()) {
@@ -410,6 +497,15 @@ func Binary(op string, left, right Value) (value Value, err error) {
 			rs, ok := right.(string)
 			if !ok {
 				return nil, fmt.Errorf("operator + expects two strings or two numbers, got string and %T", right)
+			}
+			if _, err := stringInput(ls); err != nil {
+				return nil, err
+			}
+			if _, err := stringInput(rs); err != nil {
+				return nil, err
+			}
+			if len(ls) > MaxStringBytes-len(rs) {
+				return nil, fmt.Errorf("string result exceeds %d bytes", MaxStringBytes)
 			}
 			return ls + rs, nil
 		}
@@ -528,8 +624,14 @@ func integer(v Value) (int, error) {
 }
 
 func repeatString(value string, count int) (string, error) {
-	if count > 0 && len(value) > int(^uint(0)>>1)/count {
-		return "", errors.New("operator * string result is too large")
+	if _, err := stringInput(value); err != nil {
+		return "", err
+	}
+	if len(value) > 0 && count > MaxStringBytes/len(value) {
+		return "", fmt.Errorf("string result exceeds %d bytes", MaxStringBytes)
+	}
+	if value == "" || count == 0 {
+		return "", nil
 	}
 	return strings.Repeat(value, count), nil
 }
@@ -549,7 +651,6 @@ func equalValues(left, right Value) bool {
 type NodeSpec struct {
 	Name   string
 	Op     string
-	Pure   bool
 	Effect Effect
 	Deps   []string
 	Gates  []string
@@ -573,7 +674,6 @@ type NodeSpec struct {
 // use Flow bindings while evaluating the element expression.
 type MapSpec struct {
 	Source string
-	Pure   bool
 	Ops    []string
 	Eval   func(context.Context, Value, map[string]Value) Result
 }
@@ -1302,14 +1402,11 @@ func evaluateFeedback(ctx context.Context, spec *FeedbackSpec, values map[string
 	return Failed(errors.New("feedback did not converge"))
 }
 
-// nodeEffect resolves conservative metadata. Explicit Effect overrides the
-// legacy Pure flag; an unclassified operation is treated as a write barrier.
+// nodeEffect uses explicit Effect or resolves it from Host operations.
+// An unclassified operation is treated as a write barrier.
 func nodeEffect(node NodeSpec, host Host) Effect {
 	if node.Effect != EffectUnknown {
 		return node.Effect
-	}
-	if node.Pure || node.Map != nil && node.Map.Pure {
-		return EffectPure
 	}
 	var ops []string
 	if node.Map != nil {
@@ -1387,7 +1484,7 @@ func evaluateMap(ctx context.Context, spec *MapSpec, values map[string]Value, li
 	if !ok {
 		return Failed(fmt.Errorf("map source %q is unavailable", spec.Source))
 	}
-	items, err := sequenceValues(input)
+	items, err := listInput(input)
 	if err != nil {
 		return Failed(err)
 	}

@@ -36,16 +36,9 @@ type PythonWorkerConfig struct {
 	// Python is the interpreter executable. It defaults to python3, then
 	// python when python3 is not available.
 	Python string
-	// Executable is an alias for Python for callers that treat the adapter as
-	// a generic process host. Python takes precedence when both are set.
-	Executable string
-	// Command is another executable alias used by process-oriented callers.
-	Command string
 	// Script is a compatible JSONL worker script. Empty means the bundled
 	// generic worker.
 	Script string
-	// WorkerScript is an alias for Script.
-	WorkerScript string
 	// Args are passed to the worker after the script (or -c program).
 	Args []string
 	Env  []string
@@ -96,16 +89,6 @@ type PythonWorkerConfig struct {
 }
 
 func (c PythonWorkerConfig) withDefaults() PythonWorkerConfig {
-	if c.Python == "" {
-		if c.Executable != "" {
-			c.Python = c.Executable
-		} else if c.Command != "" {
-			c.Python = c.Command
-		}
-	}
-	if c.Script == "" {
-		c.Script = c.WorkerScript
-	}
 	if c.MaxQueue <= 0 {
 		c.MaxQueue = 16
 	}
@@ -177,16 +160,6 @@ type PythonWorker struct {
 	nextBlobID    atomic.Uint64
 	blobs         map[string]int64
 	dataBytes     int64
-}
-
-// ProcessHost is the roadmap name for the process-backed adapter. It is an
-// alias so callers can use either the transport-oriented PythonWorker name or
-// the Host-oriented name without introducing two lifecycles.
-type ProcessHost = PythonWorker
-type ProcessHostConfig = PythonWorkerConfig
-
-func NewProcessHost(ctx context.Context, config ProcessHostConfig) (*ProcessHost, error) {
-	return NewPythonWorker(ctx, config)
 }
 
 type pythonProcess struct {

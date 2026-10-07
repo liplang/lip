@@ -83,8 +83,19 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(mainCode, "runtime.NewProcessHost") || !strings.Contains(mainCode, "runtime.NewPythonHost") || !strings.Contains(mainCode, "host/go dependencies require a Go host program") {
-		t.Fatal("python dependency did not activate the standalone worker")
+	if !strings.Contains(mainCode, "host/go dependencies require a Go host program") || strings.Contains(mainCode, "runtime.NewPythonWorker") {
+		t.Fatal("Host/Go standalone rejection must precede any Worker startup")
+	}
+	pythonOnly, err := compiler.ParseAndBuild(`require python "math" flow Root(x: number) -> number { return math.sqrt(x) }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pythonMain, err := compiler.GenerateGo(pythonOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pythonMain, "runtime.NewPythonWorker") || !strings.Contains(pythonMain, "runtime.NewPythonHost") {
+		t.Fatal("Python-only dependency did not activate the standalone worker")
 	}
 	if _, err := compiler.ParseAndBuild(`require python "numpy"
 		require python "numpy"
@@ -292,15 +303,15 @@ func TestStateBuildsPersistentNodeAndInstanceAPI(t *testing.T) {
 func TestStatefulInstanceReusesUnchangedNodes(t *testing.T) {
 	rt := runtime.NewGraph()
 	var stateRuns, derivedRuns, inputRuns atomic.Int64
-	rt.Add(runtime.NodeSpec{Name: "count", State: true, Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "count", State: true, Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		stateRuns.Add(1)
 		return runtime.Ready(0)
 	}})
-	rt.Add(runtime.NodeSpec{Name: "double", Deps: []string{"count"}, Pure: true, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "double", Deps: []string{"count"}, Effect: runtime.EffectPure, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
 		derivedRuns.Add(1)
 		return runtime.Ready(values["count"].(int) * 2)
 	}, Output: true})
-	rt.Add(runtime.NodeSpec{Name: "input_value", Deps: []string{"input"}, Pure: true, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "input_value", Deps: []string{"input"}, Effect: runtime.EffectPure, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
 		inputRuns.Add(1)
 		return runtime.Ready(values["input"])
 	}})
@@ -435,7 +446,7 @@ func TestParallelRunsLatePurePredecessorOfWrite(t *testing.T) {
 	rt.Add(runtime.NodeSpec{Name: "write", Op: "write", Deps: []string{"late"}, Output: true, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "write", []runtime.Value{values["late"]})
 	}})
-	rt.Add(runtime.NodeSpec{Name: "late", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "late", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		mu.Lock()
 		order = append(order, "late")
 		mu.Unlock()
@@ -461,8 +472,8 @@ func TestAfterAddsOrderingWithoutDataDependency(t *testing.T) {
 			return runtime.Ready(name)
 		}
 	}
-	rt.Add(runtime.NodeSpec{Name: "first", Pure: true, Eval: appendSeen("first")})
-	rt.Add(runtime.NodeSpec{Name: "second", Pure: true, After: []string{"first"}, Output: true, Eval: appendSeen("second")})
+	rt.Add(runtime.NodeSpec{Name: "first", Effect: runtime.EffectPure, Eval: appendSeen("first")})
+	rt.Add(runtime.NodeSpec{Name: "second", Effect: runtime.EffectPure, After: []string{"first"}, Output: true, Eval: appendSeen("second")})
 	if _, _, err := rt.RunParallel(context.Background(), runtime.NewHost(), nil, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +572,7 @@ func TestRuntimeRejectsNilContext(t *testing.T) {
 func TestPersistentInstanceSerializesConcurrentTicks(t *testing.T) {
 	rt := runtime.NewGraph()
 	var active, maxActive atomic.Int64
-	rt.Add(runtime.NodeSpec{Name: "value", Output: true, Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "value", Output: true, Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		current := active.Add(1)
 		for {
 			old := maxActive.Load()
@@ -606,7 +617,7 @@ func TestCancelledTickAdvancesLogicalClock(t *testing.T) {
 func TestGraphSerializesConcurrentRuns(t *testing.T) {
 	rt := runtime.NewGraph()
 	var active, maxActive atomic.Int64
-	rt.Add(runtime.NodeSpec{Name: "value", Output: true, Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "value", Output: true, Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		current := active.Add(1)
 		for {
 			old := maxActive.Load()
@@ -636,13 +647,13 @@ func TestGraphSerializesConcurrentRuns(t *testing.T) {
 
 func TestDynamicMapPreservesOrderAndHonorsLimit(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "values", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "values", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{1, 2, 3, 4})
 	}})
 	var active, maxActive atomic.Int64
 	rt.Add(runtime.NodeSpec{
-		Name: "doubled", Deps: []string{"values"}, Pure: true,
-		Map: &runtime.MapSpec{Source: "values", Pure: true, Eval: func(ctx context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
+		Name: "doubled", Deps: []string{"values"}, Effect: runtime.EffectPure,
+		Map: &runtime.MapSpec{Source: "values", Eval: func(ctx context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 			current := active.Add(1)
 			for {
 				old := maxActive.Load()
@@ -684,10 +695,10 @@ func TestDynamicMapPreservesOrderAndHonorsLimit(t *testing.T) {
 
 func TestDynamicMapEmptySourceReturnsEmptyList(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "values", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "values", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{})
 	}})
-	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Pure: true, Output: true, Map: &runtime.MapSpec{Source: "values", Pure: true, Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Effect: runtime.EffectPure, Output: true, Map: &runtime.MapSpec{Source: "values", Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(item)
 	}}})
 	value, _, err := rt.Run(context.Background(), nil)
@@ -702,7 +713,7 @@ func TestDynamicMapEmptySourceReturnsEmptyList(t *testing.T) {
 
 func TestEffectfulDynamicMapRunsSequentially(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "values", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "values", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{1, 2, 3})
 	}})
 	var active, maxActive atomic.Int64
@@ -730,10 +741,10 @@ func TestEffectfulDynamicMapRunsSequentially(t *testing.T) {
 
 func TestDynamicMapRejectsNonSequenceSource(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "value", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "value", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(1)
 	}})
-	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"value"}, Pure: true, Map: &runtime.MapSpec{Source: "value", Pure: true, Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"value"}, Effect: runtime.EffectPure, Map: &runtime.MapSpec{Source: "value", Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(item)
 	}}})
 	if _, _, err := rt.Run(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "map source must be a list or slice") {
@@ -743,10 +754,10 @@ func TestDynamicMapRejectsNonSequenceSource(t *testing.T) {
 
 func TestDynamicMapElementErrorStopsDownstream(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "values", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "values", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{1, 2, 3})
 	}})
-	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Pure: true, Map: &runtime.MapSpec{Source: "values", Pure: true, Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Effect: runtime.EffectPure, Map: &runtime.MapSpec{Source: "values", Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 		if number, _ := runtime.Number(item); number == 2 {
 			return runtime.Failed(fmt.Errorf("boom"))
 		}
@@ -765,10 +776,10 @@ func TestDynamicMapElementErrorStopsDownstream(t *testing.T) {
 
 func TestDynamicMapHonorsContextCancellation(t *testing.T) {
 	rt := runtime.NewGraph()
-	rt.Add(runtime.NodeSpec{Name: "values", Pure: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "values", Effect: runtime.EffectPure, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{1, 2, 3, 4})
 	}})
-	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Pure: true, Map: &runtime.MapSpec{Source: "values", Pure: true, Eval: func(ctx context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"values"}, Effect: runtime.EffectPure, Map: &runtime.MapSpec{Source: "values", Eval: func(ctx context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 		select {
 		case <-ctx.Done():
 			return runtime.Failed(ctx.Err())
@@ -823,9 +834,9 @@ func TestBoundedParallelRuntime(t *testing.T) {
 			return runtime.Ready(value)
 		}
 	}
-	rt.Add(runtime.NodeSpec{Name: "a", Pure: true, Eval: worker(1)})
-	rt.Add(runtime.NodeSpec{Name: "b", Pure: true, Eval: worker(2)})
-	rt.Add(runtime.NodeSpec{Name: "sum", Pure: true, Deps: []string{"a", "b"}, Output: true, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "a", Effect: runtime.EffectPure, Eval: worker(1)})
+	rt.Add(runtime.NodeSpec{Name: "b", Effect: runtime.EffectPure, Eval: worker(2)})
+	rt.Add(runtime.NodeSpec{Name: "sum", Effect: runtime.EffectPure, Deps: []string{"a", "b"}, Output: true, Eval: func(_ context.Context, values map[string]runtime.Value) runtime.Result {
 		value, err := runtime.Binary("+", values["a"], values["b"])
 		if err != nil {
 			return runtime.Failed(err)
@@ -863,7 +874,7 @@ func TestBoundedParallelRuntime(t *testing.T) {
 func TestAwaitResultIsPropagated(t *testing.T) {
 	rt := runtime.NewGraph()
 	result := make(chan runtime.Result, 1)
-	rt.Add(runtime.NodeSpec{Name: "async", Pure: true, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "async", Effect: runtime.EffectPure, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Await(result)
 	}})
 	go func() {
@@ -883,12 +894,12 @@ func TestParallelPreservesSourceOrderForOutputs(t *testing.T) {
 	rt := runtime.NewGraph()
 	started := make(chan struct{})
 	release := make(chan struct{})
-	rt.Add(runtime.NodeSpec{Name: "first", Pure: true, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "first", Effect: runtime.EffectPure, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		close(started)
 		<-release
 		return runtime.Ready("first")
 	}})
-	rt.Add(runtime.NodeSpec{Name: "second", Pure: true, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
+	rt.Add(runtime.NodeSpec{Name: "second", Effect: runtime.EffectPure, Output: true, Eval: func(_ context.Context, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready("second")
 	}})
 	resultCh := make(chan runtime.Value, 1)

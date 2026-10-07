@@ -40,7 +40,7 @@ func (l *Lexer) next() (token.Token, error) {
 			l.advance()
 			continue
 		}
-		if ch == '#' || (ch == '/' && l.peek(1) == '/') {
+		if ch == '/' && l.peek(1) == '/' {
 			for l.i < len(l.src) && l.src[l.i] != '\n' {
 				l.advance()
 			}
@@ -75,8 +75,6 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.In
 		case "if":
 			kind = token.If
-		case "then":
-			kind = token.Then
 		case "else":
 			kind = token.Else
 		case "require":
@@ -85,6 +83,8 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.True
 		case "false":
 			kind = token.False
+		case "null":
+			kind = token.Null
 		}
 		return token.Token{Kind: kind, Text: text, Pos: start}, nil
 	}
@@ -155,6 +155,7 @@ func (l *Lexer) next() (token.Token, error) {
 	}
 	one := map[rune]token.Kind{'=': token.Assign, '(': token.LParen, ')': token.RParen, '{': token.LBrace, '}': token.RBrace, '[': token.LBracket, ']': token.RBracket, ',': token.Comma, ':': token.Colon, '.': token.Dot, '+': token.Plus, '-': token.Minus, '*': token.Star, '/': token.Slash, '>': token.Greater, '<': token.Less}
 	one['?'] = token.Question
+	one['!'] = token.Not
 	if kind, ok := one[ch]; ok {
 		l.advance()
 		return token.Token{Kind: kind, Text: string(ch), Pos: start}, nil
