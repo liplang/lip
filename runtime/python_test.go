@@ -423,3 +423,51 @@ func TestPythonWorkerRejectsBrokenHandshake(t *testing.T) {
 		t.Fatalf("err=%v, want protocol mismatch", err)
 	}
 }
+
+func TestPythonWorkerStaleHandlesFailAfterRestart(t *testing.T) {
+	worker := newTestPythonWorker(t)
+	ctx := context.Background()
+	old := worker.Call(ctx, "fractions.Fraction", []Value{1, 3})
+	if old.Err != nil {
+		t.Fatal(old.Err)
+	}
+	if result := worker.Call(ctx, "os._exit", []Value{2}); result.Err == nil {
+		t.Fatal("worker crash became a success")
+	}
+	fresh := worker.Call(ctx, "fractions.Fraction", []Value{1, 4})
+	if fresh.Err != nil {
+		t.Fatal(fresh.Err)
+	}
+	if result := worker.Call(ctx, "python.to_json", []Value{old.Value}); result.Err == nil {
+		t.Fatal("stale handle resolved to a new object after restart")
+	}
+	if result := worker.Call(ctx, "python.to_json", []Value{fresh.Value}); result.Err != nil || result.Value != "1/4" {
+		t.Fatalf("fresh=%v err=%v", result.Value, result.Err)
+	}
+	if result := worker.Call(ctx, "python.release", []Value{fresh.Value}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result := worker.Call(ctx, "python.to_json", []Value{fresh.Value}); result.Err == nil {
+		t.Fatal("released handle remained usable")
+	}
+	if result := worker.Call(ctx, "python.release", []Value{fresh.Value}); result.Err == nil {
+		t.Fatal("double release was accepted")
+	}
+}
+
+func TestPythonWorkerCachedBlobRejectsTampering(t *testing.T) {
+	worker := newTestPythonWorker(t)
+	blob, err := worker.PutBlob(context.Background(), []byte("1234"), PythonBlobMetadata{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := worker.Call(context.Background(), "echo", []Value{blob}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if err := os.WriteFile(filepath.Join(worker.dataDir, blob.Name), []byte("4321"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if result := worker.Call(context.Background(), "echo", []Value{blob}); result.Err == nil {
+		t.Fatal("cached blob accepted changed bytes")
+	}
+}

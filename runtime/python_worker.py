@@ -18,6 +18,7 @@ import platform
 import stat
 import sys
 import time
+import uuid
 
 PROTOCOL = 1
 NOT_BUILTIN = object()
@@ -36,6 +37,7 @@ MAX_OPEN_BLOBS = int(os.environ.get("LIP_PYTHON_MAX_OPEN_BLOBS", "64"))
 MAX_HANDLES = int(os.environ.get("LIP_PYTHON_MAX_HANDLES", "10000"))
 OBJECTS = {}
 NEXT_HANDLE = 0
+WORKER_ID = uuid.uuid4().hex
 HANDLE_COUNT = 0
 BLOBS = {}
 HANDLE_BLOBS = {}
@@ -157,6 +159,7 @@ def open_blob(blob, session):
     if existing is not None:
         if existing.get("descriptor") != blob:
             raise ValueError("Python blob descriptor changed for an open blob")
+        validate_blob(blob)
         return existing["value"]
     if MAX_OPEN_BLOBS > 0 and len(BLOBS) >= MAX_OPEN_BLOBS:
         raise RuntimeError("Python blob mapping limit exceeded")
@@ -243,7 +246,7 @@ def handle_object(value, session):
     global HANDLE_COUNT, NEXT_HANDLE
     if MAX_HANDLES > 0 and HANDLE_COUNT >= MAX_HANDLES:
         raise RuntimeError("Python object handle limit exceeded")
-    handle = str(NEXT_HANDLE)
+    handle = "%s:%d" % (WORKER_ID, NEXT_HANDLE)
     NEXT_HANDLE += 1
     HANDLE_COUNT += 1
     session_objects(session)[handle] = value
@@ -364,12 +367,6 @@ def builtin(name, args, session):
         return None
     if name == "fail":
         raise RuntimeError(str(args[0]) if args else "requested failure")
-    if name == "pandas.describe":
-        import pandas as pd
-
-        if len(args) != 1:
-            raise ValueError("pandas.describe expects one table")
-        return pd.DataFrame(args[0]).describe().to_dict()
     return NOT_BUILTIN
 
 
@@ -385,15 +382,27 @@ def call_operation(name, args, session):
     module_name = name.rsplit(".", 1)[0] if "." in name else ""
     if module_name and not module_allowed(module_name):
         raise PermissionError("module %s is not enabled by this worker" % module_name)
-    if "." not in name or name == "pandas.describe":
+    if "." not in name:
         value = builtin(name, args, session)
         if value is not NOT_BUILTIN:
             return value
-    module_name, attribute = name.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    target = module
-    for part in attribute.split("."):
-        target = getattr(target, part)
+    # Import the longest module prefix, then traverse real attributes. This
+    # also handles class/static methods such as datetime.datetime.fromisoformat.
+    parts = name.split(".")
+    target = None
+    for split in range(len(parts) - 1, 0, -1):
+        prefix = ".".join(parts[:split])
+        try:
+            target = importlib.import_module(prefix)
+        except ModuleNotFoundError as error:
+            if error.name != prefix and not prefix.startswith(error.name + "."):
+                raise
+            continue
+        for part in parts[split:]:
+            target = getattr(target, part)
+        break
+    if target is None:
+        raise ModuleNotFoundError("no module prefix found for operation %s" % name)
     if not callable(target):
         raise TypeError("operation %s is not callable" % name)
     return target(*args)
@@ -410,12 +419,6 @@ capabilities = [
     "python.to_json", "python.release", "python.open_blob", "python.release_blob",
     "blob-v1", "math.*", "statistics.*",
 ]
-if importlib.util.find_spec("numpy") is not None:
-    capabilities.append("numpy.*")
-if importlib.util.find_spec("scipy") is not None:
-    capabilities.append("scipy.*")
-if importlib.util.find_spec("pandas") is not None:
-    capabilities.append("pandas.describe")
 
 respond({
     "type": "ready",

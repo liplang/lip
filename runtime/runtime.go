@@ -103,6 +103,36 @@ func NewHost() Host {
 	return Host{ops: make(map[string]Op), effects: make(map[string]Effect)}
 }
 
+// Clone gives a generated Flow its own local function namespace. Registrations
+// in one Flow must not overwrite the caller's operations or another Flow.
+func (h Host) Clone() Host {
+	copy := NewHost()
+	for name, op := range h.ops {
+		copy.ops[name] = op
+	}
+	for name, effect := range h.effects {
+		copy.effects[name] = effect
+	}
+	copy.python, copy.pythonEffect = h.python, h.pythonEffect
+	return copy
+}
+
+func (h Host) HasOperation(name string) bool { _, ok := h.ops[name]; return ok }
+
+func (h Host) RequireOperation(name string) error {
+	if strings.HasSuffix(name, ".*") {
+		prefix := strings.TrimSuffix(name, "*")
+		for registered := range h.ops {
+			if strings.HasPrefix(registered, prefix) {
+				return nil
+			}
+		}
+	} else if h.HasOperation(name) {
+		return nil
+	}
+	return fmt.Errorf("required host operation %q is not registered", name)
+}
+
 func (h Host) Register(name string, op Op) {
 	if h.ops == nil {
 		panic("runtime.Host is not initialized")
@@ -224,6 +254,14 @@ func DefaultHost() Host {
 }
 
 func Number(v Value) (float64, error) {
+	n, err := rawNumber(v)
+	if err == nil && (math.IsNaN(n) || math.IsInf(n, 0)) {
+		return 0, fmt.Errorf("expected a finite number, got %v", n)
+	}
+	return n, err
+}
+
+func rawNumber(v Value) (float64, error) {
 	switch n := v.(type) {
 	case int:
 		return float64(n), nil
@@ -272,7 +310,7 @@ func CheckType(v Value, typ string) error {
 			return nil
 		}
 	case "number":
-		if _, err := Number(v); err == nil {
+		if n, err := Number(v); err == nil && !math.IsNaN(n) && !math.IsInf(n, 0) {
 			return nil
 		}
 	case "bool":
@@ -360,7 +398,12 @@ func Index(object, index Value) (Value, error) {
 	}
 }
 
-func Binary(op string, left, right Value) (Value, error) {
+func Binary(op string, left, right Value) (value Value, err error) {
+	defer func() {
+		if n, ok := value.(float64); err == nil && ok && (math.IsNaN(n) || math.IsInf(n, 0)) {
+			value, err = nil, errors.New("numeric result is not finite")
+		}
+	}()
 	switch op {
 	case "+":
 		if ls, ok := left.(string); ok {
@@ -510,6 +553,8 @@ type NodeSpec struct {
 	Effect Effect
 	Deps   []string
 	Gates  []string
+	// ValueType checks a completed value, including asynchronous Host results.
+	ValueType string
 	// After waits for named nodes to complete or be skipped, without consuming
 	// their values. Failed or cancelled predecessors block this node.
 	After    []string
@@ -638,6 +683,9 @@ func (i *Instance) SetState(name string, value Value) error {
 	defer i.mu.Unlock()
 	for _, node := range i.graph.nodes {
 		if node.Name == name && node.State {
+			if err := CheckType(value, node.ValueType); err != nil {
+				return fmt.Errorf("state %s: %w", name, err)
+			}
 			i.stateOverrides[name] = value
 			return nil
 		}
@@ -773,7 +821,7 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 					result = evaluateNode(ctx, node, values, 1)
 				}
 			}
-			result, err := awaitResult(ctx, result)
+			result, err := awaitNodeResult(ctx, node, result)
 			if err != nil {
 				return fail(index, err)
 			}
@@ -956,7 +1004,7 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 			}
 			status[i] = Running
 			g.record(node.Name, Running, "")
-			result, waitErr := awaitResult(ctx, evaluateNode(ctx, node, values, 1))
+			result, waitErr := awaitNodeResult(ctx, node, evaluateNode(ctx, node, values, 1))
 			if waitErr != nil {
 				return g.abortRun(status, i, waitErr)
 			}
@@ -1087,7 +1135,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			g.record(node.Name, Running, "")
 			snapshot := cloneValues(values)
 			go func(index int, spec NodeSpec) {
-				result, err := awaitResult(ctx, evaluateNode(ctx, spec, snapshot, limit))
+				result, err := awaitNodeResult(ctx, spec, evaluateNode(ctx, spec, snapshot, limit))
 				results <- resultEvent{index: index, result: result, err: err}
 			}(i, node)
 			progress = true
@@ -1128,7 +1176,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			}
 			status[i] = Running
 			g.record(node.Name, Running, "")
-			result, waitErr := awaitResult(ctx, evaluateNode(ctx, node, values, 1))
+			result, waitErr := awaitNodeResult(ctx, node, evaluateNode(ctx, node, values, 1))
 			if waitErr != nil {
 				return g.abortRun(status, i, waitErr)
 			}

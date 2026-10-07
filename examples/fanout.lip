@@ -1,4 +1,4 @@
-flow Fanout(input: number) {
+flow Fanout(input: number) -> number {
     left = input + 1
     right = input * 2
     total = left + right

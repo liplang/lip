@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 
 	"lipalpha/compiler/ast"
@@ -15,6 +16,7 @@ type Graph struct {
 	Flow         string
 	Params       []string
 	ParamTypes   map[string]string
+	ReturnType   string
 	Dependencies []ast.Dependency
 	Functions    []*ast.Function
 	Nodes        []Node
@@ -27,6 +29,7 @@ type Node struct {
 	Expr             ast.Expr
 	Output           bool
 	State            bool
+	Type             string
 	RetryAttempts    int
 	FeedbackAttempts int
 	FeedbackStep     string
@@ -46,16 +49,24 @@ func ParseAndBuild(src string) (*Graph, error) {
 	return Build(program)
 }
 
-func Build(program *ast.Program) (*Graph, error) {
+func Build(program *ast.Program) (*Graph, error) { return build(program, false) }
+
+func build(program *ast.Program, legacy bool) (*Graph, error) {
 	if program == nil || program.Flow == nil {
 		return nil, fmt.Errorf("program has no flow")
 	}
 	f := program.Flow
-	g := &Graph{Flow: f.Name, Params: append([]string(nil), f.Params...), ParamTypes: f.ParamTypes, Dependencies: append([]ast.Dependency(nil), program.Dependencies...), Functions: program.Functions}
+	g := &Graph{Flow: f.Name, Params: append([]string(nil), f.Params...), ParamTypes: f.ParamTypes, ReturnType: f.ReturnType, Dependencies: append([]ast.Dependency(nil), program.Dependencies...), Functions: program.Functions}
+	if !legacy && !validOutputType(f.ReturnType) {
+		return nil, fmt.Errorf("%d:%d: flow %q needs a valid explicit output type", f.Pos.Line, f.Pos.Column, f.Name)
+	}
 	seenDependencies := make(map[string]bool, len(g.Dependencies))
 	for _, dependency := range g.Dependencies {
 		if dependency.Kind != "python" && dependency.Kind != "go" && dependency.Kind != "host" {
 			return nil, fmt.Errorf("%d:%d: unknown dependency kind %q", dependency.Pos.Line, dependency.Pos.Column, dependency.Kind)
+		}
+		if err := validateDependency(dependency); err != nil {
+			return nil, err
 		}
 		key := dependency.Kind + "\x00" + dependency.Spec
 		if seenDependencies[key] {
@@ -65,13 +76,19 @@ func Build(program *ast.Program) (*Graph, error) {
 	}
 	functionNames := make(map[string]bool)
 	for _, fn := range program.Functions {
+		if reservedName(fn.Name) || builtinName(fn.Name) {
+			return nil, fmt.Errorf("%d:%d: function name %q is reserved", fn.Pos.Line, fn.Pos.Column, fn.Name)
+		}
 		if functionNames[fn.Name] {
 			return nil, fmt.Errorf("%d:%d: duplicate function %q", fn.Pos.Line, fn.Pos.Column, fn.Name)
 		}
 		functionNames[fn.Name] = true
 		if err := validateFunction(fn); err != nil {
-			return nil, fmt.Errorf("function %s: %w", fn.Name, err)
+			return nil, fmt.Errorf("%d:%d: function %s: %w", fn.Pos.Line, fn.Pos.Column, fn.Name, err)
 		}
+	}
+	if err := validatePureFunctions(program.Functions, functionNames); err != nil {
+		return nil, err
 	}
 	if err := validateOperationDependencies(program, functionNames, g.Dependencies); err != nil {
 		return nil, err
@@ -80,6 +97,9 @@ func Build(program *ast.Program) (*Graph, error) {
 	allNames := make(map[string]bool)
 	types := make(map[string]string)
 	for _, p := range f.Params {
+		if !legacy && f.ParamTypes[p] == "" {
+			return nil, fmt.Errorf("%d:%d: parameter %q needs an explicit type", f.Pos.Line, f.Pos.Column, p)
+		}
 		if reservedName(p) {
 			return nil, fmt.Errorf("%d:%d: identifier %q is reserved for generated graph nodes", f.Pos.Line, f.Pos.Column, p)
 		}
@@ -100,12 +120,14 @@ func Build(program *ast.Program) (*Graph, error) {
 			paramTypes[i] = paramType(fn.ParamTypes, param)
 		}
 		fnParams[fn.Name] = paramTypes
+		if fn.ReturnType != "" {
+			fnTypes[fn.Name] = fn.ReturnType
+		}
 	}
 	// Infer local function result types to a small fixed point. A function may
 	// refer to another local function declared later in the file; doing only a
 	// single source-order pass would unnecessarily lose that type information
-	// and weaken checks in the Flow that follows. Recursive or Host-backed
-	// results remain "any" after the bounded pass.
+	// and weaken checks in the Flow that follows. Dynamic results remain any.
 	for pass := 0; pass <= len(program.Functions); pass++ {
 		changed := false
 		for _, fn := range program.Functions {
@@ -115,9 +137,9 @@ func Build(program *ast.Program) (*Graph, error) {
 			}
 			typ, err := inferExprType(fn.Return, env, fnTypes, fnParams)
 			if err != nil {
-				return nil, fmt.Errorf("function %s: %w", fn.Name, err)
+				return nil, fmt.Errorf("%d:%d: function %s: %w", fn.Pos.Line, fn.Pos.Column, fn.Name, err)
 			}
-			if typ != "any" && fnTypes[fn.Name] != typ {
+			if fn.ReturnType == "" && typ != "any" && fnTypes[fn.Name] != typ {
 				fnTypes[fn.Name] = typ
 				changed = true
 			}
@@ -126,12 +148,27 @@ func Build(program *ast.Program) (*Graph, error) {
 			break
 		}
 	}
+	for _, fn := range program.Functions {
+		env := cloneStringMap(fn.ParamTypes)
+		actual, err := inferExprType(fn.Return, env, fnTypes, fnParams)
+		if err != nil {
+			return nil, fmt.Errorf("%d:%d: function %s: %w", fn.Pos.Line, fn.Pos.Column, fn.Name, err)
+		}
+		if fn.ReturnType != "" && !compatibleType(fn.ReturnType, actual) {
+			return nil, fmt.Errorf("%d:%d: function %s returns %s, declared %s", fn.Pos.Line, fn.Pos.Column, fn.Name, actual, fn.ReturnType)
+		}
+		if fn.ReturnType != "" {
+			if err := validateDeclaredResult(fn.Return, fn.ReturnType, env, fnTypes, fnParams); err != nil {
+				return nil, fmt.Errorf("%d:%d: function %s: %w", fn.Pos.Line, fn.Pos.Column, fn.Name, err)
+			}
+		}
+		if fn.ReturnType == "" {
+			fn.InferredReturnType = actual
+		}
+	}
 	b := builder{graph: g, known: known, allNames: allNames, types: types, fnTypes: fnTypes, fnParams: fnParams, functionNames: functionNames}
 	if err := b.stmts(f.Body, nil); err != nil {
 		return nil, err
-	}
-	if len(g.Nodes) == 0 {
-		return nil, fmt.Errorf("flow %q has no executable statements", f.Name)
 	}
 	hasOutput := false
 	for _, node := range g.Nodes {
@@ -141,7 +178,30 @@ func Build(program *ast.Program) (*Graph, error) {
 		}
 	}
 	if !hasOutput {
-		return nil, fmt.Errorf("flow %q has no return value; every Flow must declare an output with return", f.Name)
+		return nil, fmt.Errorf("%d:%d: flow %q has no return value; every Flow must declare an output with return", f.Pos.Line, f.Pos.Column, f.Name)
+	}
+	if b.outputID != 1 {
+		return nil, fmt.Errorf("%d:%d: flow %q must have exactly one return; select a conditional value with if ... then ... else ...", f.Pos.Line, f.Pos.Column, f.Name)
+	}
+	for _, n := range g.Nodes {
+		if !n.Output {
+			continue
+		}
+		if legacy && g.ReturnType == "" {
+			g.ReturnType = n.Type
+			if !validTypeName(g.ReturnType) {
+				g.ReturnType = "any"
+			}
+			if len(n.Gates) > 0 {
+				g.ReturnType += "?"
+			}
+		}
+		if len(n.Gates) > 0 && !strings.HasSuffix(g.ReturnType, "?") {
+			return nil, b.err(n.Pos, "gated return may produce no value; declare -> %s? or move return outside when", g.ReturnType)
+		}
+		if !compatibleType(strings.TrimSuffix(g.ReturnType, "?"), n.Type) {
+			return nil, b.err(n.Pos, "return has type %s, declared output is %s", n.Type, g.ReturnType)
+		}
 	}
 	return g, nil
 }
@@ -190,7 +250,10 @@ func validateOperationDependencies(program *ast.Program, functionNames map[strin
 			return nil
 		}
 		if strings.HasPrefix(name, "python.") && isPythonControlOperation(name) {
-			return nil
+			if len(pythonRoots) > 0 || hasHost(name) {
+				return nil
+			}
+			return fmt.Errorf("%d:%d: operation %q needs an explicit require python declaration or require host %q", pos.Line, pos.Column, name, name)
 		}
 		if strings.Contains(name, ".") {
 			if hasPython(name) || hasHost(name) {
@@ -335,16 +398,20 @@ type builder struct {
 	functionNames map[string]bool
 	outputID      int
 	exprID        int
+	gateID        int
 }
 
 func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 	terminal := false
 	for _, stmt := range stmts {
 		if terminal {
-			return fmt.Errorf("statements after return are not allowed")
+			return b.err(statementPos(stmt), "statements after return are not allowed")
 		}
 		switch s := stmt.(type) {
 		case *ast.BindStmt:
+			if err := b.validateCalls(s.Expr, true); err != nil {
+				return b.err(s.Pos, "%v", err)
+			}
 			if reservedName(s.Name) {
 				return b.err(s.Pos, "identifier %q is reserved for generated graph nodes", s.Name)
 			}
@@ -379,21 +446,31 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			if err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
-			b.graph.Nodes = append(b.graph.Nodes, Node{Name: s.Name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, State: stateNode, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
+			b.graph.Nodes = append(b.graph.Nodes, Node{Name: s.Name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Type: typ, State: stateNode, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
 			b.known[s.Name], b.allNames[s.Name] = true, true
 			b.types[s.Name] = typ
 		case *ast.WhenStmt:
-			gate, err := gateName(s.Cond)
-			if err != nil {
+			if err := b.validateCalls(s.Cond, false); err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
-			if gate != "" && !b.known[gate] {
-				return b.err(s.Pos, "unknown gate %q", gate)
+			if err := validateSimpleExpr(s.Cond); err != nil {
+				return b.err(s.Pos, "when condition: %v", err)
+			}
+			if err := b.checkRefs(refsOf(s.Cond), s.Pos); err != nil {
+				return err
 			}
 			if typ, err := inferExprType(s.Cond, b.types, b.fnTypes, b.fnParams); err != nil {
 				return b.err(s.Pos, "%v", err)
 			} else if typ != "any" && typ != "bool" {
 				return b.err(s.Pos, "when condition must be bool, got %s", typ)
+			}
+			gate, _ := gateName(s.Cond)
+			if gate == "" {
+				if lit, ok := s.Cond.(*ast.LiteralExpr); !ok || lit.Value != true {
+					gate = fmt.Sprintf("__gate_%d", b.gateID)
+					b.gateID++
+					b.graph.Nodes = append(b.graph.Nodes, Node{Name: gate, Deps: unique(refsOf(s.Cond)), Gates: unique(gates), Expr: s.Cond, Type: "bool", Pos: s.Pos})
+				}
 			}
 			before := cloneBoolMap(b.known)
 			beforeTypes := cloneStringMap(b.types)
@@ -415,6 +492,9 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 				}
 			}
 		case *ast.ReturnStmt:
+			if err := b.validateCalls(s.Expr, true); err != nil {
+				return b.err(s.Pos, "%v", err)
+			}
 			retryAttempts, retryErr := retryAttemptsOf(s.Expr)
 			if retryErr != nil {
 				return b.err(s.Pos, "%v", retryErr)
@@ -430,14 +510,21 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			if err := b.checkRefs(refs, s.Pos); err != nil {
 				return err
 			}
-			if _, err := inferExprType(s.Expr, b.types, b.fnTypes, b.fnParams); err != nil {
+			typ, err := inferExprType(s.Expr, b.types, b.fnTypes, b.fnParams)
+			if err != nil {
+				return b.err(s.Pos, "%v", err)
+			}
+			if err := validateDeclaredResult(s.Expr, strings.TrimSuffix(b.graph.ReturnType, "?"), b.types, b.fnTypes, b.fnParams); err != nil {
 				return b.err(s.Pos, "%v", err)
 			}
 			name := fmt.Sprintf("__return_%d", b.outputID)
 			b.outputID++
-			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Output: true, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
+			b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Deps: unique(refs), Gates: unique(gates), Expr: s.Expr, Type: typ, Output: true, RetryAttempts: retryAttempts, FeedbackAttempts: feedbackAttempts, FeedbackStep: feedbackStep, FeedbackVerify: feedbackVerify, Pos: s.Pos})
 			terminal = true
 		case *ast.ExprStmt:
+			if err := b.validateCalls(s.Expr, true); err != nil {
+				return b.err(s.Pos, "%v", err)
+			}
 			retryAttempts, retryErr := retryAttemptsOf(s.Expr)
 			if retryErr != nil {
 				return b.err(s.Pos, "%v", retryErr)
@@ -455,6 +542,9 @@ func (b *builder) stmts(stmts []ast.Stmt, gates []string) error {
 			refs := refsOf(s.Expr)
 			if err := b.checkRefs(refs, s.Pos); err != nil {
 				return err
+			}
+			if _, err := inferExprType(s.Expr, b.types, b.fnTypes, b.fnParams); err != nil {
+				return b.err(s.Pos, "%v", err)
 			}
 			name := fmt.Sprintf("__expr_%d", b.exprID)
 			b.exprID++
@@ -501,6 +591,13 @@ func retryAttemptsOf(expr ast.Expr) (int, error) {
 	if _, ok := call.Args[0].(*ast.CallExpr); !ok {
 		return 0, fmt.Errorf("retry first argument must be a Host or local function call")
 	}
+	inner := call.Args[0].(*ast.CallExpr)
+	if inner.Name == "retry" || inner.Name == "feedback" || inner.Name == "state" {
+		return 0, fmt.Errorf("retry requires an ordinary operation call")
+	}
+	if err := validateExpr(inner); err != nil {
+		return 0, err
+	}
 	literal, ok := call.Args[1].(*ast.LiteralExpr)
 	if !ok {
 		return 0, fmt.Errorf("retry attempt count must be an integer literal")
@@ -522,6 +619,10 @@ func feedbackInfoOf(expr ast.Expr) (step, verify string, attempts int, err error
 	}
 	if _, ok := call.Args[0].(*ast.CallExpr); !ok {
 		return "", "", 0, fmt.Errorf("feedback first argument must be a Host or local function call")
+	}
+	inner := call.Args[0].(*ast.CallExpr)
+	if inner.Name == "retry" || inner.Name == "feedback" || inner.Name == "state" {
+		return "", "", 0, fmt.Errorf("feedback requires an ordinary initial operation call")
 	}
 	stepExpr, ok := call.Args[1].(*ast.IdentExpr)
 	if !ok {
@@ -580,8 +681,8 @@ func validateExpr(expr ast.Expr) error {
 		}
 		return validateSimpleExpr(e.Right)
 	case *ast.IfExpr:
-		if _, ok := e.Cond.(*ast.IdentExpr); !ok {
-			return fmt.Errorf("if condition must be an identifier")
+		if err := validateSimpleExpr(e.Cond); err != nil {
+			return err
 		}
 		if err := validateSimpleExpr(e.Then); err != nil {
 			return err
@@ -603,6 +704,9 @@ func validateExpr(expr ast.Expr) error {
 		}
 		if _, ok := e.Element.(*ast.ComprehensionExpr); ok {
 			return fmt.Errorf("nested comprehensions are not supported")
+		}
+		if call, ok := e.Element.(*ast.CallExpr); ok && (call.Name == "retry" || call.Name == "feedback" || call.Name == "state") {
+			return fmt.Errorf("control operations are only supported as standalone Flow nodes, not Map elements")
 		}
 		return validateExpr(e.Element)
 	case *ast.FieldExpr:
@@ -640,6 +744,23 @@ func validateSimpleExpr(expr ast.Expr) error {
 			return err
 		}
 		return validateSimpleExpr(e.Index)
+	case *ast.IfExpr:
+		for _, part := range []ast.Expr{e.Cond, e.Then, e.Else} {
+			if err := validateSimpleExpr(part); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *ast.CallExpr:
+		if e.Name == "state" || e.Name == "retry" || e.Name == "feedback" {
+			return fmt.Errorf("%s is only supported as a Flow node", e.Name)
+		}
+		for _, arg := range e.Args {
+			if err := validateSimpleExpr(arg); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		if _, ok := expr.(*ast.CallExpr); ok {
 			return fmt.Errorf("nested calls are not supported")
@@ -693,6 +814,9 @@ func refsOf(expr ast.Expr) []string {
 }
 
 func validateFunction(fn *ast.Function) error {
+	if fn.ReturnType != "" && !validTypeName(fn.ReturnType) {
+		return fmt.Errorf("unknown return type %q", fn.ReturnType)
+	}
 	seen := make(map[string]bool)
 	for _, param := range fn.Params {
 		if reservedName(param) {
@@ -702,6 +826,9 @@ func validateFunction(fn *ast.Function) error {
 			return fmt.Errorf("duplicate parameter %q", param)
 		}
 		seen[param] = true
+		if fn.ParamTypes[param] == "" {
+			return fmt.Errorf("parameter %q needs an explicit type", param)
+		}
 		if typ := fn.ParamTypes[param]; typ != "" && !validTypeName(typ) {
 			return fmt.Errorf("unknown type %q for parameter %q", typ, param)
 		}
@@ -728,6 +855,20 @@ func validateFunction(fn *ast.Function) error {
 		}
 	}
 	return nil
+}
+
+func statementPos(stmt ast.Stmt) token.Pos {
+	switch s := stmt.(type) {
+	case *ast.BindStmt:
+		return s.Pos
+	case *ast.WhenStmt:
+		return s.Pos
+	case *ast.ReturnStmt:
+		return s.Pos
+	case *ast.ExprStmt:
+		return s.Pos
+	}
+	return token.Pos{}
 }
 
 func unique(in []string) []string {
@@ -782,6 +923,15 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 			return "number", nil
 		}
 	case *ast.CallExpr:
+		if e.Name == "str" {
+			if len(e.Args) != 1 {
+				return "any", fmt.Errorf("str expects 1 argument, got %d", len(e.Args))
+			}
+			if _, err := inferExprType(e.Args[0], env, fnTypes, fnParams); err != nil {
+				return "any", err
+			}
+			return "string", nil
+		}
 		if e.Name == "state" {
 			if len(e.Args) != 1 {
 				return "any", fmt.Errorf("state expects exactly one initial value")
@@ -796,10 +946,31 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 			return inferExprType(inner, env, fnTypes, fnParams)
 		}
 		if e.Name == "feedback" {
-			if _, _, _, err := feedbackInfoOf(e); err != nil {
+			step, verify, _, err := feedbackInfoOf(e)
+			if err != nil {
 				return "any", err
 			}
-			return inferExprType(e.Args[0], env, fnTypes, fnParams)
+			candidate, err := inferExprType(e.Args[0], env, fnTypes, fnParams)
+			if err != nil {
+				return "any", err
+			}
+			for _, operation := range []string{step, verify} {
+				if expected, ok := fnParams[operation]; ok {
+					if len(expected) != 1 {
+						return "any", fmt.Errorf("feedback function %s expects %d arguments; feedback supplies one candidate", operation, len(expected))
+					}
+					if !compatibleType(expected[0], candidate) {
+						return "any", fmt.Errorf("feedback function %s expects %s, candidate is %s", operation, expected[0], candidate)
+					}
+				}
+			}
+			if typ := fnTypes[verify]; typ != "" && typ != "any" && typ != "bool" {
+				return "any", fmt.Errorf("feedback verifier %s must return bool, got %s", verify, typ)
+			}
+			if typ := fnTypes[step]; typ != "" && !compatibleType(candidate, typ) {
+				return "any", fmt.Errorf("feedback step %s returns %s, candidate is %s", step, typ, candidate)
+			}
+			return candidate, nil
 		}
 		for _, arg := range e.Args {
 			if _, err := inferExprType(arg, env, fnTypes, fnParams); err != nil {
@@ -865,8 +1036,12 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		}
 		return "list", nil
 	case *ast.ComprehensionExpr:
-		if _, err := inferExprType(e.Source, env, fnTypes, fnParams); err != nil {
+		sourceType, err := inferExprType(e.Source, env, fnTypes, fnParams)
+		if err != nil {
 			return "any", err
+		}
+		if sourceType != "any" && sourceType != "list" {
+			return "any", fmt.Errorf("comprehension source must be a list, got %s", sourceType)
 		}
 		next := cloneStringMap(env)
 		next[e.Variable] = "any"
@@ -894,6 +1069,9 @@ func inferBinaryType(op, left, right string) (string, error) {
 	known := func(t string) bool { return t != "any" }
 	switch op {
 	case "+":
+		if known(left) && left != "string" && left != "number" || known(right) && right != "string" && right != "number" {
+			return "any", fmt.Errorf("operator + cannot combine %s and %s", left, right)
+		}
 		if !known(left) || !known(right) {
 			return "any", nil
 		}
@@ -910,6 +1088,9 @@ func inferBinaryType(op, left, right string) (string, error) {
 		}
 		return "number", nil
 	case "*":
+		if known(left) && left != "string" && left != "number" || known(right) && right != "string" && right != "number" {
+			return "any", fmt.Errorf("operator * expects numbers or string and number, got %s and %s", left, right)
+		}
 		if !known(left) || !known(right) {
 			return "any", nil
 		}
@@ -954,5 +1135,149 @@ func validTypeName(name string) bool {
 }
 
 func reservedName(name string) bool {
-	return strings.HasPrefix(name, "__return_") || strings.HasPrefix(name, "__expr_")
+	return strings.HasPrefix(name, "__return_") || strings.HasPrefix(name, "__expr_") || strings.HasPrefix(name, "__gate_") || strings.HasPrefix(name, "__lip_")
+}
+
+func validOutputType(typ string) bool { return validTypeName(strings.TrimSuffix(typ, "?")) }
+func compatibleType(expected, actual string) bool {
+	return expected == "any" || actual == "any" || expected == actual
+}
+func builtinName(name string) bool {
+	return name == "str" || name == "print" || name == "state" || name == "retry" || name == "feedback"
+}
+
+// Pure local functions may compose other local functions and str. External
+// work belongs to explicit Flow nodes, whose effects the scheduler can see.
+func validatePureFunctions(functions []*ast.Function, names map[string]bool) error {
+	byName := map[string]*ast.Function{}
+	for _, fn := range functions {
+		byName[fn.Name] = fn
+	}
+	state := map[string]int{}
+	var visit func(string) error
+	visit = func(name string) error {
+		fn := byName[name]
+		if state[name] == 1 {
+			return fmt.Errorf("%d:%d: recursive function %q is not supported", fn.Pos.Line, fn.Pos.Column, name)
+		}
+		if state[name] == 2 {
+			return nil
+		}
+		state[name] = 1
+		for _, called := range callNames(fn.Return) {
+			if called == "str" {
+				continue
+			}
+			if !names[called] {
+				return fmt.Errorf("%d:%d: function %q must be pure; bind external operation %q in the Flow", fn.Pos.Line, fn.Pos.Column, name, called)
+			}
+			if err := visit(called); err != nil {
+				return err
+			}
+		}
+		state[name] = 2
+		return nil
+	}
+	for _, fn := range functions {
+		if err := visit(fn.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var pythonRequirement = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\s*(?:~=|==|!=|<=|>=|<|>)\s*[0-9][A-Za-z0-9.*+_-]*(?:\s*,\s*(?:~=|==|!=|<=|>=|<|>)\s*[0-9][A-Za-z0-9.*+_-]*)*)?$`)
+var hostRequirement = regexp.MustCompile(`^[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*(?:\.\*)?$`)
+
+func validateDependency(d ast.Dependency) error {
+	valid := strings.TrimSpace(d.Spec) == d.Spec && d.Spec != ""
+	switch d.Kind {
+	case "python":
+		valid = valid && pythonRequirement.MatchString(d.Spec)
+	case "host":
+		valid = valid && hostRequirement.MatchString(d.Spec)
+	case "go":
+		valid = valid && !strings.ContainsAny(d.Spec, " \t\n<>!=?*#:") && !strings.HasPrefix(d.Spec, "/") && !strings.HasSuffix(d.Spec, "/") && !strings.Contains(d.Spec, "//")
+	}
+	if !valid {
+		return fmt.Errorf("%d:%d: invalid %s dependency %q; python uses an import root with an optional version constraint, host uses an operation name, go uses a module path", d.Pos.Line, d.Pos.Column, d.Kind, d.Spec)
+	}
+	return nil
+}
+
+func (b *builder) validateCalls(expr ast.Expr, root bool) error {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		if e.Name == "retry" || e.Name == "feedback" {
+			if !root {
+				return fmt.Errorf("%s is only supported as a Flow node", e.Name)
+			}
+			if len(e.Args) > 0 {
+				return b.validateCalls(e.Args[0], true)
+			}
+			return nil
+		}
+		if e.Name == "state" {
+			if !root {
+				return fmt.Errorf("state is only supported as a Flow binding")
+			}
+		} else if !root && !b.functionNames[e.Name] && e.Name != "str" {
+			return fmt.Errorf("nested external call %q must be assigned to a Flow binding first", e.Name)
+		}
+		for _, arg := range e.Args {
+			if err := b.validateCalls(arg, false); err != nil {
+				return err
+			}
+		}
+	case *ast.BinaryExpr:
+		if err := b.validateCalls(e.Left, false); err != nil {
+			return err
+		}
+		return b.validateCalls(e.Right, false)
+	case *ast.IfExpr:
+		for _, part := range []ast.Expr{e.Cond, e.Then, e.Else} {
+			if err := b.validateCalls(part, false); err != nil {
+				return err
+			}
+		}
+	case *ast.ListExpr:
+		for _, item := range e.Items {
+			if err := b.validateCalls(item, false); err != nil {
+				return err
+			}
+		}
+	case *ast.ComprehensionExpr:
+		if err := b.validateCalls(e.Source, false); err != nil {
+			return err
+		}
+		return b.validateCalls(e.Element, true)
+	case *ast.FieldExpr:
+		return b.validateCalls(e.Object, false)
+	case *ast.IndexExpr:
+		if err := b.validateCalls(e.Object, false); err != nil {
+			return err
+		}
+		return b.validateCalls(e.Index, false)
+	}
+	return nil
+}
+
+func validateDeclaredResult(expr ast.Expr, expected string, env, fnTypes map[string]string, fnParams map[string][]string) error {
+	if expected == "" || expected == "any" {
+		return nil
+	}
+	if conditional, ok := expr.(*ast.IfExpr); ok {
+		if err := validateDeclaredResult(conditional.Then, expected, env, fnTypes, fnParams); err != nil {
+			return err
+		}
+		return validateDeclaredResult(conditional.Else, expected, env, fnTypes, fnParams)
+	}
+	actual, err := inferExprType(expr, env, fnTypes, fnParams)
+	if err != nil {
+		return err
+	}
+	if !compatibleType(expected, actual) {
+		return fmt.Errorf("return has type %s, declared output is %s", actual, expected)
+	}
+	return nil
 }

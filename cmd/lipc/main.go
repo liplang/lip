@@ -12,7 +12,7 @@ import (
 	"lipalpha/compiler"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	args := os.Args[1:]
@@ -27,6 +27,8 @@ func main() {
 		help(args[1:])
 	case "check":
 		check(args[1:])
+	case "migrate":
+		migrate(args[1:])
 	case "build":
 		build(args[1:])
 	case "run":
@@ -42,6 +44,34 @@ func main() {
 		}
 		usage()
 		os.Exit(2)
+	}
+}
+
+func migrate(args []string) {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	output := fs.String("o", "", "write migrated source to this path (default: stdout)")
+	if err := fs.Parse(moveLipFileLast(args)); err != nil {
+		if err == flag.ErrHelp {
+			return
+		}
+		fail(err)
+	}
+	if fs.NArg() != 1 {
+		fail(fmt.Errorf("migrate expects one .lip file"))
+	}
+	source, err := os.ReadFile(fs.Arg(0))
+	if err != nil {
+		fail(err)
+	}
+	updated, report, err := compiler.MigrateSource(string(source))
+	if err != nil {
+		fail(err)
+	}
+	fmt.Fprintln(os.Stderr, compiler.MigrationReport(report))
+	if *output == "" {
+		fmt.Print(updated)
+	} else if err := writeFile(*output, []byte(updated)); err != nil {
+		fail(err)
 	}
 }
 
@@ -132,6 +162,9 @@ func run(args []string) int {
 	}
 	if inputIndex == 0 {
 		fail(fmt.Errorf("run expects one .lip file"))
+	}
+	if inputIndex < len(args) && inputIndex != 1 {
+		fail(fmt.Errorf("run expects exactly one .lip file before --"))
 	}
 	input := args[0]
 	if !strings.HasSuffix(input, ".lip") {
@@ -298,6 +331,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  lipc build file.lip [-o executable]")
 	fmt.Fprintln(os.Stderr, "  lipc build -emit-go file.lip [-o generated.go]")
 	fmt.Fprintln(os.Stderr, "  lipc check file.lip")
+	fmt.Fprintln(os.Stderr, "  lipc migrate file.lip [-o migrated.lip]")
 	fmt.Fprintln(os.Stderr, "  lipc file.lip [-o generated.go]  # compatibility shorthand")
 }
 
@@ -311,6 +345,9 @@ func help(args []string) {
 		return
 	}
 	switch args[0] {
+	case "migrate":
+		fmt.Println("lipc migrate file.lip reports syntax changes on stderr and prints checked Alpha 0.5 source on stdout.")
+		fmt.Println("Use -o path to save it; omitted parameter types become any, output types are inferred, and dependency directives become require.")
 	case "version":
 		fmt.Println("lipc version prints the compiler version.")
 	case "check":

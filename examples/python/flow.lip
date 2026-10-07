@@ -1,10 +1,13 @@
 # Dotted Python operations are resolved by the generic Python Host.
 require python "numpy"
 require python "pandas"
-flow Scientific(values: any) {
+flow Scientific(values: any) -> any {
     total = numpy.sum(values)
     average = numpy.mean(values)
-    raw_stats = pandas.describe(values)
+    series = pandas.Series(values)
+    raw_stats = python.call(series, "describe", [])
     stats = python.to_json(raw_stats)
+    python.release(raw_stats)
+    python.release(series)
     return [total, average, stats]
 }

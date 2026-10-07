@@ -2,7 +2,7 @@ fn twice(x: number) {
     return x * 2
 }
 
-flow Language(input: any) {
+flow Language() -> number {
     values = [1, 2, 3]
     selected = values[1]
     result = twice(selected)

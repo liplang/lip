@@ -1,8 +1,8 @@
-# LIP Alpha 0.4
+# LIP Alpha 0.5
 
 [中文版 README](README.md)
 
-Reference implementation version: `0.4.0` (see [VERSION](VERSION)).
+Reference implementation version: `0.5.0` (see [VERSION](VERSION)).
 
 LIP (Logical / Incremental / Parallel) is a dependency-oriented language. Its
 central idea is one sentence:
@@ -72,7 +72,7 @@ everything will run faster:
 A typical Flow remains close to ordinary code:
 
 ```lip
-flow Hello(request: string) {
+flow Hello(request: string) -> string {
     greeting = "Hello, " + request
     return greeting
 }
@@ -93,10 +93,10 @@ and reuse reasons in Trace.
 
 ## Current capabilities
 
-| Capability | Alpha 0.4 status |
+| Capability | Alpha 0.5 status |
 | --- | --- |
 | `flow`, expression `fn`, single-assignment bindings | Supported, with name, scope, and type checks |
-| Flow input/output contract | Strict entry parsing, at least one `return`, no invented defaults |
+| Flow input/output contract | Explicit input/output types, one `return`, optional gated output, no invented defaults |
 | `require` dependency header | Python/Go/Host metadata, check output, and generated-library query |
 | `when` execution gates and `if` value selection | Supported with distinct semantics |
 | Dynamic Map | Runtime expansion, stable order, bounded concurrency |
@@ -113,7 +113,8 @@ The [specification index](docs/SPECS.md) collects
 [ALPHA-0.1-SPEC.md](docs/ALPHA-0.1-SPEC.md),
 [ALPHA-0.2-SPEC.md](docs/ALPHA-0.2-SPEC.md),
 [ALPHA-0.3-SPEC.md](docs/ALPHA-0.3-SPEC.md), and
-[ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md).
+[ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md) and
+[ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md).
 
 ## lipc: check, build, and run like Go
 
@@ -158,6 +159,14 @@ at the command-line boundary. The compiler does not read `LIP_INPUT` or invent
 values such as `World`, `1`, or `false`; the result therefore comes only from the
 source program and its inputs.
 
+A Flow declares its full boundary with `flow Name(args) -> Type`. Parameters are explicitly
+typed; dynamic values use `any`. Each Flow has one `return`. Conditional values use
+`if ... then ... else ...`, and a gated output that can be absent uses `Type?`. Local `fn`
+functions are pure and composable; external calls remain explicit Flow nodes.
+
+Use `lipc migrate old.lip -o migrated.lip` to update older syntax without inventing input
+values or returns. Strings print as text; other results print as JSON.
+
 Generated library packages provide:
 
 ```go
@@ -188,7 +197,7 @@ the source cannot hide a runtime capability.
 ## Persistent State and Logical Ticks
 
 ```lip
-flow Counter(input: number) {
+flow Counter(input: number) -> number {
     count = state(0)
     doubled = count * 2
     return doubled + input
@@ -247,7 +256,7 @@ model-service lifecycle.
 - [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md): Python route comparison and protocol;
 - [docs/CONSISTENCY-AUDIT.md](docs/CONSISTENCY-AUDIT.md): cross-check of implementation and design;
 - [docs/SPECS.md](docs/SPECS.md): index of the Alpha milestone specifications;
-- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md): next-version complete program contract and migration gates;
+- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md): current complete program contract and migration gates;
 - [examples/PROTOTYPES.md](examples/PROTOTYPES.md): coverage of 30 design prototypes;
 - [CHANGELOG.md](CHANGELOG.md): release changes and checks.
 

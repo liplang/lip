@@ -1,6 +1,6 @@
 require host "double"
 
-flow ConformanceHostMap(values: any) {
+flow ConformanceHostMap(values: any) -> any {
     doubled = [double(x) for x in values]
     return doubled
 }

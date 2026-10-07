@@ -1,6 +1,6 @@
 fn twice(x: number) { return x * 2 }
 
-flow MapNumbers(input: any) {
+flow MapNumbers() -> any {
     values = [1, 2, 3, 4]
     doubled = [twice(x) for x in values]
     return doubled

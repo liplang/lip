@@ -78,20 +78,23 @@ value, trace, err := scientific.Run(ctx, host, map[string]runtime.Value{
 require python "numpy>=1.26"
 require python "pandas"
 
-flow Scientific(values: any) {
+flow Scientific(values: any) -> any {
     total = numpy.sum(values)
     average = numpy.mean(values)
-    raw_stats = pandas.describe(values)
+    series = pandas.Series(values)
+    raw_stats = python.call(series, "describe", [])
     stats = python.to_json(raw_stats)
+    python.release(raw_stats)
+    python.release(series)
     return [total, average, stats]
 }
 ```
 
 仓库中的完整可运行样例是 [`examples/python`](../examples/python)，执行
 `GOCACHE=/tmp/lip-gocache go run ./examples/python` 会启动真实 Python 子进程，
-调用 NumPy/Pandas，并把 JSON 可表示的结果和 Trace 取回 Go。没有 NumPy/Pandas 时，
-Worker 仍提供 `sum`、`mean`、`dot` 和 `matrix_multiply` 等标准库基线操作；生产
-部署应在启动检查中确认所需能力。内置 Worker 默认支持动态导入所有已安装的 Python
+调用 NumPy/Pandas，并把 JSON 可表示的结果和 Trace 取回 Go。缺少 NumPy/Pandas 时，
+这个 Flow 明确失败。Worker 的 `sum`、`mean` 等工具操作只用于协议基线测试，
+不替代真实库调用；部署程序应确认所需依赖。内置 Worker 默认支持动态导入所有已安装的 Python
 模块，不维护一个需要逐项更新的库名单；部署方若需要权限收紧，可以配置
 `AllowedModules`/`DeniedModules`，让文件、网络和命令类模块由显式策略决定。
 
@@ -108,7 +111,7 @@ Worker 仍提供 `sum`、`mean`、`dot` 和 `matrix_multiply` 等标准库基线
 用于说明承载生成包的 Go 程序需要哪个 Go module，`require host "操作名"` 用于
 说明必须由宿主注册哪个 Host operation。`lipc check` 会打印这些声明，库模式的
 `RequiredDependencies()` 会把它们返回给部署代码；声明不会联网安装、不会自动
-修改解释器，也不会把一个固定库白名单写进编译器。Alpha 0.4 现在要求 dotted
+修改解释器，也不会把一个固定库白名单写进编译器。Alpha 0.5 要求 dotted
 Python operation 有匹配的 `require python`（或明确的 `require host`），bare Host
 operation 有 `require host`；缺声明在 `lipc check` 阶段失败。这样通用库调用不受
 白名单限制，但源文件仍然完整地说明运行环境。
@@ -146,7 +149,7 @@ worker, err := runtime.NewProcessHost(ctx, runtime.ProcessHostConfig{
 不应用任何模块规则的专用 Worker。这样库的扩展速度和权限边界可以分别治理。
 
 通用 dotted call 解决的是“调用函数并取回 JSON 结果”。不可直接 JSON 化的对象会
-留在 Worker 的 session 中并返回句柄；可以用 `python.call(handle, method, args)`
+留在 Worker 的 session 中并返回不透明句柄（含 Worker 身份，重启后失效）；可以用 `python.call(handle, method, args)`
 继续调用，用 `python.to_json(value)` 显式序列化，最后用 `python.release(handle)`
 释放。大 Tensor、权重和图像仍需要独立数据面；句柄的池化、空闲回收和跨 Worker
 重建属于 P2/P3，不会把每个 Python 库逐个写进 LIP 核心。
@@ -297,8 +300,8 @@ Go Adapter 是边界的唯一所有者：它编码 `runtime.Value`，维护 requ
 
 ```json
 {"id":"43","op":"torch.tensor","args":[[[-1,2]]],"session":"default"}
-{"id":"44","op":"python.call","args":[{"$python_handle":"0"},"tolist",[]],"session":"default"}
-{"id":"45","op":"python.release","args":[{"$python_handle":"0"}],"session":"default"}
+{"id":"44","op":"python.call","args":[{"$python_handle":"worker-id:0"},"tolist",[]],"session":"default"}
+{"id":"45","op":"python.release","args":[{"$python_handle":"worker-id:0"}],"session":"default"}
 ```
 
 协议必须满足：

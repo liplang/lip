@@ -4,7 +4,7 @@ require host "parse_request"
 require host "validate_request"
 require host "load_user"
 require host "make_response"
-flow HTTPHandler(request: any) {
+flow HTTPHandler(request: any) -> any? {
     parsed = parse_request(request)
     valid = validate_request(parsed)
     when valid {

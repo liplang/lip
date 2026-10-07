@@ -19,6 +19,8 @@ const (
 	Then
 	Else
 	Require
+	Arrow
+	Question
 	Assign
 	LParen
 	RParen
@@ -62,7 +64,7 @@ func (k Kind) String() string {
 		If: "if", Then: "then", Else: "else", Require: "require", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
 		LBrace: "{", RBrace: "}", LBracket: "[", RBracket: "]", Comma: ",", Colon: ":", Dot: ".", Plus: "+", Minus: "-", Star: "*", Slash: "/",
 		Equal: "==", NotEqual: "!=", Greater: ">", GreaterEqual: ">=", Less: "<", LessEqual: "<=",
-		And: "&&", Or: "||",
+		And: "&&", Or: "||", Arrow: "->", Question: "?",
 	}
 	if s, ok := names[k]; ok {
 		return s

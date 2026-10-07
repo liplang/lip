@@ -19,17 +19,21 @@ type Dependency struct {
 type Function struct {
 	Name   string
 	Params []string
-	// ParamTypes contains optional Alpha type annotations. An omitted entry is any.
+	// Parameter types are explicit; function result types may be inferred.
 	ParamTypes map[string]string
-	Return     Expr
-	Pos        token.Pos
+	ReturnType string
+	// InferredReturnType is analysis metadata; it never rewrites source declarations.
+	InferredReturnType string
+	Return             Expr
+	Pos                token.Pos
 }
 
 type Flow struct {
 	Name   string
 	Params []string
-	// ParamTypes contains optional Alpha type annotations. An omitted entry is any.
+	// Flow parameters and its output form the explicit program boundary.
 	ParamTypes map[string]string
+	ReturnType string
 	Body       []Stmt
 	Pos        token.Pos
 }

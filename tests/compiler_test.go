@@ -16,7 +16,7 @@ import (
 )
 
 func TestHelloGraph(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) {
+	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) -> any {
         greeting = "Hello, " + request
         return greeting
     }`)
@@ -36,7 +36,7 @@ func TestHelloGraph(t *testing.T) {
 }
 
 func TestGeneratedMainUsesOnlyDeclaredInputs(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) {
+	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) -> any {
 		greeting = "Hello, " + request
 		return greeting
 	}`)
@@ -63,7 +63,7 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`require python "numpy>=1.26"
 		require go "github.com/acme/adapter"
 		require host "load_profile"
-		flow Scientific(values: any) { return values }`)
+		flow Scientific(values: any) -> any { return values }`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,33 +88,33 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	}
 	if _, err := compiler.ParseAndBuild(`require python "numpy"
 		require python "numpy"
-		flow Duplicate() { return 1 }`); err == nil {
+		flow Duplicate() -> any { return 1 }`); err == nil {
 		t.Fatal("expected duplicate dependency error")
 	}
 	if _, err := compiler.ParseAndBuild(`requires python "numpy"
-		flow Legacy() { return 1 }`); err == nil || !strings.Contains(err.Error(), "require") {
+		flow Legacy() -> any { return 1 }`); err == nil || !strings.Contains(err.Error(), "require") {
 		t.Fatalf("expected singular require diagnostic, got %v", err)
 	}
 }
 
 func TestBindingErrorsAreCompileErrors(t *testing.T) {
 	for _, source := range []string{
-		`flow Missing() { return missing }`,
-		"flow Duplicate() { value = 1\n value = 2\n return value }",
-		"flow Escaped() { when true { value = 1\n }\n return value }",
+		`flow Missing() -> any { return missing }`,
+		"flow Duplicate() -> any { value = 1\n value = 2\n return value }",
+		"flow Escaped() -> any { when true { value = 1\n }\n return value }",
 	} {
 		if _, err := compiler.ParseAndBuild(source); err == nil {
 			t.Fatalf("expected compile error for %q", source)
 		}
 	}
-	if _, err := compiler.ParseAndBuild("flow NoOutput(value: number) { doubled = value * 2 }"); err == nil {
+	if _, err := compiler.ParseAndBuild("flow NoOutput(value: number) -> any { doubled = value * 2 }"); err == nil {
 		t.Fatal("expected a Flow without return to be rejected")
 	}
 }
 
 func TestDottedHostCallBuilds(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`require python "math"
-	flow Python(input: number) {
+	flow Python(input: number) -> any {
 		root = math.sqrt(input)
 		return root
 	}`)
@@ -131,12 +131,12 @@ func TestDottedHostCallBuilds(t *testing.T) {
 }
 
 func TestExternalCallsNeedDependencyDeclarations(t *testing.T) {
-	if _, err := compiler.ParseAndBuild(`flow MissingPython(input: number) {
+	if _, err := compiler.ParseAndBuild(`flow MissingPython(input: number) -> any {
 		return math.sqrt(input)
 	}`); err == nil || !strings.Contains(err.Error(), `require python "math"`) {
 		t.Fatalf("expected missing Python dependency diagnostic, got %v", err)
 	}
-	if _, err := compiler.ParseAndBuild(`flow MissingHost(input: string) {
+	if _, err := compiler.ParseAndBuild(`flow MissingHost(input: string) -> any {
 		return fetch(input)
 	}`); err == nil || !strings.Contains(err.Error(), `require host "fetch"`) {
 		t.Fatalf("expected missing Host dependency diagnostic, got %v", err)
@@ -145,7 +145,7 @@ func TestExternalCallsNeedDependencyDeclarations(t *testing.T) {
 
 func TestEffectCallStatement(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`require host "print"
-	flow Log(value: string) {
+	flow Log(value: string) -> any {
         print(value)
         return value
     }`)
@@ -155,13 +155,14 @@ func TestEffectCallStatement(t *testing.T) {
 	if len(graph.Nodes) != 2 || graph.Nodes[0].Expr == nil {
 		t.Fatalf("nodes = %#v, want effect and return nodes", graph.Nodes)
 	}
-	if _, err := compiler.ParseAndBuild(`flow Bad() { 1 + 2; return 0 }`); err == nil {
+	if _, err := compiler.ParseAndBuild(`flow Bad() -> any { 1 + 2
+ return 0 }`); err == nil {
 		t.Fatal("expected arbitrary unused expression to be rejected")
 	}
 }
 
 func TestFlowReturn(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Hello(request) {
+	graph, err := compiler.ParseAndBuild(`flow Hello(request: any) -> any {
         greeting = "Hello, " + request
         return greeting
     }`)
@@ -174,7 +175,7 @@ func TestFlowReturn(t *testing.T) {
 }
 
 func TestGatedGraph(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Gated(input: number) {
+	graph, err := compiler.ParseAndBuild(`flow Gated(input: number) -> any? {
         valid = input > 0
         when valid {
             doubled = input * 2
@@ -211,7 +212,9 @@ func TestGatedGraph(t *testing.T) {
 }
 
 func TestRejectsForwardReference(t *testing.T) {
-	_, err := compiler.ParseAndBuild(`flow Bad() { b = a; a = 1; return b }`)
+	_, err := compiler.ParseAndBuild(`flow Bad() -> any { b = a
+ a = 1
+ return b }`)
 	if err == nil {
 		t.Fatal("expected forward-reference error")
 	}
@@ -219,7 +222,7 @@ func TestRejectsForwardReference(t *testing.T) {
 
 func TestSmallLanguageCore(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`fn twice(x: number) { return x * 2 }
-        flow Language(input: any) {
+        flow Language(input: any) -> any {
             values = [1, 2, 3]
             selected = values[1]
             result = twice(selected)
@@ -242,7 +245,7 @@ func TestSmallLanguageCore(t *testing.T) {
 
 func TestComprehensionBuildsOneDynamicMapNode(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`fn twice(x: number) { return x * 2 }
-		flow MapNumbers(input: any) {
+		flow MapNumbers(input: any) -> any {
 			values = [1, 2, 3]
 			doubled = [twice(x) for x in values]
 			return doubled
@@ -266,7 +269,7 @@ func TestComprehensionBuildsOneDynamicMapNode(t *testing.T) {
 }
 
 func TestStateBuildsPersistentNodeAndInstanceAPI(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Counter(input: number) {
+	graph, err := compiler.ParseAndBuild(`flow Counter(input: number) -> any {
 		count = state(0)
 		double = count * 2
 		return double + input
@@ -908,10 +911,12 @@ func TestParallelPreservesSourceOrderForOutputs(t *testing.T) {
 }
 
 func TestOperatorsRejectKnownMixedTypes(t *testing.T) {
-	if _, err := compiler.ParseAndBuild(`flow Bad() { value = 1 + "x"; return value }`); err == nil {
+	if _, err := compiler.ParseAndBuild(`flow Bad() -> any { value = 1 + "x"
+ return value }`); err == nil {
 		t.Fatal("expected compile-time mixed-type operator error")
 	}
-	if _, err := compiler.ParseAndBuild(`flow Bad() { value = 1 == "1"; return value }`); err == nil {
+	if _, err := compiler.ParseAndBuild(`flow Bad() -> any { value = 1 == "1"
+ return value }`); err == nil {
 		t.Fatal("expected compile-time incompatible equality error")
 	}
 	if _, err := runtime.Binary("+", "x", 1); err == nil {
@@ -924,7 +929,8 @@ func TestOperatorsRejectKnownMixedTypes(t *testing.T) {
 		t.Fatal("expected negative string repetition error")
 	}
 	if _, err := compiler.ParseAndBuild(`fn twice(x: number) { return x * 2 }
-        flow Bad() { value = twice("x"); return value }`); err == nil {
+        flow Bad() -> any { value = twice("x")
+ return value }`); err == nil {
 		t.Fatal("expected local function argument type error")
 	}
 }
@@ -942,7 +948,7 @@ func TestIndexRequiresAnInteger(t *testing.T) {
 func TestFunctionTypesAreOrderIndependent(t *testing.T) {
 	_, err := compiler.ParseAndBuild(`fn caller(x: number) { return later(x) }
 		fn later(x: number) { return x * 2 }
-		flow Bad() {
+		flow Bad() -> any {
 			value = caller(1)
 			return value + "!"
 		}`)
@@ -952,7 +958,7 @@ func TestFunctionTypesAreOrderIndependent(t *testing.T) {
 }
 
 func TestGeneratedNodeNamesAreReserved(t *testing.T) {
-	if _, err := compiler.ParseAndBuild(`flow Bad() {
+	if _, err := compiler.ParseAndBuild(`flow Bad() -> any {
 		__return_0 = 1
 		return __return_0
 	}`); err == nil {
@@ -961,7 +967,7 @@ func TestGeneratedNodeNamesAreReserved(t *testing.T) {
 }
 
 func TestTypedFlowInputIsChecked(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) { return "Hello, " + request }`)
+	graph, err := compiler.ParseAndBuild(`flow Hello(request: string) -> any { return "Hello, " + request }`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -969,13 +975,13 @@ func TestTypedFlowInputIsChecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(code, `runtime.CheckType(inputs["request"], "string")`) {
+	if !strings.Contains(code, `runtime.CheckType(value, "string")`) {
 		t.Fatal("generated flow does not check annotated input")
 	}
 }
 
 func TestGeneratedNestedExpressionErrorsReturnResults(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`flow Fields(input: any) {
+	graph, err := compiler.ParseAndBuild(`flow Fields(input: any) -> any {
         value = input.missing
         result = [value, 1 + 2]
         return result[0]

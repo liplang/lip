@@ -6,7 +6,7 @@ require host "preprocess_right"
 require host "model_one"
 require host "model_two"
 require host "combine"
-flow ScienceDAG(path: string) {
+flow ScienceDAG(path: string) -> any {
     data = load_data(path)
     left = preprocess_left(data)
     right = preprocess_right(data)

@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased — M12/P2 Python control plane and v0.5 contract groundwork
+## 0.5.0 — Alpha 0.5 complete program contract
+
+Specification: [ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)
+
+- required explicit Flow/function parameter types and Flow output types, with one
+  return and explicit optional gated outputs (`Type?`);
+- added pure local function composition, expression conditions, unary signs, finite
+  decimal/exponent literals, lazy `if` and short-circuit boolean expressions;
+- checked dynamic output/future values, rejected extra library inputs and invalid
+  Tick updates, and preserved inferred State types through `SetState`;
+- added `lipc migrate` with source-preserving diagnostics and checked output;
+- unified CLI parsing and JSON output across run/build/generated-source paths,
+  with end-to-end conformance tests;
+- removed the special Pandas operation, used real object methods, isolated local
+  Host registrations, and invalidated stale handles across Worker restarts;
+- revalidated cached blob descriptors against file checksums.
+
+Python control/data plane included in this release:
 
 - added a resident `runtime.ProcessHost`/`PythonWorker` JSONL adapter with handshake,
   request IDs, bounded queueing, deadlines, cancellation, restart, and Python errors;

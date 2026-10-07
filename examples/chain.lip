@@ -1,5 +1,5 @@
 # Prototype 2: a multi-level dependency chain.
-flow Chain() {
+flow Chain() -> number {
     a = 10
     b = a * 2
     c = b + 3

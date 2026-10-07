@@ -12,13 +12,16 @@ import (
 type Parser struct {
 	tokens []token.Token
 	i      int
+	legacy bool // Used only by the explicit migration command.
 }
 
 func New(tokens []token.Token) *Parser { return &Parser{tokens: tokens} }
 
+func NewLegacy(tokens []token.Token) *Parser { return &Parser{tokens: tokens, legacy: true} }
+
 func (p *Parser) Parse() (*ast.Program, error) {
-	if p.peek().Kind == token.Ident && p.peek().Text == "requires" {
-		return nil, p.errorf(p.peek(), "unknown dependency directive %q; use singular %q", p.peek().Text, "require")
+	if err := p.checkDirective(); err != nil {
+		return nil, err
 	}
 	var dependencies []ast.Dependency
 	for p.peek().Kind == token.Require {
@@ -27,6 +30,9 @@ func (p *Parser) Parse() (*ast.Program, error) {
 			return nil, err
 		}
 		dependencies = append(dependencies, dependency)
+		if err := p.checkDirective(); err != nil {
+			return nil, err
+		}
 	}
 	var functions []*ast.Function
 	for p.peek().Kind == token.Fn {
@@ -35,15 +41,43 @@ func (p *Parser) Parse() (*ast.Program, error) {
 			return nil, err
 		}
 		functions = append(functions, fn)
+		if err := p.checkDirective(); err != nil {
+			return nil, err
+		}
 	}
 	flow, err := p.parseFlow()
 	if err != nil {
+		return nil, err
+	}
+	if err := p.checkDirective(); err != nil {
 		return nil, err
 	}
 	if p.peek().Kind != token.EOF {
 		return nil, p.errorf(p.peek(), "expected end of file")
 	}
 	return &ast.Program{Functions: functions, Flow: flow, Dependencies: dependencies}, nil
+}
+
+func (p *Parser) checkDirective() error {
+	if p.peek().Kind == token.Ident && (p.peek().Text == "requires" || p.peek().Text == "import") {
+		return p.errorf(p.peek(), "unknown dependency directive %q; use singular %q", p.peek().Text, "require")
+	}
+	return nil
+}
+
+func (p *Parser) parseType(optional bool) (string, error) {
+	typ, err := p.expect(token.Ident)
+	if err != nil {
+		return "", err
+	}
+	if !validTypeName(typ.Text) {
+		return "", p.errorf(typ, "unknown type %q", typ.Text)
+	}
+	name := typ.Text
+	if optional && p.match(token.Question) {
+		name += "?"
+	}
+	return name, nil
 }
 
 func (p *Parser) parseDependency() (ast.Dependency, error) {
@@ -92,14 +126,13 @@ func (p *Parser) parseFunction() (*ast.Function, error) {
 			}
 			params = append(params, param.Text)
 			if p.match(token.Colon) {
-				typ, e := p.expect(token.Ident)
+				typ, e := p.parseType(false)
 				if e != nil {
 					return nil, e
 				}
-				if !validTypeName(typ.Text) {
-					return nil, p.errorf(typ, "unknown type %q", typ.Text)
-				}
-				paramTypes[param.Text] = typ.Text
+				paramTypes[param.Text] = typ
+			} else if !p.legacy {
+				return nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values (lipc migrate can update older sources)", param.Text)
 			}
 			if p.match(token.RParen) {
 				break
@@ -107,6 +140,13 @@ func (p *Parser) parseFunction() (*ast.Function, error) {
 			if _, e := p.expect(token.Comma); e != nil {
 				return nil, e
 			}
+		}
+	}
+	returnType := ""
+	if p.match(token.Arrow) {
+		returnType, err = p.parseType(false)
+		if err != nil {
+			return nil, err
 		}
 	}
 	if _, err = p.expect(token.LBrace); err != nil {
@@ -122,7 +162,7 @@ func (p *Parser) parseFunction() (*ast.Function, error) {
 	if _, err = p.expect(token.RBrace); err != nil {
 		return nil, err
 	}
-	return &ast.Function{Name: name.Text, Params: params, ParamTypes: paramTypes, Return: result, Pos: kw.Pos}, nil
+	return &ast.Function{Name: name.Text, Params: params, ParamTypes: paramTypes, ReturnType: returnType, Return: result, Pos: kw.Pos}, nil
 }
 
 func (p *Parser) parseFlow() (*ast.Flow, error) {
@@ -145,14 +185,13 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 				}
 				params = append(params, param.Text)
 				if p.match(token.Colon) {
-					typ, e := p.expect(token.Ident)
+					typ, e := p.parseType(false)
 					if e != nil {
 						return nil, e
 					}
-					if !validTypeName(typ.Text) {
-						return nil, p.errorf(typ, "unknown type %q", typ.Text)
-					}
-					paramTypes[param.Text] = typ.Text
+					paramTypes[param.Text] = typ
+				} else if !p.legacy {
+					return nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values (lipc migrate can update older sources)", param.Text)
 				}
 				if p.match(token.RParen) {
 					break
@@ -162,6 +201,17 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 				}
 			}
 		}
+	} else if !p.legacy {
+		return nil, p.errorf(p.peek(), "flow needs an explicit parameter list; use () when it has no inputs")
+	}
+	returnType := ""
+	if p.match(token.Arrow) {
+		returnType, err = p.parseType(true)
+		if err != nil {
+			return nil, err
+		}
+	} else if !p.legacy {
+		return nil, p.errorf(p.peek(), "flow %q needs an explicit output type; add -> Type (lipc migrate can update older sources)", name.Text)
 	}
 	if _, err := p.expect(token.LBrace); err != nil {
 		return nil, err
@@ -170,7 +220,7 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ast.Flow{Name: name.Text, Params: params, ParamTypes: paramTypes, Body: body, Pos: kw.Pos}, nil
+	return &ast.Flow{Name: name.Text, Params: params, ParamTypes: paramTypes, ReturnType: returnType, Body: body, Pos: kw.Pos}, nil
 }
 
 func validTypeName(name string) bool {
@@ -283,6 +333,12 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			return nil, p.errorf(t, "invalid number")
 		}
 		expr = &ast.LiteralExpr{Value: v, Raw: t.Text, Pos: t.Pos}
+	case token.Minus, token.Plus:
+		operand, err := p.parseExpr(7)
+		if err != nil {
+			return nil, err
+		}
+		expr = &ast.BinaryExpr{Op: t.Text, Left: &ast.LiteralExpr{Value: float64(0), Raw: "0", Pos: t.Pos}, Right: operand, Pos: t.Pos}
 	case token.String:
 		expr = &ast.LiteralExpr{Value: t.Text, Raw: t.Text, Pos: t.Pos}
 	case token.True:

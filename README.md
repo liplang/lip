@@ -1,8 +1,8 @@
-# LIP Alpha 0.4
+# LIP Alpha 0.5
 
 [English README](README.en.md)
 
-当前参考实现版本：`0.4.0`（见 [VERSION](VERSION)）。
+当前参考实现版本：`0.5.0`（见 [VERSION](VERSION)）。
 
 LIP（Logical / Incremental / Parallel）是一门面向依赖关系的语言。它的根本思想
 只有一句话：
@@ -60,7 +60,7 @@ LIP 把程序分成两个相互连接的层次：
 LIP 让常见 Flow 保持接近普通代码：
 
 ```lip
-flow Hello(request: string) {
+flow Hello(request: string) -> string {
     greeting = "Hello, " + request
     return greeting
 }
@@ -80,10 +80,10 @@ host.Register("write_file", writeFile)
 
 ## 当前能力
 
-| 能力 | Alpha 0.4 状态 |
+| 能力 | Alpha 0.5 状态 |
 | --- | --- |
 | `flow`、表达式 `fn`、单赋值绑定 | 支持，带名称、作用域和类型检查 |
-| Flow 输入/输出契约 | 支持，入口参数严格解析，至少一个 `return`，不注入默认值 |
+| Flow 输入/输出契约 | 显式输入/输出类型，单一 `return`，可选门控输出，不注入默认值 |
 | `require` 依赖头 | 支持 Python/Go/Host 元数据、检查输出和生成库查询 |
 | `when` 执行门控、`if` 值选择 | 支持，语义明确区分 |
 | Dynamic Map | 支持运行时展开、稳定顺序、有界并发 |
@@ -100,7 +100,8 @@ host.Register("write_file", writeFile)
 [ALPHA-0.1-SPEC.md](docs/ALPHA-0.1-SPEC.md)、
 [ALPHA-0.2-SPEC.md](docs/ALPHA-0.2-SPEC.md)、
 [ALPHA-0.3-SPEC.md](docs/ALPHA-0.3-SPEC.md) 和
-[ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md)。
+[ALPHA-0.4-SPEC.md](docs/ALPHA-0.4-SPEC.md) 和
+[ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)。
 
 ## lipc：像 Go 一样检查、编译和运行
 
@@ -144,7 +145,12 @@ lipc version
 `any` 必须写成 JSON。编译器不会读取 `LIP_INPUT`，也不会注入 `World`、`1` 或
 `false` 之类的默认值，因此示例和生成程序的结果完全由源代码和输入决定。
 
-生成的库提供：
+`flow Name(args) -> Type` 是完整边界；无输入时写 `()`，动态值写 `any`。每个 Flow
+恰好一个 `return`；条件值用 `if ... then ... else ...`，允许门控无值完成时写
+`Type?`。局部 `fn` 是可组合的纯表达式函数，外部调用形成明确的 Flow 节点。
+
+旧源文件可用 `lipc migrate old.lip -o migrated.lip` 更新，迁移不补值或补 return。
+字符串结果原样输出，其他结果输出 JSON。生成的库提供：
 
 ```go
 Run(ctx, host, inputs)
@@ -171,7 +177,7 @@ require host "load_profile"
 ## 持久 State 和 Logical Tick
 
 ```lip
-flow Counter(input: number) {
+flow Counter(input: number) -> number {
     count = state(0)
     doubled = count * 2
     return doubled + input
@@ -225,7 +231,7 @@ LIP Flow 中调用 NumPy/Pandas 并取回结果；Worker 按 `module.submodule.c
 - [docs/PYTHON-INTEGRATION.md](docs/PYTHON-INTEGRATION.md)：Python 方案比较与协议；
 - [docs/CONSISTENCY-AUDIT.md](docs/CONSISTENCY-AUDIT.md)：实现、规范与设计讨论的交叉审计；
 - [docs/SPECS.md](docs/SPECS.md)：各 Alpha 里程碑的规范索引；
-- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)：下一版完整程序契约与迁移门槛；
+- [docs/ALPHA-0.5-SPEC.md](docs/ALPHA-0.5-SPEC.md)：当前完整程序契约与迁移门槛；
 - [examples/PROTOTYPES.md](examples/PROTOTYPES.md)：30 个原型的覆盖情况；
 - [CHANGELOG.md](CHANGELOG.md)：版本变更和发布检查。
 

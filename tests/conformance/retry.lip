@@ -1,6 +1,6 @@
 require host "fetch"
 
-flow RetryFetch(input: string) {
+flow RetryFetch(input: string) -> any {
     result = retry(fetch(input), 3)
     return result
 }

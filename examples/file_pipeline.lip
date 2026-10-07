@@ -4,7 +4,7 @@ require host "parse_document"
 require host "validate_document"
 require host "transform_document"
 require host "save_document"
-flow FilePipeline(path: string) {
+flow FilePipeline(path: string) -> any? {
     raw = read_file(path)
     document = parse_document(raw)
     valid = validate_document(document)

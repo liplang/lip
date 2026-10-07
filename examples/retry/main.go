@@ -17,32 +17,50 @@ type Dependency struct {
 func RequiredDependencies() []Dependency { return []Dependency{{Kind: "host", Spec: "fetch"}} }
 
 func parseCLIInputs(args []string) (map[string]runtime.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("usage: %s <input:string>", os.Args[0])
+	inputs, err := runtime.ParseCLIInputs(args, []runtime.Input{{Name: "input", Type: "string"}})
+	if err != nil {
+		return nil, fmt.Errorf("%w\nusage: %s <input:string>", err, os.Args[0])
 	}
-	inputs := map[string]runtime.Value{}
-	raw0 := args[0]
-	inputs["input"] = raw0
 	return inputs, nil
 }
 
 func buildGraph(host runtime.Host) *runtime.Graph {
+	host = host.Clone()
 	g := runtime.NewGraph()
 	g.Add(runtime.NodeSpec{Name: "result", Op: "fetch", Pure: false, Deps: []string{"input"}, Gates: nil, Retry: &runtime.RetrySpec{Attempts: 3, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "fetch", []runtime.Value{values["input"]})
 	}}})
 	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"result"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(values["result"])
-	}, Output: true})
+	}, Output: true, ValueType: "any"})
 	return g
+}
+
+func checkInputUpdates(inputs map[string]runtime.Value) error {
+	for name, value := range inputs {
+		_ = value
+		switch name {
+		case "input":
+			if err := runtime.CheckType(value, "string"); err != nil {
+				return fmt.Errorf("input input: %w", err)
+			}
+		default:
+			return fmt.Errorf("unknown flow input %q", name)
+		}
+	}
+	return nil
 }
 
 func checkInputs(inputs map[string]runtime.Value) error {
 	if _, ok := inputs["input"]; !ok {
 		return fmt.Errorf("missing flow input input")
 	}
-	if err := runtime.CheckType(inputs["input"], "string"); err != nil {
-		return fmt.Errorf("input input: %w", err)
+	return checkInputUpdates(inputs)
+}
+
+func checkHost(host runtime.Host) error {
+	if err := host.RequireOperation("fetch"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -53,6 +71,9 @@ func NewInstance(host runtime.Host, inputs map[string]runtime.Value) (*Instance,
 	if err := checkInputs(inputs); err != nil {
 		return nil, err
 	}
+	if err := checkHost(host); err != nil {
+		return nil, err
+	}
 	graph := buildGraph(host)
 	return &Instance{engine: graph.NewInstance(host, inputs)}, nil
 }
@@ -60,6 +81,9 @@ func NewInstance(host runtime.Host, inputs map[string]runtime.Value) (*Instance,
 func (i *Instance) Tick(ctx context.Context, inputs map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error) {
 	if i == nil || i.engine == nil {
 		return nil, nil, fmt.Errorf("nil flow instance")
+	}
+	if err := checkInputUpdates(inputs); err != nil {
+		return nil, nil, err
 	}
 	return i.engine.Tick(ctx, inputs)
 }
@@ -89,6 +113,9 @@ func Run(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value
 	if err := checkInputs(inputs); err != nil {
 		return nil, nil, err
 	}
+	if err := checkHost(host); err != nil {
+		return nil, nil, err
+	}
 	return buildGraph(host).RunAuto(ctx, host, inputs)
 }
 
@@ -96,11 +123,17 @@ func RunSequential(ctx context.Context, host runtime.Host, inputs map[string]run
 	if err := checkInputs(inputs); err != nil {
 		return nil, nil, err
 	}
+	if err := checkHost(host); err != nil {
+		return nil, nil, err
+	}
 	return buildGraph(host).Run(ctx, inputs)
 }
 
 func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value, limit int) (runtime.Value, []runtime.TraceEvent, error) {
 	if err := checkInputs(inputs); err != nil {
+		return nil, nil, err
+	}
+	if err := checkHost(host); err != nil {
 		return nil, nil, err
 	}
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
@@ -126,5 +159,10 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	fmt.Println(value)
+	output, err := runtime.FormatValue(value)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(output)
 }

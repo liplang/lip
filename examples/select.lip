@@ -1,5 +1,5 @@
 # Prototype 5: choose a value without conditionally executing a Host call.
-flow Select(input: number) {
+flow Select(input: number) -> number {
     over = input > 10
     result = if over then 100 else 0
     return result

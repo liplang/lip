@@ -2,7 +2,7 @@
 
 `flow.lip` stays ordinary LIP. `main.go` starts a resident Python Worker and
 enables the generic Python fallback; dotted operations such as `numpy.sum`,
-`numpy.mean`, and `pandas.describe` need no per-library registration. The Go
+`numpy.mean`, and `pandas.Series` with `python.call` need no per-library registration. The Go
 example uses a checksummed local read-only blob for the numeric input, while the
 generated Flow receives ordinary JSON-compatible results back from the worker.
 

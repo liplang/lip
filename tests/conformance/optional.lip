@@ -1,0 +1,5 @@
+flow Optional(value: number) -> number? {
+    when value > 0 {
+        return value * 2
+    }
+}

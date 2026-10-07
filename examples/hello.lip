@@ -1,4 +1,4 @@
-flow Hello(request: string) {
+flow Hello(request: string) -> string {
     greeting = "Hello, " + request
     return greeting
 }

@@ -1,6 +1,6 @@
-# LIP Alpha 0.4 快速入门
+# LIP Alpha 0.5 快速入门
 
-LIP Alpha 0.4 需要 Go 1.27。
+LIP Alpha 0.5 需要 Go 1.27。
 
 查看当前编译器实现版本：
 
@@ -19,7 +19,7 @@ GOCACHE=/tmp/lip-gocache go build -buildvcs=false ./...
 ## 2. 写一个 Flow
 
 ```lip
-flow Hello(request: string) {
+flow Hello(request: string) -> string {
     greeting = "Hello, " + request
     return greeting
 }
@@ -43,7 +43,8 @@ go run ./cmd/lipc build hello.lip
 go run ./cmd/lipc run hello.lip -- Alice
 ```
 
-`request: string` 是入口声明，因此运行时必须提供且只能提供一个位置参数。
+`request: string` 与 `-> string` 声明输入和输出，因此运行时必须提供且只能提供一个
+位置参数。所有参数必须显式写类型；每个 Flow 恰好一个 `return`。
 缺少参数、参数过多或类型不匹配都会以非零状态失败；编译器不会替程序补一个
 示例值。`number` 参数接受有限十进制数，`bool` 只接受 `true` 或 `false`，
 `any` 参数在命令行上必须是 JSON（例如 `'[1,2,3]'`）。
@@ -83,7 +84,7 @@ LIP 不把 Python 解释器或 Go 包导入编译进语言核心。需要可复�
 require python "numpy>=1.26"
 require python "pandas"
 
-flow Scientific(values: any) {
+flow Scientific(values: any) -> any {
     total = numpy.sum(values)
     return total
 }
@@ -101,7 +102,7 @@ flow Scientific(values: any) {
 字符串，而是返回错误。确实需要显式转换时写 `str(value)`：
 
 ```lip
-flow Describe(value: any) {
+flow Describe(value: any) -> string {
     return "value=" + str(value)
 }
 ```
@@ -113,7 +114,7 @@ fn twice(x: number) {
     return x * 2
 }
 
-flow Example(input: any) {
+flow Example() -> number {
     values = [1, 2, 3]
     selected = values[1]
     result = twice(selected)
@@ -122,8 +123,8 @@ flow Example(input: any) {
 ```
 
 `fn` 是局部表达式计算；Flow 中的绑定才是依赖图节点。数字使用 `+ - * /`、
-比较使用 `> >= < <= == !=`，逻辑使用 `&& ||`。`print(value)` 是
-普通的 Go Host 操作，用来产生控制台副作用；它不负责返回 Flow 结果。
+比较使用 `> >= < <= == !=`，逻辑使用 `&& ||`。`print(value)` 是默认 Host 提供的
+控制台操作，用来产生控制台副作用；它不负责返回 Flow 结果。
 
 ## 4. 使用 Go Host Adapter
 
@@ -191,12 +192,12 @@ value, trace, err := hostflow.RunParallel(ctx, host, inputs, 2)
 
 ## 6. 动态 Map
 
-Alpha 0.4 支持受限列表推导式：
+Alpha 0.5 支持受限列表推导式：
 
 ```lip
 fn twice(x: number) { return x * 2 }
 
-flow MapNumbers(input: any) {
+flow MapNumbers() -> any {
     values = [1, 2, 3]
     doubled = [twice(x) for x in values]
     return doubled
@@ -208,3 +209,13 @@ Map 的输入必须是 Go slice 或 array，输出保持输入顺序。`RunSeque
 Map 不引入持久状态、反馈或事件语义。完整边界见
 [ALPHA-0.2-SPEC.md](ALPHA-0.2-SPEC.md)、[ALPHA-0.3-SPEC.md](ALPHA-0.3-SPEC.md)
 和 [ALPHA-0.4-SPEC.md](ALPHA-0.4-SPEC.md)。
+
+## 迁移旧程序
+
+```bash
+lipc migrate old.lip -o migrated.lip
+lipc check migrated.lip
+```
+
+默认迁移结果写 stdout、报告写 stderr。省略的参数类型补为 `any`，输出类型由源表达式
+推导，门控输出加 `?`；缺少 return 或语义不完整的程序仍报错。

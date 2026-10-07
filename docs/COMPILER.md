@@ -22,10 +22,10 @@ optional `go build`
 
 `AST` 表示用户写了什么；`Graph` 表示计算依赖什么。两者不能混为一谈。
 
-参数可以写显式类型：`flow Hello(request: string) { ... }`。编译器会在
-可确定时拒绝不相容的运算（例如 `1 + "x"`），生成的 Go 入口还会调用
-`runtime.CheckType` 校验输入；没有标注的参数是 `any`，但运算符仍不会
-隐式转换字符串和数字。
+Flow 必须写出完整边界：`flow Hello(request: string) -> string { ... }`。所有参数
+显式标注 `string`、`number`、`bool` 或 `any`，每个 Flow 恰好一个 `return`。门控可能
+让输出被跳过时声明 `Type?`。静态矛盾在编译期失败；动态输入、函数结果和 Flow 输出
+在运行时校验，包括异步 Host 结果。
 
 ## `lipc` 命令
 
@@ -52,7 +52,7 @@ lipc build -emit-go -o hello.go hello.lip
 
 ### 可执行模式
 
-默认生成 `package main` 和一个示例 `main`：
+默认生成 `package main` 和遵守输入/输出契约的 `main`：
 
 ```bash
 go run ./cmd/lipc build -o generated.go examples/hello.lip
@@ -117,10 +117,10 @@ Worker 和 Host，这样 Python 进程的解释器、策略和生命周期不会
 声明 `require host` 或 `require go` 的程序必须使用库模式；独立入口会明确报错，
 不会假装已经拥有未注册的 adapter。
 
-调用参数当前使用普通位置参数。为了保持 Graph 节点边界清晰，参数中的函数调用
-需要先绑定到一个节点，再作为下一个调用的输入；例如先写
+调用参数使用普通位置参数。局部纯函数和 `str` 可以嵌套；外部调用需要先绑定到一个
+节点，再作为下一个调用的输入；例如先写
 `tensor = torch.tensor(values)`，再写 `relu = torch.nn.functional.relu(tensor)`。
-关键字参数语法、嵌套调用和大对象零拷贝传输分别属于后续语言/数据面工作，复杂
+Python 关键字参数语法仍是后续语言工作；大对象已有只读 blob/mmap 基线，复杂
 Python 返回值可以先通过 Worker 句柄和 `python.to_json` 取回。
 
 ## Graph 节点粒度
@@ -132,20 +132,24 @@ require host "load_a"
 require host "load_b"
 require host "combine"
 
-a = load_a()
-b = load_b()
-c = combine(a, b)
+flow Combine() -> any {
+    a = load_a()
+    b = load_b()
+    c = combine(a, b)
+    return c
+}
 ```
 
-生成三个图节点：`a`、`b`、`c`。`a` 和 `b` 独立，`c` 等待两者。
+生成 `a`、`b`、`c` 三个计算节点和一个输出节点。`a` 和 `b` 独立，`c` 等待两者。
 Flow 参数在 `flow (...)` 中声明；普通局部变量使用一次 `name = expression`
 绑定即声明，并且是单赋值。未定义名、前向引用、重复绑定和从 `when` 块逃逸的
 绑定都会在 `lipc check` 阶段报错，不存在运行时隐式变量注入。
-`fn` 内部的局部表达式不是图节点，避免 Runtime 被普通算法的细节淹没。
+`fn` 内部的局部表达式不是图节点，避免 Runtime 被普通算法的细节淹没。函数保持纯计算，
+可组合其他局部函数和 `str`，不接受外部调用或递归；返回类型可推导或显式标注。
 副作用调用可以直接写成语句，例如 `print(value)`；它会成为一个没有
 Flow 返回值的图节点。普通的无用表达式不允许单独出现。
 
-Alpha 0.2 的列表推导式保持同样的边界：
+列表推导式保持同样的边界：
 
 ```lip
 values = [1, 2, 3]
@@ -182,7 +186,7 @@ Host 的 `RegisterPure`、`RegisterReadOnly` 和 `Register` 分别表示纯计�
 
 常见计算直接使用运算符：`+ - * /`、比较运算符和 `&& ||`。字符串用
 `+` 连接，字符串重复用 `*`，需要显式转换时写 `str(value)`；
-`add/mul/gt/concat/identity` 不属于 Alpha 0.4 默认 Host。
+`add/mul/gt/concat/identity` 不属于 Alpha 0.5 默认 Host。
 `==` 和 `!=` 对静态已知的不同类型会在编译期拒绝；`any` 值的具体类型
 由 Runtime 在执行时判断。
 
@@ -216,3 +220,14 @@ Trace 事件。
 `Run` 和 `RunParallel` 都返回 Trace。发生错误时，下游节点不会继续执行。
 并行运行时，独立节点的完成顺序和首个报告的独立错误可能不同；需要按源
 码顺序复现时使用 `RunSequential`。
+
+## 从 Alpha 0.4 迁移
+
+```bash
+lipc migrate old.lip -o migrated.lip
+lipc check migrated.lip
+```
+
+迁移命令先报告，再输出经过编译检查的新源文件；默认写 stdout，报告写 stderr。
+它保留注释和排版，将省略类型补为 `any`，推导输出类型并给门控输出加 `?`，统一
+依赖拼写。缺少 return、多个输出和未声明外部操作会报错，需要先修复源程序。

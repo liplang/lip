@@ -1,6 +1,6 @@
 fn twice(x: number) { return x * 2 }
 
-flow ConformanceMap(input: any) {
+flow ConformanceMap() -> any {
     values = [1, 2, 3]
     doubled = [twice(x) for x in values]
     return doubled

@@ -2,6 +2,7 @@ package lexer
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -89,12 +90,28 @@ func (l *Lexer) next() (token.Token, error) {
 	}
 	if unicode.IsDigit(ch) {
 		startI := l.i
-		for l.i < len(l.src) && (unicode.IsDigit(l.src[l.i]) || l.src[l.i] == '.') {
+		for unicode.IsDigit(l.peek(0)) {
 			l.advance()
 		}
+		if l.peek(0) == '.' {
+			l.advance()
+			for unicode.IsDigit(l.peek(0)) {
+				l.advance()
+			}
+		}
+		if l.peek(0) == 'e' || l.peek(0) == 'E' {
+			l.advance()
+			if l.peek(0) == '+' || l.peek(0) == '-' {
+				l.advance()
+			}
+			for unicode.IsDigit(l.peek(0)) {
+				l.advance()
+			}
+		}
 		text := string(l.src[startI:l.i])
-		if _, err := strconv.ParseFloat(text, 64); err != nil {
-			return token.Token{}, l.errorAt(start, "invalid number %q", text)
+		value, err := strconv.ParseFloat(text, 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+			return token.Token{}, l.errorAt(start, "invalid finite number %q", text)
 		}
 		return token.Token{Kind: token.Number, Text: text, Pos: start}, nil
 	}
@@ -128,7 +145,7 @@ func (l *Lexer) next() (token.Token, error) {
 	for _, op := range []struct {
 		text string
 		kind token.Kind
-	}{{"==", token.Equal}, {"!=", token.NotEqual}, {">=", token.GreaterEqual}, {"<=", token.LessEqual}, {"&&", token.And}, {"||", token.Or}} {
+	}{{"->", token.Arrow}, {"==", token.Equal}, {"!=", token.NotEqual}, {">=", token.GreaterEqual}, {"<=", token.LessEqual}, {"&&", token.And}, {"||", token.Or}} {
 		if ch == rune(op.text[0]) && l.peekString(op.text) {
 			for range op.text {
 				l.advance()
@@ -137,6 +154,7 @@ func (l *Lexer) next() (token.Token, error) {
 		}
 	}
 	one := map[rune]token.Kind{'=': token.Assign, '(': token.LParen, ')': token.RParen, '{': token.LBrace, '}': token.RBrace, '[': token.LBracket, ']': token.RBracket, ',': token.Comma, ':': token.Colon, '.': token.Dot, '+': token.Plus, '-': token.Minus, '*': token.Star, '/': token.Slash, '>': token.Greater, '<': token.Less}
+	one['?'] = token.Question
 	if kind, ok := one[ch]; ok {
 		l.advance()
 		return token.Token{Kind: kind, Text: string(ch), Pos: start}, nil

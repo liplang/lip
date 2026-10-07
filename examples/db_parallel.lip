@@ -3,7 +3,7 @@ require host "query_user"
 require host "query_orders"
 require host "query_recommendations"
 require host "make_response"
-flow DatabaseRequest(request: any) {
+flow DatabaseRequest(request: any) -> any {
     user = query_user(request)
     orders = query_orders(request)
     recommendations = query_recommendations(request)

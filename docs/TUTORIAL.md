@@ -1,4 +1,4 @@
-# LIP Alpha 0.4 编程教程
+# LIP Alpha 0.5 编程教程
 
 这份教程从一个能运行的 Flow 开始，逐步介绍依赖、类型、门控、Host
 适配器、并行调度、动态 Map、持久实例和有界控制策略。LIP 文件只描述“什么
@@ -19,7 +19,7 @@ GOCACHE=/tmp/lip-gocache go run -buildvcs=false ./cmd/lipc version
 新建 `hello.lip`：
 
 ```lip
-flow Hello(request: string) {
+flow Hello(request: string) -> string {
     greeting = "Hello, " + request
     return greeting
 }
@@ -31,16 +31,17 @@ flow Hello(request: string) {
 - `greeting` 是单赋值绑定，也是一个依赖图节点；
 - `return` 是 Flow 的结果。
 
-同一个 Flow 可以在不同的 `when` 分支中有多个 `return`（同一块中 `return`
-之后不能再写语句）；最终取执行成功的 return 节点中源代码位置最靠后的
-那个。所有 return 都被跳过时，结果为 `nil`。
+每个 Flow 恰好一个 `return`，并声明输出类型。同一块的 `return` 后不能再写
+语句；条件结果使用 `if ... then ... else ...`。门控可以跳过输出时写 `Type?`，
+库返回 `nil`，独立程序输出 JSON `null`。
 
 检查、生成并运行：
 
 ```bash
 go run ./cmd/lipc check hello.lip
 go run ./cmd/lipc run hello.lip -- Alice
-go run Hello_generated.go Alice
+go run ./cmd/lipc build -emit-go -o hello_generated.go hello.lip
+go run hello_generated.go Alice
 ```
 
 也可以直接安装编译命令：
@@ -50,15 +51,15 @@ go install ./cmd/lipc
 lipc hello.lip
 ```
 
-带 `string` 标注的入口会拒绝数字输入。没有标注的参数是 `any`，但运算符
-仍不会把数字悄悄转成字符串。
+所有参数必须标注类型；动态输入显式写 `any`。库调用的 `string` 入口拒绝数字值，
+CLI 的 `string` 参数原样传递。运算符不会把数字悄悄转成字符串。
 
 ## 2. 运算符和显式转换
 
 数字使用普通运算符：
 
 ```lip
-flow Arithmetic(input: number) {
+flow Arithmetic(input: number) -> number {
     doubled = input * 2
     total = doubled + 1
     return total
@@ -68,7 +69,7 @@ flow Arithmetic(input: number) {
 字符串使用 `+` 连接，使用 `*` 重复：
 
 ```lip
-flow Text(name: string) {
+flow Text(name: string) -> string {
     line = "Hi, " + name + "!"
     rule = "-" * 20
     return line + "\n" + rule
@@ -79,18 +80,18 @@ flow Text(name: string) {
 `str(value)`：
 
 ```lip
-flow Describe(value: any) {
+flow Describe(value: any) -> string {
     return "value=" + str(value)
 }
 ```
 
-`concat`、`add`、`mul`、`gt` 等不是 Alpha 0.4 的默认函数；普通计算用
+`concat`、`add`、`mul`、`gt` 等不是 Alpha 0.5 的默认函数；普通计算用
 运算符，Host 函数保留给文件、网络、数据库等领域能力。
 
 ## 3. 自动依赖、等待和并行
 
 ```lip
-flow Fanout(input: number) {
+flow Fanout(input: number) -> number {
     left = input + 1
     right = input * 2
     total = left + right
@@ -114,7 +115,7 @@ RunParallel(ctx, host, inputs, 2)
 ## 4. 用 `when` 做门控
 
 ```lip
-flow Gated(input: number) {
+flow Gated(input: number) -> number? {
     valid = input > 0
     when valid {
         doubled = input * 2
@@ -124,7 +125,8 @@ flow Gated(input: number) {
 ```
 
 当 `valid` 为假时，块内节点变为 `Skipped`，不会调用 Host。块内绑定不能
-逃逸到块外；这让门控值的生命周期在编译期就能检查。
+逃逸到块外；这让门控值的生命周期在编译期就能检查。`number?` 表示这条 Flow
+允许在输入非正数时无值完成。条件也可以直接写 `when input > 0`。
 
 ## 5. 接入 Go Host Adapter
 
@@ -174,7 +176,7 @@ go run ./cmd/lipc build examples/host_adapter/flow.lip \
 ```lip
 fn twice(x: number) { return x * 2 }
 
-flow MapNumbers(input: any) {
+flow MapNumbers() -> any {
     values = [1, 2, 3]
     doubled = [twice(x) for x in values]
     return doubled
@@ -190,7 +192,7 @@ Map source 必须是一个标识符，运行时值必须是 slice 或 array。�
 需要跨调用保存值时，生成包提供 `NewInstance`：
 
 ```lip
-flow Counter(input: number) {
+flow Counter(input: number) -> number {
     count = state(0)
     doubled = count * 2
     return doubled + input

@@ -3,7 +3,7 @@
 require host "fetch_user"
 require host "fetch_posts"
 require host "make_profile"
-flow AsyncJoin(id: string) {
+flow AsyncJoin(id: string) -> any {
     user = fetch_user(id)
     posts = fetch_posts(id)
     return make_profile(user, posts)

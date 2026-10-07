@@ -4,7 +4,7 @@ require host "call_weather"
 require host "call_search"
 require host "call_database"
 require host "synthesize"
-flow ToolAgent(request: string) {
+flow ToolAgent(request: string) -> any {
     plan = plan_tools(request)
     weather = call_weather(plan)
     search = call_search(plan)

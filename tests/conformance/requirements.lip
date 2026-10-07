@@ -1,7 +1,7 @@
 # Dependency metadata is part of the source program and is checked before the Flow.
 require python "math"
 
-flow RequiredInput(input: number) {
+flow RequiredInput(input: number) -> any {
     result = math.sqrt(input)
     return result
 }

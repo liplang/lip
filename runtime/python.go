@@ -677,8 +677,8 @@ func (w *PythonWorker) Call(ctx context.Context, operation string, args []Value)
 }
 
 // CallSession is Call with an explicit logical session label. The bundled
-// worker currently treats sessions as metadata, while compatible custom
-// workers may use it to select a warmed model or dataset.
+// worker isolates object handles and mappings by session. A restart discards
+// all session objects; stale handles fail rather than aliasing new objects.
 func (w *PythonWorker) CallSession(ctx context.Context, session, operation string, args []Value) Result {
 	if w == nil {
 		return Failed(errors.New("nil python worker"))

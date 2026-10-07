@@ -1,8 +1,8 @@
-# 原型覆盖表（Alpha 0.4）
+# 原型覆盖表（Alpha 0.5）
 
-下面把早期 30 个原型按 Alpha 0.4 的真实能力分为三类：可直接表达、需要
+下面把早期 30 个原型按 Alpha 0.5 的真实能力分为三类：可直接表达、需要
 Go Host Adapter、以及必须等后续语言能力。示例统一使用当前语法：Flow、
-单赋值绑定、类型标注、运算符、`when` 和 `return`。
+单赋值绑定、显式输入/输出类型、运算符、`when` 和单一 `return`。
 
 ## 当前可直接检查的示例
 
@@ -47,12 +47,12 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 
 | 原型 | 缺少的核心能力 |
 | --- | --- |
-| 15 外部状态变化 | event、stream、tick |
+| 15 外部状态变化 | Host 驱动 Tick/SetState 已支持；仍缺事件/流语法 |
 | 16 普通循环 | 普通 `for` / `while` 仍未进入语言核心 |
-| 18 Agent retry loop | Feedback + retry + state |
-| 30 完整 Agent Workflow | map、feedback、state、retry、event 的组合 |
+| 18 Agent retry loop | 有界 Retry/Feedback 和 State 已支持；仍缺普通循环/动态控制流 |
+| 30 完整 Agent Workflow | Map、Feedback、State、Retry 已支持；事件/流及动态控制组合待设计 |
 
-## Runtime 0.3/0.4 能力
+## 当前 Runtime 能力
 
 | 能力 | 运行时接口 | 说明 |
 | --- | --- | --- |
@@ -69,6 +69,5 @@ for f in examples/*.lip tests/conformance/*.lip; do
 done
 ```
 
-这组原型的目的不是假装 Alpha 已经支持所有范式，而是让每个缺口都能被
-一个具体例子准确定位。Alpha 0.4 已落实 Map、State/Tick、Retry、Feedback
+这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.5 已落实 Map、State/Tick、Retry、Feedback
 和 Runtime Effect/Ordering；事件、流和普通循环仍由后续版本处理。

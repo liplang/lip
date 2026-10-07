@@ -2,7 +2,7 @@ require host "start"
 require host "revise"
 require host "verify"
 
-flow Verified(input: string) {
+flow Verified(input: string) -> any {
     result = feedback(start(input), revise, verify, 3)
     return result
 }
