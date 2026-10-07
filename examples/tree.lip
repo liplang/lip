@@ -1,0 +1,10 @@
+// Each node has value, left and right; absent children are explicit null.
+fn sum_tree(tree: object) -> number {
+    return tree.value
+        + if tree.left == null { 0 } else { sum_tree(tree.left) }
+        + if tree.right == null { 0 } else { sum_tree(tree.right) }
+}
+
+flow SumTree(tree: object) -> number {
+    return sum_tree(tree)
+}

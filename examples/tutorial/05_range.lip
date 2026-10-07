@@ -1,0 +1,11 @@
+fn add(total: number, value: number) -> number {
+    return total + value
+}
+
+flow Squares(stop: number) -> object {
+    numbers = range(0, stop)
+    squares = [n * n for n in numbers]
+    total = fold(squares, 0, add)
+    running = list.scan(squares, 0, add)
+    return {squares: squares, total: total, running: running}
+}

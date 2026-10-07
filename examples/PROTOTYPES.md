@@ -1,8 +1,12 @@
-# 原型覆盖表（Alpha 0.5）
+# 原型覆盖表（Alpha 0.6）
 
-下面把早期 30 个原型按 Alpha 0.5 的真实能力分为三类：可直接表达、需要
+下面把早期 30 个原型按 Alpha 0.6 的真实能力分为三类：可直接表达、需要
 Go Host Adapter、以及必须等后续语言能力。示例统一使用当前语法：Flow、
 单赋值绑定、显式输入/输出类型、运算符、`when` 和单一 `return`。
+
+核心入口新增 `core.lip`（结构化报告）、`range.lip`（区间/平方和）、
+`tree.lip`（纯递归）、`lists.lip`（分组/过滤/排序/转置）。它们不需要 adapter。
+完整 list 标准库见 [LIST-LIBRARY.md](../docs/LIST-LIBRARY.md)。
 
 ## 当前可直接检查的示例
 
@@ -12,10 +16,11 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 2 多级依赖 | `chain.lip` | `a → b → c → d` |
 | 3 两条独立计算 | `fanout.lip` | 独立节点可自动调度 |
 | 4 条件依赖 | `gated.lip` | `when` 门控，假分支为 `Skipped` |
-| 5 条件值选择 | `select.lip` | `if ... then ... else ...`，只选择值 |
+| 5 条件值选择 | `select.lip` | `if condition { a } else { b }`，只选择值 |
 | 6 Fan-out | `fanout_fanin.lip` | 多个消费者 |
 | 7 Fan-in | `fanout_fanin.lip` | `combine` 等待多个依赖 |
 | 8 Map / 批量并行 | `map.lip` | 运行时展开 Map，结果保持输入顺序 |
+| 9 Map + Reduce | `core.lip` / `range.lip` / `lists.lip` | Map、fold、scan/sum/product，无需 Host |
 | 11 网络请求 | `async_join.lip` | Host 可返回 `Await` |
 | 12 两个异步请求 | `async_join.lip` | 自动等待并 Join |
 | 19 HTTP Handler | `http_handler.lip` | Web 能力由 Host 提供 |
@@ -36,11 +41,10 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 
 | 原型 | 当前状态 |
 | --- | --- |
-| 9 Map + Reduce | Map 已支持；reduce 仍由 Host 操作提供 |
 | 10 动态数量 Flow | Map 节点在运行时按输入数量动态展开 |
 | 13 超时 | 作为 Host Adapter 的 `context.Context` / 参数实现，不是语言关键字 |
 | 21 Cache | 可由 Host 封装；ReadOnly/ExternalWrite 效果由 Runtime 调度 |
-| 23 Monte Carlo | 可对 Host 提供的样本列表做 Map；语言尚无 `range` |
+| 23 Monte Carlo | range + Map/fold 可遍历样本位置；随机数仍由显式 Host 提供 |
 | 26 最简单 Agent | 可用 `llm(request)` Host 调用表达 |
 
 ## 明确留到后续版本
@@ -63,11 +67,13 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 
 ## 批量检查
 
+完成[安装](../docs/QUICKSTART.md#安装)后，在仓库根目录运行：
+
 ```bash
 for f in examples/*.lip tests/conformance/*.lip; do
-  go run -buildvcs=false ./cmd/lipc check "$f" || exit 1
+  lipc check "$f" || exit 1
 done
 ```
 
-这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.5 已落实 Map、State/Tick、Retry、Feedback
+这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.6 已落实 Map、State/Tick、Retry、Feedback
 和 Runtime Effect/Ordering；事件、流和普通循环仍由后续版本处理。

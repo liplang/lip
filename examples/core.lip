@@ -1,0 +1,15 @@
+// A complete data program: no Host adapter or Python required.
+fn add(total: number, value: number) -> number {
+    return total + value
+}
+
+flow Report(values: list) -> object {
+    doubled = [x * 2 for x in values]
+    total = fold(doubled, 0, add)
+    return {
+        count: len(values),
+        values: doubled,
+        total: total,
+        average: if len(values) == 0 { null } else { total / len(values) }
+    }
+}

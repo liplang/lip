@@ -1,0 +1,12 @@
+require host "load_text"
+require python "math"
+
+fn parse(text: string) -> number { return string.parse_number(text) }
+fn render(value: number) -> string { return str(value) }
+
+flow Roots(path: string) -> object {
+    text = load_text(path)
+    values = list.map(string.split_whitespace(text), parse)
+    roots = [math.sqrt(x) for x in values]
+    return {roots: roots, total: list.sum(roots), label: string.join(list.map(roots, render), ", ")}
+}

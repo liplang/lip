@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"lipalpha/runtime"
 )
@@ -26,6 +28,10 @@ func parseCLIInputs(args []string) (map[string]runtime.Value, error) {
 
 func __lip_fn_twice(host runtime.Host) runtime.Op {
 	return func(ctx context.Context, args []runtime.Value) runtime.Result {
+		ctx, err := runtime.EnterFunction(ctx)
+		if err != nil {
+			return runtime.Failed(err)
+		}
 		if len(args) != 1 {
 			return runtime.Failed(fmt.Errorf("function twice expects 1 arguments, got %d", len(args)))
 		}
@@ -47,13 +53,13 @@ func buildGraph(host runtime.Host) *runtime.Graph {
 	host = host.Clone()
 	g := runtime.NewGraph()
 	host.RegisterPure("twice", __lip_fn_twice(host))
-	g.Add(runtime.NodeSpec{Name: "values", Op: "", Pure: true, Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "values", Op: "", Effect: runtime.EffectPure, Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{runtime.Value(float64(1)), runtime.Value(float64(2)), runtime.Value(float64(3)), runtime.Value(float64(4))})
 	}})
-	g.Add(runtime.NodeSpec{Name: "doubled", Pure: true, Deps: []string{"values"}, Gates: nil, Map: &runtime.MapSpec{Source: "values", Pure: true, Ops: []string{"twice"}, Eval: func(ctx context.Context, item runtime.Value, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "doubled", Effect: runtime.EffectPure, Deps: []string{"values"}, Gates: nil, Map: &runtime.MapSpec{Source: "values", Ops: []string{"twice"}, Eval: func(ctx context.Context, item runtime.Value, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "twice", []runtime.Value{item})
 	}}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"doubled"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Effect: runtime.EffectPure, Deps: []string{"doubled"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(values["doubled"])
 	}, Output: true, ValueType: "any"})
 	return g
@@ -152,28 +158,31 @@ func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runti
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
 }
 
-func main() {
-	ctx := context.Background()
-	host := runtime.DefaultHost()
-	inputs := map[string]runtime.Value{}
-	parsed, err := parseCLIInputs(os.Args[1:])
+func main() { os.Exit(runMain()) }
+
+func runMain() int {
+	inputs, err := parseCLIInputs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		return 2
 	}
-	inputs = parsed
+	_ = inputs
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	host := runtime.DefaultHost()
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		for _, event := range trace {
 			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Node, event.Status, event.Reason)
 		}
-		os.Exit(1)
+		return 1
 	}
 	output, err := runtime.FormatValue(value)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println(output)
+	return 0
 }

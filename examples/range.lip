@@ -1,0 +1,7 @@
+fn add(total: number, value: number) -> number { return total + value }
+
+flow Squares(stop: number) -> object {
+    numbers = range(0, stop)
+    squares = [x * x for x in numbers]
+    return {values: squares, total: fold(squares, 0, add)}
+}

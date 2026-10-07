@@ -1,0 +1,24 @@
+// intent: 输入若干行文本；每行是“部门 金额”，忽略空行。
+// accept: 同一部门合并金额，按部门首次出现顺序输出；无有效行输出空报告。
+// error: 每个非空行必须恰有两项；金额必须是有限十进制数。
+fn nonempty(line: string) -> bool { return len(string.trim(line)) > 0 }
+fn parse_fields(fields: list) -> object {
+    return if len(fields) == 2 {
+        {department: fields[0], amount: string.parse_number(fields[1])}
+    } else {
+        fail("invalid row: expected department and amount")
+    }
+}
+fn parse_row(line: string) -> object { return parse_fields(string.split_whitespace(line)) }
+fn department(row: object) -> string { return row.department }
+fn amount(row: object) -> number { return row.amount }
+fn summarize(group: object) -> object {
+    return {department: group.key, count: len(group.values), total: list.sum(list.map(group.values, amount))}
+}
+
+flow Report(text: string) -> object {
+    lines = list.filter(string.lines(text), nonempty)
+    rows = list.map(lines, parse_row)
+    groups = list.group_by(rows, department)
+    return {rows: len(rows), total: list.sum(list.map(rows, amount)), departments: list.map(groups, summarize)}
+}

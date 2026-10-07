@@ -1,0 +1,5 @@
+flow Average(total: number, count: number) -> number? {
+    valid = count > 0 && total >= 0
+    average = if valid { total / count } else { null }
+    return average
+}

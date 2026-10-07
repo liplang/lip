@@ -1,4 +1,4 @@
-# Prototypes 6 and 7: independent consumers followed by a join.
+// Prototypes 6 and 7: independent consumers followed by a join.
 require host "extract_title"
 require host "extract_text"
 require host "extract_links"

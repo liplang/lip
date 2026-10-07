@@ -1,0 +1,14 @@
+flow Shapes() -> object {
+    values = [1, 2, 3, 4, 5]
+    chunks = list.partition(values, 2)
+    return {
+        chunks: chunks,
+        windows: list.partition(values, 3, 1),
+        restored: list.flatten(chunks, 1),
+        columns: list.transpose([[1, 2], [3, 4], [5, 6]]),
+        pairs: list.zip(["a", "b"], [10, 20, 30]),
+        indexed: list.enumerate(["a", "b"]),
+        combined: list.concat([1], [2, 3]),
+        product: list.cartesian([1, 2], ["a", "b"])
+    }
+}

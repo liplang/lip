@@ -29,7 +29,7 @@ func main() {
 
 	var calls atomic.Int64
 	host := runtime.DefaultHost()
-	host.RegisterPure("load_profile", func(ctx context.Context, args []runtime.Value) runtime.Result {
+	host.RegisterReadOnly("load_profile", func(ctx context.Context, args []runtime.Value) runtime.Result {
 		if len(args) != 1 {
 			return runtime.Failed(fmt.Errorf("load_profile expects one path"))
 		}

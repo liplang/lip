@@ -18,13 +18,13 @@ func RequiredDependencies() []Dependency { return []Dependency{{Kind: "host", Sp
 func buildGraph(host runtime.Host) *runtime.Graph {
 	host = host.Clone()
 	g := runtime.NewGraph()
-	g.Add(runtime.NodeSpec{Name: "left", Op: "load_profile", Pure: false, Deps: []string{"path"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "left", Op: "load_profile", Effect: runtime.EffectUnknown, Deps: []string{"path"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "load_profile", []runtime.Value{values["path"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "right", Op: "load_profile", Pure: false, Deps: []string{"path"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "right", Op: "load_profile", Effect: runtime.EffectUnknown, Deps: []string{"path"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "load_profile", []runtime.Value{values["path"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "names", Op: "", Pure: true, Deps: []string{"left", "right"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "names", Op: "", Effect: runtime.EffectPure, Deps: []string{"left", "right"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		value0, err := runtime.Field(values["left"], "name")
 		if err != nil {
 			return runtime.Failed(err)
@@ -43,7 +43,7 @@ func buildGraph(host runtime.Host) *runtime.Graph {
 		}
 		return runtime.Ready(value3)
 	}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"names"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Effect: runtime.EffectPure, Deps: []string{"names"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(values["names"])
 	}, Output: true, ValueType: "any"})
 	return g

@@ -1,0 +1,15 @@
+fn department(row: object) -> string { return row.department }
+fn amount(row: object) -> number { return row.amount }
+fn summarize(group: object) -> object {
+    return {department: group.key, total: list.sum(list.map(group.values, amount))}
+}
+
+flow Departments(rows: list) -> object {
+    groups = list.group_by(rows, department)
+    summary = list.map(groups, summarize)
+    return {
+        summary: summary,
+        adjacent: list.split_by(rows, department),
+        ranked: list.sort_by(rows, amount)
+    }
+}

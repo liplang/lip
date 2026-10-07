@@ -1,4 +1,4 @@
-# Prototypes 27 and 28: plan once, call independent tools, then synthesize.
+// Prototypes 27 and 28: plan once, call independent tools, then synthesize.
 require host "plan_tools"
 require host "call_weather"
 require host "call_search"

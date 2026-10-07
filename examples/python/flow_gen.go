@@ -20,28 +20,28 @@ func RequiredDependencies() []Dependency {
 func buildGraph(host runtime.Host) *runtime.Graph {
 	host = host.Clone()
 	g := runtime.NewGraph()
-	g.Add(runtime.NodeSpec{Name: "total", Op: "numpy.sum", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "total", Op: "numpy.sum", Effect: runtime.EffectUnknown, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "numpy.sum", []runtime.Value{values["values"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "average", Op: "numpy.mean", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "average", Op: "numpy.mean", Effect: runtime.EffectUnknown, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "numpy.mean", []runtime.Value{values["values"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "series", Op: "pandas.Series", Pure: false, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "series", Op: "pandas.Series", Effect: runtime.EffectUnknown, Deps: []string{"values"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "pandas.Series", []runtime.Value{values["values"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "raw_stats", Op: "python.call", Pure: false, Deps: []string{"series"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "raw_stats", Op: "python.call", Effect: runtime.EffectUnknown, Deps: []string{"series"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "python.call", []runtime.Value{values["series"], runtime.Value("describe"), []runtime.Value{}})
 	}})
-	g.Add(runtime.NodeSpec{Name: "stats", Op: "python.to_json", Pure: false, Deps: []string{"raw_stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "stats", Op: "python.to_json", Effect: runtime.EffectUnknown, Deps: []string{"raw_stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "python.to_json", []runtime.Value{values["raw_stats"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "__expr_0", Op: "python.release", Pure: false, Deps: []string{"raw_stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__expr_0", Op: "python.release", Effect: runtime.EffectUnknown, Deps: []string{"raw_stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "python.release", []runtime.Value{values["raw_stats"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "__expr_1", Op: "python.release", Pure: false, Deps: []string{"series"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__expr_1", Op: "python.release", Effect: runtime.EffectUnknown, Deps: []string{"series"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return host.Call(ctx, "python.release", []runtime.Value{values["series"]})
 	}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"total", "average", "stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Effect: runtime.EffectPure, Deps: []string{"total", "average", "stats"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready([]runtime.Value{values["total"], values["average"], values["stats"]})
 	}, Output: true, ValueType: "any"})
 	return g

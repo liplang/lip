@@ -1,0 +1,19 @@
+fn positive(x: number) -> bool { return x > 0 }
+fn double(x: number) -> number { return x * 2 }
+
+flow Lists(values: list) -> object {
+    selected = list.filter(values, positive)
+    doubled = list.map(selected, double)
+    return {
+        selected: selected,
+        doubled: doubled,
+        sorted: list.sort(list.unique(values)),
+        total: list.sum(doubled),
+        any_positive: list.any(values, positive),
+        all_positive: list.all(values, positive),
+        contains_zero: list.contains(values, 0),
+        zero_count: list.count(values, 0),
+        head: list.take(values, 2),
+        tail: list.drop(values, 2)
+    }
+}

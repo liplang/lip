@@ -1,0 +1,15 @@
+flow Text(input: string) -> object {
+    cleaned = string.trim(input)
+    words = string.split_whitespace(cleaned)
+    return {
+        words: words,
+        normalized: string.lower(string.join(words, " ")),
+        chars: string.chars("你好🌱"),
+        tail: string.slice("你好🌱", -2, 3),
+        position: string.find("你好🌱", "🌱"),
+        contains: string.contains(cleaned, "LIP"),
+        number: string.parse_number("12.5"),
+        replaced: string.replace("a-a-a", "a", "b", 2),
+        lines: string.lines("first\r\nsecond\n")
+    }
+}

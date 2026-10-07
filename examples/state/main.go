@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"lipalpha/runtime"
 )
@@ -27,17 +29,17 @@ func parseCLIInputs(args []string) (map[string]runtime.Value, error) {
 func buildGraph(host runtime.Host) *runtime.Graph {
 	host = host.Clone()
 	g := runtime.NewGraph()
-	g.Add(runtime.NodeSpec{Name: "count", Pure: true, State: true, ValueType: "number", Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "count", Effect: runtime.EffectPure, State: true, ValueType: "number", Deps: nil, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(runtime.Value(float64(0)))
 	}})
-	g.Add(runtime.NodeSpec{Name: "doubled", Op: "", Pure: true, Deps: []string{"count"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "doubled", Op: "", Effect: runtime.EffectPure, Deps: []string{"count"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		value0, err := runtime.Binary("*", values["count"], runtime.Value(float64(2)))
 		if err != nil {
 			return runtime.Failed(err)
 		}
 		return runtime.Ready(value0)
 	}})
-	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Pure: true, Deps: []string{"doubled", "input"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
+	g.Add(runtime.NodeSpec{Name: "__return_0", Op: "", Effect: runtime.EffectPure, Deps: []string{"doubled", "input"}, Gates: nil, Eval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {
 		value0, err := runtime.Binary("+", values["doubled"], values["input"])
 		if err != nil {
 			return runtime.Failed(err)
@@ -147,28 +149,31 @@ func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runti
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
 }
 
-func main() {
-	ctx := context.Background()
-	host := runtime.DefaultHost()
-	inputs := map[string]runtime.Value{}
-	parsed, err := parseCLIInputs(os.Args[1:])
+func main() { os.Exit(runMain()) }
+
+func runMain() int {
+	inputs, err := parseCLIInputs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		return 2
 	}
-	inputs = parsed
+	_ = inputs
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	host := runtime.DefaultHost()
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		for _, event := range trace {
 			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Node, event.Status, event.Reason)
 		}
-		os.Exit(1)
+		return 1
 	}
 	output, err := runtime.FormatValue(value)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println(output)
+	return 0
 }

@@ -1,0 +1,4 @@
+flow Hello(name: string) -> string {
+    greeting = "你好，" + name + "！"
+    return greeting
+}

@@ -1,5 +1,5 @@
-# Prototypes 11 and 12: Host operations may return Await(...); the graph joins
-# their results before make_profile runs.
+// Prototypes 11 and 12: Host operations may return Await(...); the graph joins
+// their results before make_profile runs.
 require host "fetch_user"
 require host "fetch_posts"
 require host "make_profile"

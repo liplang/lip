@@ -1,4 +1,4 @@
-# Dotted Python operations are resolved by the generic Python Host.
+// Dotted Python operations are resolved by the generic Python Host.
 require python "numpy"
 require python "pandas"
 flow Scientific(values: any) -> any {

@@ -1,0 +1,12 @@
+flow Data(person: object) -> object {
+    scores = [8, 9, 10]
+    return {
+        name: person.name,
+        first_score: scores[0],
+        greeting: "Hi, " + person["name"],
+        size: len("你好🌱"),
+        character: "你好🌱"[2],
+        missing: null,
+        description: "score=" + str(scores[0])
+    }
+}

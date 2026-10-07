@@ -1,4 +1,4 @@
-# Prototype 22: parse -> validate -> transform -> save.
+// Prototype 22: parse -> validate -> transform -> save.
 require host "read_file"
 require host "parse_document"
 require host "validate_document"

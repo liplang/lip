@@ -1,0 +1,16 @@
+// intent: 清理逗号分隔的标签，忽略空项，去重并保持首次出现的顺序。
+// accept: " Rust, LIP, rust, ,你好 " -> ["rust", "lip", "你好"]。
+fn clean(tag: string) -> string {
+    return string.lower(string.trim(tag))
+}
+
+fn nonempty(tag: string) -> bool {
+    return len(tag) > 0
+}
+
+flow Tags(text: string) -> object {
+    parts = string.split(text, ",")
+    cleaned = list.map(parts, clean)
+    tags = list.unique(list.filter(cleaned, nonempty))
+    return {tags: tags, count: len(tags), label: string.join(tags, " / ")}
+}

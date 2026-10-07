@@ -1,0 +1,11 @@
+fn factorial(n: number) -> number {
+    return if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+fn tree_sum(node: object) -> number {
+    return node.value + list.sum(list.map(node.children, tree_sum))
+}
+
+flow Recursion(n: number, tree: object) -> object {
+    return {factorial: factorial(n), total: tree_sum(tree)}
+}
