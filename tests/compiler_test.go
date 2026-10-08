@@ -83,6 +83,17 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(mainCode, "host/go dependencies require a Go host program") || strings.Contains(mainCode, "runtime.NewPythonWorker") {
+		t.Fatal("unused imports must not require adapters or a Worker")
+	}
+	used, err := compiler.ParseAndBuild(`import python "numpy"; import host "load_profile"; flow Used(values: list) -> any { return load_profile(numpy.mean(values)) }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainCode, err = compiler.GenerateGo(used)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(mainCode, "host/go dependencies require a Go host program") || strings.Contains(mainCode, "runtime.NewPythonWorker") {
 		t.Fatal("Host/Go standalone rejection must precede any Worker startup")
 	}
@@ -112,7 +123,7 @@ func TestBindingErrorsAreCompileErrors(t *testing.T) {
 	for _, source := range []string{
 		`flow Missing() -> any { return missing }`,
 		"flow Duplicate() -> any { value = 1\n value = 2\n return value }",
-		"flow Escaped() -> any { when true { value = 1\n }\n return value }",
+		"flow Escaped() -> any { match true {\n    true => {     value = 1\n    },\n    false => {}\n}\n return value }",
 	} {
 		if _, err := compiler.ParseAndBuild(source); err == nil {
 			t.Fatalf("expected compile error for %q", source)
@@ -188,9 +199,12 @@ func TestFlowReturn(t *testing.T) {
 func TestGatedGraph(t *testing.T) {
 	graph, err := compiler.ParseAndBuild(`flow Gated(input: number) -> any? {
         valid = input > 0
-        when valid {
-            doubled = input * 2
-            return doubled
+        match valid {
+            true => {
+                doubled = input * 2
+                return doubled
+            },
+            false => {}
         }
     }`)
 	if err != nil {
@@ -249,7 +263,7 @@ func TestSmallLanguageCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(code, "host.RegisterPure(\"twice\"") {
+	if !strings.Contains(code, "host.RegisterPure(\"__lip_fn_twice\"") {
 		t.Fatal("generated code did not register local function")
 	}
 }

@@ -1,4 +1,4 @@
-# LIP Alpha 0.6.1：从第一个 Flow 到可验证的数据程序
+# LIP Alpha 0.6.3：从第一个 Flow 到可验证的数据程序
 
 按“先运行、理解数据、组合操作、观察执行、接入外部能力”的顺序学习。
 前 11 节足够编写独立的文本与列表程序；后面讲 Go Host、State、策略和 Python。
@@ -6,6 +6,9 @@
 运行正常、空输入和失败样例，数据见 [cases.json](../examples/tutorial/cases.json)。
 规范见 [ALPHA-0.6-SPEC.md](ALPHA-0.6-SPEC.md)，操作目录见
 [列表库](LIST-LIBRARY.md)和[字符串库](STRING-LIBRARY.md)。
+
+也可以运行 `lipc learn`，按 26 节中文交互课边写边验证。课程内置讲解、示例、
+代码练习、逐步提示和进度保存，详见[交互学习](INTERACTIVE-LEARNING.md)。
 
 ## 0. 准备与阅读方法
 
@@ -20,14 +23,14 @@ go install ./cmd/lipc
 
 ```bash
 lipc version
-# 0.6.1
+# 0.6.3
 ```
 
 安装后的 `run/build` 也可在自己的项目目录使用，编译器内置 Runtime，无需保留
 仓库；构建仍需 Go。后面可以直接运行lipc；若找不到可使用全路径，如`~/go/bin/lipc`。
 工具选项写在文件前，程序输入直接跟在文件后，无需 `--`。
 每节先运行，再修改一处核对结果。
-JSON 对象的键顺序以实际输出为准，列表保持元素顺序。行注释使用 `//`。
+JSON 对象的键顺序以实际输出为准，列表保持元素顺序。行注释使用 `#`。
 完整示例可以直接运行，标注的片段用于说明局部写法。
 
 ## 1. 第一个程序：输入、绑定、输出
@@ -51,7 +54,7 @@ lipc run examples/tutorial/01_hello.lip 小林
 
 flow 是可执行入口，name:string 是输入，->string 是输出契约。greeting 创建
 不可变绑定，也是一个依赖图节点；return 提供结果。每文件只有一个 Flow，
-可有多个 fn；有返回值的 Flow 用一个 return 收束结果。绑定直接写 `名字 = 表达式`，
+可有多个 fn；有返回值的 Flow 用一个 return 或 match 的互斥分支收束结果。绑定直接写 `名字 = 表达式`，
 按定义顺序使用，每个名字绑定一次。
 
 继续处理 greeting 时，为新结果取名，例如 normalized=string.trim(greeting)，
@@ -68,7 +71,7 @@ flow main() {
 
 `print` 可以接收数字、布尔、字符串、列表、对象等任意值，也可传多个值。
 它只负责控制台输出，调用结果是 null。有返回值的 Flow 需要 `-> number`
-等类型和一个 return；没有返回值的 Flow 可省略输出声明，或显式写 `-> void`。
+等类型，并用 return 或 match 分支给出结果；没有返回值的 Flow 可省略输出声明，或显式写 `-> void`。
 可在块末尾写裸 `return`，但不需要写；return 不会取消此前声明的图节点。
 
 一组无参数、无返回值的语句还可直接写在文件顶层，连 Flow 外壳都省略。
@@ -85,8 +88,8 @@ print(a / (a + b))
 仍放在文件开头；一个文件使用一种入口形式，不能把顶层执行语句和显式 Flow 混写。
 
 多条执行语句在同一行时必须用分号分隔：`a = 2; b = 3; print(a / b)`。
-换行可以直接分隔；块末或文件末尾的分号可省略。这个规则适用于顶层语句、
-Flow/when 内的语句和 REPL。参数、列表元素仍用逗号；分号不是逗号的替代。
+换行可以直接分隔；连续或独立分号表示空语句；块末或文件末尾的分号可省略。这个规则适用于顶层语句、
+Flow/match 内的语句和 REPL。参数、列表元素仍用逗号；分号不是逗号的替代。
 
 不想创建文件时，用 `lipc repl` 直接试验：
 
@@ -119,8 +122,35 @@ REPL 直接接收表达式、绑定和 fn，不需要 Flow 外壳或 return。�
 | any | 任意 JSON，如 `'null'`、`'"text"'` | 明确的动态边界 |
 
 所有参数必须有类型，有返回值的 Flow 必须写输出类型。本地非递归 fn 可推断结果，教程
-统一写出便于阅读。null 是值，可通过 any 输入。可选输出写 number? 等，
+统一写出便于阅读。null 是值，可通过 any 或 number? 等可空参数输入。
+参数、纯 fn、回调和 Flow 的结果都支持 T?；参数仍必须提供。可选输出写 number? 等，
 允许结果为 null 或由门控跳过；输入按上表中的六种类型声明。
+
+可空类型也能直接用于纯函数。先匹配 null，后面的 _ 分支就可以使用非空数值：
+
+<!-- example: examples/tutorial/12_optional.lip -->
+```lip
+fn double(value: number?) -> number? {
+    match value { null => null, _ => value * 2 }
+}
+
+flow Optional(value: number?, label: string?) -> object {
+    return {value: double(value), label: label}
+}
+```
+
+```bash
+lipc run examples/tutorial/12_optional.lip 3 标签
+# {"label":"标签","value":6}
+lipc run examples/tutorial/12_optional.lip null null
+# {"label":null,"value":null}
+lipc run examples/tutorial/12_optional.lip null '"null"'
+# {"label":"null","value":null}
+```
+
+T? 不表示可省略参数。CLI 的 null 代表空值；string? 接受原样文本或 JSON 引号
+字符串，文本 null 用 '"null"' 区分。普通 string 参数的 null 仍是原样文本。
+有守卫的 null 分支可能不匹配，不能让后面的 _ 分支排除 null。
 
 [02_data.lip](../examples/tutorial/02_data.lip)：
 
@@ -157,9 +187,27 @@ len 对字符串、列表、对象分别数 Unicode 字符、元素、字段。�
 
 ## 3. 运算、显式转换、选择与失败
 
-优先级从高到低：索引/调用、! 与正负号、* /、+ -、大小比较、== !=、&&、||。
+优先级从高到低：索引/调用、**、! 与正负号、* / // % */、+ -、大小比较、== !=、&&、||。
 混合条件时加括号，让分组一目了然。
-数字支持四则运算；字符串支持 + 连接、* 非负整数重复。"count="+3 是错误，
+数字支持以下八种运算；字符串支持 + 连接、* 非负整数重复。
+
+| 写法 | 含义 | 例子 |
+| --- | --- | --- |
+| x + y | 加 | 2 + 3 = 5 |
+| x - y | 减 | 7 - 2 = 5 |
+| x * y | 乘 | 3 * 4 = 12 |
+| x / y | 除 | 7 / 2 = 3.5 |
+| x // y | 整除，向下取整 | 7 // 2 = 3；-7 // 2 = -4 |
+| x % y | 取余，符号跟随除数 | 7 % 2 = 1；-7 % 2 = 1 |
+| x ** y | 乘方，右结合 | 2 ** 3 = 8；2 ** 3 ** 2 = 512 |
+| x */ y | 以 y 为底的对数 | 8 */ 2 = 3 |
+
+`**` 的优先级高于负号，`-2 ** 2` 是 -4；`(-2) ** 2` 是 4，`2 ** -2` 是 0.25。
+`*/` 与乘除同级、左结合，`16 */ 2 ** 2` 是 2。对数要求正真数、正底数且底数不等于 1。
+number 仍为浮点数，允许小数参与整除与取余；对数结果可能有浮点误差。
+完整可运行例子见 [math.lip](../examples/math.lip)：`lipc run examples/math.lip`。
+
+"count="+3 是错误，
 写 "count="+str(3)。文本转数值用 string.parse_number。str 是显示转换，
 字符串原样显示，列表、对象、bool、number 和 null 按 JSON 显示；print、str、
 REPL 和入口保持一致。除零、非有限结果和错误动态类型返回错误。
@@ -183,6 +231,7 @@ lipc run examples/tutorial/03_choice.lip 30 0
 ```
 
 if condition {value} else {other_value} 是产生值的表达式，每个分支写一个值。
+分支结果可有不同类型，声明的 fn/Flow 结果类型负责约束实际返回值。
 只执行选中的分支，所以 count=0 时直接得到 null。&&/|| 也短路；! 接收 bool。
 
 不应正常返回 null 的无效输入，用 fail(message) 明确失败。下面是 fn **片段**：
@@ -255,8 +304,8 @@ parse_number 不接受前后空白、NaN/Inf、十六进制或下划线；需要
 
 <!-- example: examples/strings.lip -->
 ```lip
-// intent: 清理逗号分隔的标签，忽略空项，去重并保持首次出现的顺序。
-// accept: " Rust, LIP, rust, ,你好 " -> ["rust", "lip", "你好"]。
+# intent: 清理逗号分隔的标签，忽略空项，去重并保持首次出现的顺序。
+# accept: " Rust, LIP, rust, ,你好 " -> ["rust", "lip", "你好"]。
 fn clean(tag: string) -> string {
     return string.lower(string.trim(tag))
 }
@@ -289,7 +338,7 @@ fn 用一个返回表达式描述纯变换，可以组合其他纯 fn、标准�
 可拆成小函数，或放在 Flow 绑定中；例如 normalize(string.trim(tag)) 组合清理
 与规范化。文件和网络操作写在 Flow 中，便于图调度，fn 内部保持纯表达式。
 
-## 6. 遍历与聚合：range、Map、fold、scan
+## 6. 遍历与聚合：range、Map、for、fold、scan
 
 [05_range.lip](../examples/tutorial/05_range.lip)：
 
@@ -322,13 +371,40 @@ range(4) 与 range(0,4) 都是 0、1、2、3，不含终点。Map 每项求平�
 range(5,0,-2) 是 [5,3,1]；方向不匹配为空。0 步长、小数和超量报错；
 参数使用绝对值≤2^53−1 的可精确整数，最多生成 1,000,000 项。
 
-Map 写作 [expr for item in source]，先为 source 绑定名字，再描述元素变换。
-fn 内用 list.map(range(0,4),fn_name) 组合纯列表表达式，筛选用 list.filter。
+Map 写作 `[expr for item in source]`，source 可直接是列表表达式，例如
+`[x * x for x in range(4)]`，也可使用已有绑定。fn 内同样可以用纯推导式，
+或 `list.map(range(4), fn(x) { x * x })`；筛选用 list.filter。
 
 fold 接本地二参数 fn，分别是 accumulator 与当前元素；按顺序归约，并行
 模式也不改变归约顺序。它可聚合字符串或对象；单纯求和优先 list.sum。
 这个方向适合有界数据：变换用 Map、筛选用 filter、汇总用 fold。深树/分治
 用递归；无界事件与大数据流由 Host 处理。
+
+打印、外部调用和多语句操作使用语句式 for。例如 [for.lip](../examples/for.lip)：
+
+<!-- example: examples/for.lip -->
+```lip
+# Statement loops execute operations without building a result list.
+flow Each(stop: number) {
+    for i in range(stop) {
+        match i {
+            2 => { continue },
+            5 => { break },
+            _ => {}
+        }
+        squared = i ** 2
+        print(i, squared)
+    }
+    print("done")
+}
+```
+
+`lipc run examples/for.lip 8` 依次打印 `0 0`、`1 1`、`3 9`、`4 16`、`done`。
+continue 跳过当前项的剩余操作，break 结束最近一层循环；两者都可放在 match 分支中。
+嵌套循环的 break/continue 只影响内层。source 求值一次，逐项等待整个循环体完成，
+取消或错误停止后续操作，空列表不执行体内语句。for 不收集结果，可直接写在顶层或 REPL。
+每次迭代的绑定独立，循环变量遮蔽同名外层值，体内变量不能逃出；变量仍不可重新赋值。
+循环体不使用 return/state，返回写在循环之后；列表转换继续用推导式，累加用 fold。
 
 ## 7. 查询、筛选、排序、去重
 
@@ -495,9 +571,9 @@ children，再 sum；叶子 children=[]，空 sum=0。二叉树用 null 的完�
 
 <!-- example: examples/tutorial/11_report.lip -->
 ```lip
-// intent: 输入若干行文本；每行是“部门 金额”，忽略空行。
-// accept: 同一部门合并金额，按部门首次出现顺序输出；无有效行输出空报告。
-// error: 每个非空行必须恰有两项；金额必须是有限十进制数。
+# intent: 输入若干行文本；每行是“部门 金额”，忽略空行。
+# accept: 同一部门合并金额，按部门首次出现顺序输出；无有效行输出空报告。
+# error: 每个非空行必须恰有两项；金额必须是有限十进制数。
 fn nonempty(line: string) -> bool { return len(string.trim(line)) > 0 }
 fn parse_fields(fields: list) -> object {
     return if len(fields) == 2 {
@@ -569,18 +645,21 @@ Completed/Skipped/Cancelled，无耗时或局部变量快照。独立文件不�
 执行失败也写出，编译/CLI 输入失败尚未执行，不写新轨迹。
 
 Pure/ReadOnly Host 才可自动并行，外部写入形成顺序屏障。已声明的独立节点
-不会因 return 的 if 未选它就被取消；要阻止外部操作执行，把操作放进 when。
+不会因 return 的 if 未选它就被取消；要阻止外部操作执行，把操作放进 match。
 
-## 13. when：控制执行资格
+## 13. match：模式分支与返回值
 
 [10_gate.lip](../examples/tutorial/10_gate.lip)：
 
 <!-- example: examples/tutorial/10_gate.lip -->
 ```lip
 flow Gated(input: number) -> number? {
-    when input > 0 {
-        doubled = input * 2
-        return doubled
+    match input > 0 {
+        true => {
+            doubled = input * 2
+            return doubled
+        },
+        false => {}
     }
 }
 ```
@@ -592,10 +671,27 @@ lipc run --trace gate-trace.json examples/tutorial/10_gate.lip 0
 # null
 ```
 
-if 选择值，when 控制节点资格。false 时 doubled/return 跳过，库得到 nil，
-CLI 输出 null；因此输出写 number?。when 条件须 bool，可直接用表达式。
-块内绑定在 when 内使用。false 时跳过块内工作，适合“开关打开才写文件”。
-执行中的错误向宿主返回，Flow 仍通过同一个 return 给出结果。
+match 按模式选择分支。这里 false 分支为空，doubled/return 跳过，库得到 nil，
+CLI 输出 null；因此输出写 number?。分支内绑定只在该分支可用，其他分支的外部操作也不会执行。
+如果各分支都 return，可以使用非可选输出类型。执行中的错误向宿主返回。
+
+match 也可直接产生值，支持数字、字符串、bool、null 字面量和 `_` 默认分支。
+分支按顺序匹配，匹配值只计算一次；`模式 if 条件` 添加守卫。需要覆盖所有可能值，
+bool 可列出 true/false，其他情况通常使用最后一个无守卫的 `_`。
+
+```lip
+flow Describe(mode: string) -> any {
+    return match mode {
+        "run" => 7,
+        "off" => "停止",
+        _ if len(mode) == 0 => null,
+        _ => mode,
+    }
+}
+```
+
+match 不要求各分支结果类型一致；这里可以返回数字、字符串或 null。
+返回类型由函数或 Flow 的边界负责：`-> any` 接受这些值，改成 `-> number` 时字符串分支会报错。
 
 ## 14. Vibe Coding：生成后如何验证与修复
 
@@ -617,13 +713,13 @@ lipc check --json examples/tutorial/11_report.lip
 
 | 错误 | 修复方向 |
 | --- | --- |
-| undefined or forward reference | 名字、定义顺序、when 作用域 |
+| undefined or forward reference | 名字、定义顺序、match 分支作用域 |
 | unknown string/list operation | 查实际目录，不猜别名、不回退外部操作 |
 | expects string/number/list/bool | 核对契约和显式转换，运行验证动态元素 |
 | callback ... local pure function | 传 fn 名或内联纯 fn，匹配参数数量与结果 |
 | recursive ... explicit return type | 给递归环各 fn 标注结果 |
-| must be pure / nested external call | 外部调用拆成 Flow 绑定 |
-| no return / 多 return | 唯一输出，用 if 选值；when 输出可选 |
+| must be pure | 在 Flow 中调用外部能力，把结果传给纯 fn/回调 |
+| no return / 多 return | 一个结果出口；match 互斥分支可各自 return，空分支要求可选输出 |
 | 字段缺失、非矩形、解析失败 | 修正动态输入或明确失败契约 |
 
 完整机器诊断 code、可复制提示模板见 [VIBE-CODING.md](VIBE-CODING.md)。
@@ -633,7 +729,7 @@ lipc check --json examples/tutorial/11_report.lip
 ## 15. Go Host：显式接入外部能力
 
 文件/网络/数据库或专门 parser 由 Go adapter 实现。LIP 文件头写
-import host "load_profile"，调用单独绑定在 Flow；声明不安装或提供实现。
+import host "load_profile"，可在 Flow 中绑定或组合调用；声明不安装或提供实现。
 已有 [host_adapter/flow.lip](../examples/host_adapter/flow.lip) 读取两次文件。
 使用库模式，让 Go 主程序注册能力：
 
@@ -683,12 +779,15 @@ fn verify(candidate: number) -> bool { return candidate >= 3 }
 
 flow Session(input: number, enabled: bool) -> object? {
     count = state(0)
-    when enabled {
-        fetched = retry(fetch(input), 3)
-        candidate = feedback(start(fetched), revise, verify, 3)
-        report = {count: count, result: candidate}
-        write_report(report)
-        return report
+    match enabled {
+        true => {
+            fetched = retry(fetch(input), 3)
+            candidate = feedback(start(fetched), revise, verify, 3)
+            report = {count: count, result: candidate}
+            write_report(report)
+            return report
+        },
+        false => {}
     }
 }
 ```
@@ -733,6 +832,10 @@ NewInstance 要完整输入，Tick 接部分更新，nil 不更新。未知字�
 自增，Tick 不是无限循环，宿主决定何时推进。取消 Tick 也推进时钟，非法
 输入在进入 Tick 前失败。同实例执行/观察串行化，callback 不重入同实例，
 避免等自己持有的锁。
+
+生成图还会在最后一个消费者完成后解除中间值的执行引用，帮助 Go GC 较早回收。
+输出、State 和有效纯缓存继续保留，ReadOnly/ExternalWrite 结果不缓存；
+这不会修改返回对象或自动释放 Python 句柄。示例与成本见[值生命周期](VALUE-LIFETIMES.md)。
 
 ## 18. 有界策略、异步结果、取消
 
@@ -800,7 +903,7 @@ go run -buildvcs=false ./examples/tutorial/mixed_demo
 启动 Worker、读样例文件。自动、顺序和有限并行都验证同一结果，空数据、
 错误文本、Python 负数开根也有测试。
 
-纯 string/list 组合可嵌套；外部调用作为节点或 Map 元素显式调度。Go/Python
+纯 string/list 与 Flow 中的外部调用都可嵌套组合；fn/集合回调保持纯计算。Go/Python
 遵循同一规则，不把 IO 藏进纯 callback。普通返回值自动进入 LIP 值域；不能
 直接表示的长期对象才使用下面的句柄 API。
 
@@ -864,6 +967,6 @@ bash scripts/verify-release.sh
 5. Report 加业务条件和 fail，同时补正常/失败样例。
 6. Host Demo 更新输入/State，观察复用，用取消 context 验证停止。
 
-当前支持捕获不可变值的内联集合回调；普通循环、通用函数值/闭包、泛型 iterator、
+当前支持捕获不可变值的内联集合回调和有限集合的顺序 for/break/continue；可变循环变量、循环内 return、通用函数值/闭包、泛型 iterator、
 代码热重载和自动包管理仍未提供。小核心
 已可处理有界结构化任务，后续扩展依据真实程序的缺口和可验证失败契约。

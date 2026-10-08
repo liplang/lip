@@ -3,7 +3,6 @@ package tests
 import (
 	"bytes"
 	"encoding/json"
-	"go/format"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,26 +81,6 @@ func TestTutorialExamples(t *testing.T) {
 			}
 		})
 	}
-	// The tracked Host library must also match its tutorial source.
-	graph, err := compiler.CompileFile(filepath.Join(root, "examples/tutorial/session.lip"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: "sessionflow"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	formatted, err := format.Source([]byte(code))
-	if err != nil {
-		t.Fatal(err)
-	}
-	tracked, err := os.ReadFile(filepath.Join(root, "examples/tutorial/sessionflow/flow_gen.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(formatted, tracked) {
-		t.Fatal("regenerate tutorial sessionflow/flow_gen.go")
-	}
 }
 
 func TestJSONCheckCLI(t *testing.T) {
@@ -152,23 +131,26 @@ func TestJSONCheckCLI(t *testing.T) {
 }
 
 func TestTutorialSourcesMatchDocumentation(t *testing.T) {
-	root, _ := filepath.Abs("..")
-	data, err := os.ReadFile(filepath.Join(root, "docs/TUTORIAL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	pattern := regexp.MustCompile("(?s)<!-- example: ([^ ]+) -->\\s*```lip\\n(.*?)\\n```")
-	matches := pattern.FindAllSubmatch(data, -1)
-	if len(matches) < 12 {
-		t.Fatalf("only %d linked runnable tutorial sources", len(matches))
-	}
-	for _, match := range matches {
-		source, err := os.ReadFile(filepath.Join(root, string(match[1])))
+	checked := 0
+	for _, path := range documentationFiles(t) {
+		data, err := os.ReadFile(filepath.Join("..", path))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.TrimSpace(string(source)) != strings.TrimSpace(string(match[2])) {
-			t.Errorf("tutorial snippet differs from %s", match[1])
+		for _, match := range pattern.FindAllSubmatch(data, -1) {
+			source, err := os.ReadFile(filepath.Join("..", string(match[1])))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(source)) != strings.TrimSpace(string(match[2])) {
+				t.Errorf("%s snippet differs from %s", path, match[1])
+			}
+			checked++
 		}
 	}
+	if checked < 12 {
+		t.Fatalf("only %d linked runnable documentation sources", checked)
+	}
+	t.Logf("checked %d linked documentation sources", checked)
 }

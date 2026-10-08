@@ -16,7 +16,7 @@ func TestComprehensionCompositionChecks(t *testing.T) {
 		`fn squares(n: number) { return [x * x for x in range(0, n)] }; print(squares(3))`,
 		`print([[x + y for y in range(0, x)] for x in range(1, 4)])`,
 		`print([x for x in [y * y for y in range(0, 3)]])`,
-		`when len([x for x in range(0, 3)]) == 3 { print(true) }`,
+		`match len([x for x in range(0, 3)]) == 3 { true => { print(true) }, false => {} }`,
 		`import host "fetch"; items = [fetch(x) for x in range(0, 3)]; print(items)`,
 	} {
 		graph, err := compiler.ParseAndBuild(source)
@@ -31,8 +31,6 @@ func TestComprehensionCompositionChecks(t *testing.T) {
 		{`print([x for x in 3])`, "source must be a list"},
 		{`print([missing for x in range(0, 3)])`, `reference "missing"`},
 		{`a = [x for x in range(0, 3)]; print(x)`, `reference "x"`},
-		{`import host "fetch"; print([fetch(x) for x in range(0, 3)])`, "nested external"},
-		{`import host "fetch"; a = [x for x in fetch()]`, "nested external"},
 		{`import host "fetch"; fn f() { return [fetch(x) for x in range(0, 3)] }; print(f())`, "must be pure"},
 		{`print([state(x) for x in range(0, 3)])`, "Flow binding"},
 		{`a = [retry(str(x), 2) for x in range(0, 3)]`, "not Map elements"},
@@ -57,7 +55,7 @@ flow Compose(mode: number, input: any) -> object {
     shadow_source = [x for x in range(x - 2, x)]
     reversed = [x for x in range(3, 0, -1)]
     mean = np.mean([x for x in range(1, 19)])
-    when false { hidden = [fail("hidden element") for x in range(0, 3, 0)] }
+    match false { true => { hidden = [fail("hidden element") for x in range(0, 3, 0)] }, false => {} }
     return if mode == 1 {
         {first: fail("first field"), later: [fail("later field") for x in range(0, 3)]}
     } else { if mode == 2 {

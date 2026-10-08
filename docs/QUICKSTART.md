@@ -1,4 +1,4 @@
-# LIP Alpha 0.6.1 快速入门
+# LIP Alpha 0.6.3 快速入门
 
 需要 Go 1.27 或更高版本。
 
@@ -12,6 +12,11 @@ go install ./cmd/lipc
 
 安装位置跟随 Go 配置：GOBIN 非空时用 GOBIN，否则用第一个 GOPATH 目录下的
 `bin`。可用 `go env GOBIN GOPATH` 查看实际位置。
+
+也可以使用[本地发行包](../RELEASE.md#本地发行包)：解压对应平台的工具包，
+直接调用其中的 lipc（Windows 为 lipc.exe）。包内含文档、示例、编辑器插件、课程和 Runtime；
+check/inspect 不需要 Go，run/build/repl/learn 的代码执行需要 Go 1.27+。
+源码包提供实现和测试，可在解压目录执行上面的安装命令。
 
 工具目录已在 PATH 中时，直接运行：
 
@@ -41,6 +46,13 @@ Windows 的常见位置是用户目录下的 `go\bin\lipc.exe`。未自定义时
 工具选项放在文件前，程序输入放在文件后：`lipc run hello.lip 小林`，或
 `lipc run --trace trace.json hello.lip 小林`。按这个顺序传入即可。
 
+想通过练习逐步学习，可运行 `lipc learn`，或在仓库内运行
+`go run ./cmd/lipc learn`。它提供 26 节中文交互课，输入代码后用真实编译器和
+Runtime 验证；`:hint` 查看提示，`:next` 进入下一课，进度自动保存。
+课程列表和编辑器用法见[交互学习](INTERACTIVE-LEARNING.md)。
+
+Vim 9、Neovim、Emacs 的原生高亮、缩进、补全和检查插件见[编辑器支持](EDITORS.md)。
+
 ## 1. 先打个招呼
 
 ```bash
@@ -50,6 +62,7 @@ lipc run examples/tutorial/01_hello.lip 小林
 
 它的完整源码只有几行：
 
+<!-- example: examples/tutorial/01_hello.lip -->
 ```lip
 flow Hello(name: string) -> string {
     greeting = "你好，" + name + "！"
@@ -63,14 +76,20 @@ flow Hello(name: string) -> string {
 
 [examples/core.lip](../examples/core.lip) 接收列表，变换、聚合并返回对象：
 
+<!-- example: examples/core.lip -->
 ```lip
-fn add(total: number, value: number) -> number { return total + value }
+# A complete data program: no Host adapter or Python required.
+fn add(total: number, value: number) -> number {
+    return total + value
+}
 
 flow Report(values: list) -> object {
     doubled = [x * 2 for x in values]
     total = fold(doubled, 0, add)
     return {
-        count: len(values), values: doubled, total: total,
+        count: len(values),
+        values: doubled,
+        total: total,
         average: if len(values) == 0 { null } else { total / len(values) }
     }
 }
@@ -148,7 +167,20 @@ lipc run examples/tree.lip '{"value":1,"left":{"value":2,"left":null,"right":nul
 # 3
 ```
 
-集合遍历用 Map/fold，树与分治用递归。
+集合转换用 Map，聚合用 fold，树与分治用递归。执行打印或外部调用用语句式 for：
+
+```lip
+for i in range(6) {
+    match i {
+        2 => { continue },
+        5 => { break },
+        _ => { print(i) }
+    }
+}
+```
+
+依次打印 0、1、3、4。每项顺序执行，break 结束最近一层循环，continue 跳过本项剩余
+操作；循环变量和体内绑定不逃出作用域。空列表不执行循环体，取消或错误停止后续工作。
 
 ## 7. 看图和错误
 

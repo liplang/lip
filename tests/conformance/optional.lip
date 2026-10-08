@@ -1,5 +1,8 @@
 flow Optional(value: number) -> number? {
-    when value > 0 {
-        return value * 2
+    match value > 0 {
+        true => {
+            return value * 2
+        },
+        false => {}
     }
 }

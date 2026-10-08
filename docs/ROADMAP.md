@@ -1,10 +1,10 @@
-# LIP 路线图
+# LIP 路线图（0.6.3）
 
 当前版本围绕完整的数据程序：声明输入、构造数据、变换与聚合、输出结果，
 再观察依赖图与执行。规则以[语言规范](ALPHA-0.6-SPEC.md)为准。
 
-语法参考 Rust，区间遵循 Python 的习惯。集合遍历用 range → Map → fold，
-树与分治用纯递归。Go Host 与 Python Worker 为这些组合提供外部能力。
+语法参考 Rust，区间遵循 Python 的习惯。集合转换用 Map，聚合用 fold，
+顺序操作用 for，树与分治用纯递归。Go Host 与 Python Worker 提供外部能力。
 
 ## 当前能力
 
@@ -15,12 +15,18 @@
 | 34 个 list、19 个 string 操作与 fail | 标准库全目录语义测试 |
 | check --json、inspect 图、run --trace | 诊断与成功/失败轨迹测试 |
 | State/Tick、依赖复用、效果与取消 | Runtime 与完整宿主示例 |
+| 计算生命周期与 Go GC | 最后消费者解除引用、依赖快照、纯缓存/State 保留；weak.Pointer、race 与内存基准 |
 | Go→纯库→Python→纯库组合 | mixed Flow 的三种调度测试 |
 | 独立安装与构建 | 自定义 GOBIN/GOPATH、仓库外项目和离线构建验证 |
-| 唯一语法与命令规则 | // 注释、块式 if、长选项与文件参数边界回归 |
+| 本地发行包 | 源码与平台工具包、确定性归档、manifest/SHA-256、解压后离线验收 |
+| 唯一语法与命令规则 | # 注释、块式 if、长选项与文件参数边界回归 |
 | 简洁入口和编译式 REPL | 顶层语句、可省略 Flow 输出、光标/历史编辑、补全与多行粘贴 |
-| 原名导入与显式别名 | import python/host/go；Python as 别名、点分模块和版本声明验证 |
+| 原名导入与显式别名 | import python/host/go 都支持 as；单操作/命名空间、点分模块、版本声明及宿主注册验证 |
+| 名称和 Host 边界一致性 | 命名空间与裸调用分别解析；未使用导入不启动外部环境；Go 定义标量、Unicode 字段与 map 索引安全 |
 | 集合自然组合 | 纯推导式嵌套、range(n)、内联纯回调与捕获依赖；三种调度/缓存/错误回归 |
+| 模式与数值运算 | match 的字面量/守卫/默认分支、异类结果和可空收窄；八种算术、优先级和定义域 |
+| 顺序操作遍历 | 语句式 for、独立迭代作用域、match/嵌套循环、break/continue、异步等待、取消和错误停止 |
+| 原生编辑器支持 | Neovim Lua、Vim9script、Emacs Elisp；真实编辑器高亮/缩进/补全/诊断与异步取消测试，见 [EDITORS.md](EDITORS.md) |
 
 完整验证运行 `bash scripts/verify-release.sh`，结果见
 [发布清单](../RELEASE.md)和[一致性审计](CONSISTENCY-AUDIT.md)。
@@ -31,8 +37,8 @@
 
 | 使用需求 | 可评估的方向 |
 | --- | --- |
-| 更快的编辑与验证 | 格式化工具、重复构建的复用、REPL Python 对象的跨单元生命周期 |
-| 深递归或大型区间 | 尾调用、惰性迭代或循环 |
+| 更快的编辑与验证 | LSP/Tree-sitter、项目导航、格式化工具、重复构建的复用、REPL Python 对象的跨单元生命周期 |
+| 深递归或大型区间 | 尾调用、惰性迭代、循环控制能力的进一步设计 |
 | 单 Worker 排队与大数组复制 | Worker pool、Arrow、共享内存或传输优化 |
 | 持续输入与状态推进 | 事件或流的执行模型 |
 

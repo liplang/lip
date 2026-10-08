@@ -1,8 +1,9 @@
-# list 纯函数标准库（0.6）
+# list 纯函数标准库（0.6.3）
 
 本库提供 34 个纯函数，可直接组合于 Flow、fn、if 和 Map 元素。
 callback 使用本地纯 fn 名或内联 `fn(x) { expression }`。
 编译器与 Runtime 共用一个签名目录；增加函数必须同时补契约与语义测试。
+显式导入同名外部命名空间时，调用归属于声明的后端；使用 as 可让外部库与核心 list.* 并存。
 
 设计参考 Mathematica 的 Join、Take/Drop、Flatten、Transpose、Partition、
 GatherBy/GroupBy、SplitBy、FoldList、Tuples 等组合能力。命名采用小写与下划线，
@@ -23,7 +24,8 @@ GatherBy/GroupBy、SplitBy、FoldList、Tuples 等组合能力。命名采用小
 | `list.slice(xs, start, end)` | 半开区间，负索引从尾部计数，越界截断，end≤start 返回 [] |
 | `list.first(xs)` / `list.last(xs)` | 返回头/尾元素；空列表报错 |
 
-这些操作都返回新列表，不原地改变输入。嵌套对象和列表仍共享只读值，不深拷贝。
+first/last 返回选中的元素，其余构造与选择操作返回新列表，不原地改变输入。
+嵌套对象和列表仍共享只读值，不深拷贝。
 取单个索引继续使用 `xs[index]`；和 slice 不同，单索引越界是错误。
 
 ## 形状与组合
@@ -66,7 +68,8 @@ bool、null、string、list 或 object，不转成字符串对象键。unique/gr
 ## 纯回调操作
 
 callback 可用本文件的纯函数名，或直接写 `fn(x) { x * x }`。具名函数传名称，
-不写 `square()`；Host/Python 操作和动态变量不能当回调。数据参数可嵌套纯表达式，
+不写 `square()`；Host/Python 操作和动态变量不能当回调。Flow 中数据参数可嵌套
+外部调用，参数按顺序等待结果；纯 fn 与回调内的表达式保持纯计算。
 例如 `list.map(range(5), square)`。一般接受一个元素；scan/fold 的 reducer 接受累计值和元素。
 内联参数省略类型时为 any，也可写 `fn(x: number) -> number { return x * x }`；
 单表达式前的 return 可省略，具名 fn 的单表达式体也采用相同规则。
@@ -104,10 +107,10 @@ flow Groups() -> object {
 
 ```lip
 factor = 3
-print(list.map(range(4), fn(x) { x * factor })) // [0,3,6,9]
-print(list.sum(list.map(list.filter(range(5), fn(x) { x > 1 }), fn(x) { x * x }))) // 29
-print(fold(range(5), 0, fn(total, x) { total + x })) // 10
-print(list.scan(range(4), 0, fn(total, x) { total + x })) // [0,0,1,3,6]
+print(list.map(range(4), fn(x) { x * factor })) # [0,3,6,9]
+print(list.sum(list.map(list.filter(range(5), fn(x) { x > 1 }), fn(x) { x * x }))) # 29
+print(fold(range(5), 0, fn(total, x) { total + x })) # 10
+print(list.scan(range(4), 0, fn(total, x) { total + x })) # [0,0,1,3,6]
 ```
 
 `group_by`、`split_by`、`sort_by`、`any`、`all` 使用相同的内联写法。

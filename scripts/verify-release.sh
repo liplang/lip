@@ -8,6 +8,7 @@ verify_dir=$(mktemp -d)
 trap 'rm -rf "$verify_dir"' EXIT
 
 printf 'Checking tests, races, vet and builds...\n'
+python3 scripts/test_package_release.py
 go test ./...
 go test -race ./...
 go vet ./...
@@ -18,6 +19,14 @@ expected_version=$(tr -d '\n' < VERSION)
 actual_version=$("$verify_dir/lipc" version)
 test "$actual_version" = "$expected_version"
 "$verify_dir/lipc" help >/dev/null 2>&1
+
+printf 'Checking editor catalogs and native editor packages...\n'
+if command -v vim >/dev/null 2>&1 || command -v nvim >/dev/null 2>&1 || command -v emacs >/dev/null 2>&1; then
+  python3 scripts/verify-editors.py --compiler "$verify_dir/lipc"
+else
+  go run ./scripts/editor-catalog --check
+  printf 'Skipping native editor tests: Vim, Neovim and Emacs are unavailable; use verify-editors.py --require-all for full editor acceptance.\n'
+fi
 
 # Simulate user installation without modifying the developer's tools or PATH.
 verify_gopath="$verify_dir/custom workspace"
@@ -64,12 +73,21 @@ test "$("$verify_dir/lipc" run examples/strings.lip '')" = '{"count":0,"label":"
 test "$("$verify_dir/lipc" run --trace "$verify_dir/trace.json" examples/core.lip '[1,2,3]')" = '{"average":4,"count":3,"total":12,"values":[2,4,6]}'
 test "$("$verify_dir/lipc" run examples/core.lip '[]')" = '{"average":null,"count":0,"total":0,"values":[]}'
 test "$("$verify_dir/lipc" run examples/range.lip 5)" = '{"total":30,"values":[0,1,4,9,16]}'
+test "$("$verify_dir/lipc" run examples/lifetimes.lip 5)" = $'computed 5 10\n{"count":5,"total":10}'
 test "$("$verify_dir/lipc" run examples/comprehensions.lip 4)" = '{"count":3,"rows":[[1],[2,3],[3,4,5]],"total":14,"values":[1,4,9]}'
 test "$("$verify_dir/lipc" run examples/aggregation.lip 4)" = '{"descending":[3,2,1,0],"groups":[{"key":false,"values":[0,1,2]},{"key":true,"values":[3]}],"prefixes":[0,0,1,3,6],"selected":[3],"squares":[0,1,4,9],"total":6}'
 test "$("$verify_dir/lipc" run examples/aggregation.lip 0)" = '{"descending":[],"groups":[],"prefixes":[0],"selected":[],"squares":[],"total":0}'
+test "$("$verify_dir/lipc" run examples/math.lip)" = '{"add":5,"divide":3.5,"floor_divide":3,"logarithm":3,"multiply":12,"power":8,"remainder":1,"subtract":5}'
+test "$("$verify_dir/lipc" run examples/for.lip 8)" = $'0 0\n1 1\n3 9\n4 16\ndone'
+test "$("$verify_dir/lipc" run examples/tutorial/12_optional.lip null null)" = '{"label":null,"value":null}'
+test "$("$verify_dir/lipc" run examples/tutorial/12_optional.lip 3 '"null"')" = '{"label":"null","value":6}'
 test "$("$verify_dir/lipc" run examples/tree.lip '{"value":1,"left":{"value":2,"left":null,"right":null},"right":null}')" = '3'
 "$verify_dir/lipc" run examples/lists.lip '[{"department":"A","amount":3},{"department":"B","amount":2},{"department":"A","amount":-1}]' >"$verify_dir/lists.json"
 "$verify_dir/lipc" build --output "$verify_dir/report" examples/core.lip >/dev/null
 test "$("$verify_dir/report" '[1,2,3]')" = '{"average":4,"count":3,"total":12,"values":[2,4,6]}'
+
+printf 'Checking local release archives and offline installation...\n'
+python3 scripts/package-release.py --output "$verify_dir/packages"
+python3 scripts/verify-package.py --directory "$verify_dir/packages" --version "$expected_version"
 
 printf 'Verified LIP %s: %d source programs, core/list/string/tutorial/adapter and release checks.\n' "$actual_version" "$count"

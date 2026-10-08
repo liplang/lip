@@ -20,15 +20,14 @@ func TestAlpha05Diagnostics(t *testing.T) {
 		{"undefined", `flow Bad() -> any { return missing }`, "undefined or forward"},
 		{"forward", "flow Bad() -> any { b = a\n a = 1\n return b }", "forward reference"},
 		{"duplicate", "flow Bad() -> any { a = 1\n a = 2\n return a }", "duplicate binding"},
-		{"scope", "flow Bad() -> any { when true { a = 1 }\n return a }", "scoped to a when"},
+		{"scope", "flow Bad() -> any { match true { true => { a = 1 }, false => {} }\n return a }", "scoped to a match"},
 		{"untyped function", `fn f(x) { return x } flow Bad() -> number { return f(1) }`, "explicit type"},
 		{"wrong dynamic branch", `flow Bad(x: any) -> string { return if true { x } else { 1 } }`, "declared output"},
 		{"wrong output", `flow Bad() -> string { return 1 }`, "declared output"},
 		{"wrong function output", `fn f(x: number) -> string { return x } flow Bad() -> any { return f(1) }`, "declared string"},
-		{"gated output", `flow Bad(x: bool) -> number { when x { return 1 } }`, "may produce no value"},
-		{"multiple outputs", `flow Bad(x: bool) -> number? { when x { return 1 }; return 2 }`, "exactly one return"},
+		{"gated output", `flow Bad(x: bool) -> number { match x { true => { return 1 }, false => {} } }`, "may produce no value"},
+		{"multiple outputs", `flow Bad(x: bool) -> number? { match x { true => { return 1 }, false => {} }; return 2 }`, "exactly one return"},
 		{"impure function", `import host "fetch" fn f(x: string) { return fetch(x) } flow Bad() -> any { return f("x") }`, "must be pure"},
-		{"nested external", `import host "fetch" flow Bad() -> string { return str(fetch()) }`, "Flow binding first"},
 		{"recursive function", `fn f(x: number) { return f(x) } flow Bad() -> number { return f(1) }`, "recursive"},
 		{"control in map", `import host "fetch" flow Bad(values: any) -> any { return [retry(fetch(x), 2) for x in values] }`, "not Map elements"},
 		{"numeric map source", `flow Bad(values: number) -> any { return [x * 2 for x in values] }`, "must be a list"},
@@ -61,7 +60,7 @@ func TestAlpha05Diagnostics(t *testing.T) {
 
 func TestCurrentSyntax(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
-		{"# old comment\nflow Example() -> number { return 1 }", "unexpected character"},
+		{"// old comment\nflow Example() -> number { return 1 }", "expected expression"},
 		{`flow Example() -> number { return if true then 1 else 2 }`, "expected {"},
 		{`flow Example { return 1 }`, "explicit parameter list"},
 		{`flow Example(value) -> any { return value }`, "explicit type"},
@@ -73,10 +72,10 @@ func TestCurrentSyntax(t *testing.T) {
 		}
 	}
 	// Comment markers and former keywords inside strings remain ordinary data.
-	source := `// A single comment syntax, including 中文.
+	source := `# A single comment syntax, including 中文.
 fn choose(value: bool) { return if value { {text: "# then //"} } else { {text: "else"} } }
 flow Example(value: bool) -> object {
-    then = choose(value) // Inline comment.
+    then = choose(value) # Inline comment.
     return if value { then } else { if true { {text: "nested"} } else { then } }
 }`
 	if _, err := compiler.ParseAndBuild(source); err != nil {
@@ -227,6 +226,7 @@ func TestAlpha05EndToEnd(t *testing.T) {
 			failure            bool
 		}{
 			{"standard library", `import python "math" flow SquareRoot(x: number) -> number { return math.sqrt(x) }`, "3\n", false},
+			{"control operation only", `import python "math" flow Available(x: number) -> bool { return python.module_available("math") }`, "true\n", false},
 			{"missing module", `import python "lip_missing_module_alpha05" flow Missing(x: number) -> number { return lip_missing_module_alpha05.sqrt(x) }`, "lip_missing_module_alpha05", true},
 			{"real attribute path", `import python "datetime" flow Date(x: string) -> any { value = datetime.datetime.fromisoformat(x); return python.to_json(value) }`, "2026-10-07 00:00:00\n", false},
 		} {
@@ -282,6 +282,11 @@ func main(){for _,dependency:=range RequiredDependencies(){fmt.Printf("import: %
 			t.Fatalf("check/library metadata differ: %q vs %q (%v)", out, queried, queryErr)
 		}
 		out, err = command(lipc, "run", source)
+		if err != nil || out != "1\n" {
+			t.Fatalf("unused imports blocked execution: %q %v", out, err)
+		}
+		writeTestFile(t, source, `import python "math"; import go "example.com/adapter"; import host "fetch"; flow Deps() -> number { return fetch(math.sqrt(4)) }`)
+		out, err = command(lipc, "run", source)
 		if err == nil || !strings.Contains(out, "use library mode") {
 			t.Fatalf("standalone adapters: %q %v", out, err)
 		}
@@ -314,7 +319,7 @@ func TestAlpha05OptionalAndExpressions(t *testing.T) {
 	root, _ := filepath.Abs("..")
 	dir := t.TempDir()
 	for _, tc := range []struct{ name, source, want string }{
-		{"optional", `flow Optional() -> number? { when false { return 2 } }`, "null\n"},
+		{"optional", `flow Optional() -> number? { match false { true => { return 2 }, false => {} } }`, "null\n"},
 		{"lazy if", `flow Lazy() -> number { return if true { -2 * 3 } else { 1 / 0 } }`, "-6\n"},
 		{"short circuit and", `flow And() -> bool { return false && (1 / 0 > 0) }`, "false\n"},
 		{"short circuit or", `flow Or() -> bool { return true || (1 / 0 > 0) }`, "true\n"},

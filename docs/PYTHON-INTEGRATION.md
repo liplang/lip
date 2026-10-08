@@ -1,9 +1,12 @@
-# Python 科学计算与进程集成设计
+# LIP 0.6.3 Python 科学计算与进程集成设计
 
 Go/Python/纯库组合从[教程](TUTORIAL.md)第 19 节的 mixed Flow 开始。
 有限标量、list/tuple/object 自动进入 LIP 值域，长期对象使用句柄。
 set/frozenset 保留句柄，需要有序列表时调用 builtins.sorted。
 非有限数值和字符串化后冲突的对象键会报告错误。
+未使用的 Python 导入保留元数据，不强制启动 Worker；实际使用模块属性、调用、
+feedback 回调或循环中的 Python 操作才需要 Worker。命名空间别名可与内置操作
+或本地 fn 同名，裸调用与成员调用分别解析。
 
 Python 调用参数可以直接组合 LIP 的纯列表表达式，在文件和 REPL 中均可使用：
 
@@ -11,7 +14,7 @@ Python 调用参数可以直接组合 LIP 的纯列表表达式，在文件和 R
 import python "numpy" as np
 
 result = np.mean([x for x in range(1, 19)])
-print(result) // 9.5，range 包含 1 到 18。
+print(result) # 9.5，range 包含 1 到 18。
 ```
 
 推导式在 LIP 中生成列表，再传给 Python；不用为范围和变换各写一个中间变量。
@@ -124,16 +127,32 @@ flow Scientific(values: any) -> any {
 不写 `as` 则仍用 `sklearn.preprocessing.scale(...)`。
 模块字符串也支持点分路径，如 `import python "xml.etree.ElementTree" as et`。
 别名只影响源码名称，不修改真实 Python 路径、安装包名或模块访问策略。
+`as` 增加一个可用名称，原模块路径仍可引用；同一模块也可以同时声明原名
+和多个不同别名。在 REPL 中重复输入相同声明不会报错，别名冲突仍会报错。
 模块与 LIP 标准库同名时，也可以用显式别名区分，如
 `import python "string" as text`，同时保留 LIP 的 `string.*` 操作。
-`import go "模块"`
-用于说明承载生成包的 Go 程序需要哪个 Go module，`import host "操作名"` 用于
+Host/Go 同样支持 as：`import go "fmt" as f` 使 `f.Println(...)` 使用注册名
+`fmt.Println`；`import host "service.*" as s` 使 `s.fetch(...)` 使用 `service.fetch`；
+`import host "fetch" as f` 则直接写 `f(...)`。Go 包路径完整保留，操作由宿主适配器注册。
+`import go "包路径"` 声明由宿主适配器提供的 Go 包命名空间，`import host "操作名"` 用于
 说明必须由宿主注册哪个 Host operation。`lipc check` 会打印这些声明，库模式的
 `RequiredDependencies()` 会把它们返回给部署代码；声明不会联网安装、不会自动
-修改解释器，也不会把一个固定库白名单写进编译器。Alpha 0.5 要求 dotted
-Python operation 有匹配的 `import python`（或明确的 `import host`），bare Host
+修改解释器，也不会把一个固定库白名单写进编译器。dotted
+Python operation 要有匹配的 `import python`（或明确的 `import host`），bare Host
 operation 有 `import host`；缺声明在 `lipc check` 阶段失败。这样通用库调用不受
 白名单限制，但源文件仍然完整地说明运行环境。
+
+导入的模块还支持属性读取，例如 `version = np.__version__`、
+`pi = math.pi`。可传输的属性直接成为 LIP 值；模块、函数和类返回具名引用，
+显示为 `<Python module numpy>` 或
+`<Python function numpy.mean; call with (...)>`，读取函数不会执行它。
+具名引用可保存在 REPL 中跨单元查看；它记录路径，在接收它的 Worker 中
+重新解析并检查模块访问策略。它不是 LIP 的纯 `fn`，可用原模块路径调用，
+也可以通过 `python.call(reference, "__call__", [arguments])` 调用。
+`python.getattr("numpy.__version__")` 提供对应的 Worker 控制操作。
+文件、Flow 与 REPL 均支持组合外部读取和调用，例如
+`print(np.__version__)` 或 `print(np.mean([1,2,3,4]))`。参数按书写顺序等待结果，
+if/match/布尔短路只执行所选部分；纯 fn 和集合回调仍不允许外部调用。
 
 ### 通用库调用，而不是逐个内置库
 
@@ -173,6 +192,10 @@ worker, err := runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{
 释放。大 Tensor、权重和图像仍需要独立数据面；句柄的池化、空闲回收和跨 Worker
 重建属于 P2/P3，不会把每个 Python 库逐个写进 LIP 核心。
 
+生成图的[值生命周期优化](VALUE-LIFETIMES.md)只解除 Go 执行值表中的引用。
+它不自动释放 Worker 中的句柄、blob 文件或 mmap；`python.release`、
+`python.release_blob` 和 Worker.Close 继续遵循各自的资源契约。
+
 常见库的导入根和第一阶段适配边界如下：
 
 | 能力 | Python 导入根 | 直接可取回的结果 | 后续需要句柄/数据面的对象 |
@@ -193,10 +216,13 @@ Go 侧还可以调用 `CallSession` 或使用 `RegisterPythonSession` 显式传�
 例如，Tensor 计算可以保持在 Python Worker 内，只在最后一步取回 JSON：
 
 ```lip
-tensor = torch.tensor(values)
-relu = torch.nn.functional.relu(tensor)
-result = python.to_json(relu)
-return result
+import python "torch"
+
+flow Relu(values: list) -> list {
+    tensor = torch.tensor(values)
+    relu = torch.nn.functional.relu(tensor)
+    return python.to_json(relu)
+}
 ```
 
 ## 结论先行：推荐的基本形态

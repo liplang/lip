@@ -1,4 +1,4 @@
-# 用 LIP 完成需求 → 生成 → 检查 → 验证 → 修改
+# 用 LIP 0.6.3 完成需求 → 生成 → 检查 → 验证 → 修改
 
 LIP 的编写流程是需求 → 生成 → 检查 → 验证 → 修改。用标准库组合数据处理，
 用注释表达意图，再通过可复现输入输出与结构化诊断核对结果。
@@ -17,20 +17,27 @@ lipc version
 [教程](TUTORIAL.md)、[列表库](LIST-LIBRARY.md)、[字符串库](STRING-LIBRARY.md)：
 
 ```text
-为 LIP Alpha 0.6.1 写一个完整 .lip 文件。
-采用 Rust 风格块式 if；snake_case 命名；所有参数与结果明确标注类型。
-每个文件一个入口：显式 Flow 或一组顶层语句。有返回值时声明输出类型并用一个 return 给出结果；
+为 LIP Alpha 0.6.3 写一个完整 .lip 文件。
+采用 Rust 风格块式 if；建议 snake_case 命名与显式结果类型以便审阅。
+这些是写作建议；语言允许其他标识符风格、非递归 fn 的结果类型推导和内联回调的参数类型省略。
+Flow/具名 fn 的参数、有返回值 Flow 的输出，以及递归 fn 的结果类型必须声明。
+每个文件一个入口：显式 Flow 或一组顶层语句。有返回值时声明输出类型，用一个 return 或 match 的互斥分支给出结果；
 只做打印等操作时可以省略整个 Flow 外壳。fn 用单个返回表达式描述纯变换。
 执行语句用换行分隔，同一行的多条语句必须用分号分隔。
 绑定不可变，先定义后使用。操作名称和签名参照当前标准库文档。
 纯数据处理使用 string.*、list.*、range、fold 或本地纯 fn。
-Map 推导式、fold/list.* 可组合纯列表表达式，无需先绑定 source。
+Map 推导式、fold/list.* 可组合列表表达式，无需先绑定 source。Flow 中的 source、
+元素和调用参数可含外部操作；纯 fn/集合回调仍保持纯计算。
 推导式可嵌套在参数、fn 和条件表达式中；独立 Map 有界并行，嵌套推导式顺序求值。
 callback 传本文件的纯 fn 名或内联 fn(x) { expression }；内联参数默认 any，可显式标注。
 单表达式 fn 的 return 可省略。内联捕获是图依赖，回调不得隐藏外部调用。
-条件选值用 if，执行资格用 when。
-外部能力用 import 声明，操作先单独绑定为 Flow 节点；Host 由 Go 注册。
-用 // intent: 写意图，// accept: 写可复现输入/期望，// error: 写错误契约。
+条件选值用 if 或 match 表达式，多语句分支用 match 语句。
+外部能力用 import 声明，可直接组合于 Flow 表达式；Host 由 Go 注册。
+Python、Host、Go 都支持 as 别名；遇到导入重名或后端歧义用不同别名消除。
+顺序打印或外部工作用 for 遍历有限列表，break/continue 控制最近循环。
+列表转换用推导式，聚合用 fold；循环绑定仍不可变，return/state 留在循环外。
+数字支持 + - * / // % ** */，行注释写 #；// 向下取整，x */ base 是对数。
+用 # intent: 写意图，# accept: 写可复现输入/期望，# error: 写错误契约。
 先执行 lipc check --json，再验证正常、空输入与错误输入。
 根据诊断修正表达式和类型，并再次运行原有验收样例。
 ```
@@ -61,7 +68,7 @@ lipc run examples/strings.lip ''
 # {"count":0,"label":"","tags":[]}
 ```
 
-意图注释使用 `//`，紧贴 fn/Flow 放置，
+意图注释使用 `#`，紧贴 fn/Flow 放置，
 需求变化时同时更新代码、注释和验收样例；不会产生隐藏的语言状态。
 
 ## 结构化检查与修复
@@ -72,6 +79,7 @@ CLI 参数用法错误退出 2，向 stderr 打印用法错误，不冒充源码
 
 例如文件内容是：
 
+<!-- lip-check: LIP_TYPE_ERROR -->
 ```lip
 flow Bad() -> string {
     return string.trim(1)
@@ -80,6 +88,7 @@ flow Bad() -> string {
 
 失败结果含这些字段（message 的具体英语文字不作为兼容性 API）：
 
+<!-- lip-diagnostic: previous -->
 ```json
 {
   "schema": "lip.diagnostics.v1",
@@ -93,8 +102,7 @@ flow Bad() -> string {
     "column": 5,
     "source_line": "    return string.trim(1)",
     "hints": [
-      "Match the declared boundary types and operation signature; use str(value) or string.parse_number(text) for explicit conversion.",
-      "list and object check outer shape only; dynamic elements are validated during execution."
+      "Make the indicated argument match its parameter type; changing a different argument or the output type does not fix this call."
     ]
   }]
 }
@@ -107,14 +115,16 @@ AI 应先确定意图：这里需要修正输入类型，还是确实需要 `str
 | --- | --- |
 | `LIP_IO_ERROR` | 核对路径和读取权限 |
 | `LIP_LEX_ERROR` / `LIP_SYNTAX_ERROR` | 核对字符串转义、括号、参数与输出声明 |
-| `LIP_NAME_ERROR` | 核对拼写、定义顺序和 when 作用域 |
+| `LIP_NAME_ERROR` | 核对拼写、定义顺序和 match 作用域 |
 | `LIP_UNKNOWN_OPERATION` | 查标准库目录，使用实际支持的名称 |
 | `LIP_DEPENDENCY_ERROR` | 明确真实外部操作及其 import/adapter |
 | `LIP_TYPE_ERROR` | 核对实际类型与显式转换 |
 | `LIP_ARGUMENT_ERROR` | 核对调用签名与实际参数数量，或控制操作的参数形式 |
 | `LIP_CALLBACK_ERROR` | 传本地 fn 名或内联纯 fn，匹配参数数量、返回类型与 accumulator 类型 |
-| `LIP_EFFECT_ERROR` | 将外部调用移到独立 Flow 节点 |
+| `LIP_EFFECT_ERROR` | 在 Flow 中调用外部能力，再把结果传给纯 fn/回调 |
 | `LIP_RECURSION_ERROR` | 给递归环的 fn 标注结果类型并提供终止分支 |
+| `LIP_LOOP_ERROR` | 核对有限 list 来源、循环作用域及 break/continue，return/state 放在循环外 |
+| `LIP_RETURN_ERROR` | 核对 Flow 输出声明、可选输出及 return；纯打印入口省略结果 |
 | `LIP_CHECK_ERROR` | 按 message 修正其他契约错误，再检查 |
 
 位置从 1 开始，column 按 Unicode 字符计数；部分语义错误指向声明或语句，
@@ -141,7 +151,7 @@ inspect 输出依赖图而不执行外部操作；trace 给出节点状态、Tic
 
 ## 本版做了什么，后续如何取舍
 
-当前语法提供 13 个关键字、
+当前语法提供 15 个关键字（含语句式 for/break/continue）、
 19 个字符串操作、34 个列表操作、显式 fail、JSON 检查结果、图/执行观察、
 有输入输出验收的渐进教程。标准库函数名不等同于新增关键字。
 

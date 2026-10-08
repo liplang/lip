@@ -1,0 +1,42 @@
+import go "fmt" as f
+fn 双倍(值: number) -> number { 值 * 2 }
+flow Example(enabled: bool, values: list) -> object {
+    # Only # is a comment; // and */ are arithmetic operators; list.map().
+    when = 7
+    match enabled {
+        true => {
+            for i in range(3) {
+                match i {
+                    1 => { continue },
+                    2 => { break },
+                    _ => { print("运行 # // */ \" {} list.map()", i) }
+                }
+            }
+        },
+        false => {}
+    }
+    return {
+        floor: 7 // 2,
+        logarithm: 8 */ 2,
+        power: 2 ** 3,
+        remainder: 7 % 2,
+        scientific: 1.25e-2,
+        mapped: list.map(values, fn(x) { 双倍(x) }),
+        trimmed: string.trim(" x "),
+        value: when,
+        selection: match enabled {
+            true =>
+                7,
+            false => 0
+        },
+        nested: [
+            {message: "string.trim() # }"},
+            {
+                values: [
+                    1,
+                    2
+                ]
+            }
+        ]
+    }
+}

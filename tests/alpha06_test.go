@@ -29,7 +29,6 @@ func TestAlpha06Diagnostics(t *testing.T) {
 		{`fn add(a: number, b: number) -> number { return a+b } flow Bad() -> number { return fold([], "bad", add) }`, "seed"},
 		{`fn add(a: number, b: number) -> string { return str(a+b) } flow Bad() -> any { return fold([], 0, add) }`, "accumulator requires"},
 		{`fn add(a: number, b: number) -> number { return a+b } flow Bad() -> number { return fold([], 0, add()) }`, "local pure function"},
-		{`import host "fetch" flow Bad() -> object { return {value: fetch()} }`, "Flow binding first"},
 		{`fn recurse(n: number) { return if n==0 { 0 } else { recurse(n-1) } } flow Bad() -> number { return recurse(1) }`, "explicit return type"},
 		{`fn a(n: number) -> number { return b(n) } fn b(n: number) { return a(n) } flow Bad() -> number { return a(1) }`, "explicit return type"},
 		{`flow Bad() -> list { return {} }`, "declared output"},

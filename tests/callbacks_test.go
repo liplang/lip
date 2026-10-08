@@ -12,6 +12,7 @@ import (
 
 func TestInlineCallbackChecksAndDependencies(t *testing.T) {
 	for _, source := range []string{
+		`import python "math" as m; print(list.map([],fn(m){m}))`,
 		`print(list.map(range(4), fn(x) { x * x }))`,
 		`fn square(x:number) {x*x}; print(list.map(range(4),square))`,
 		`fn square(x:number)->number {x*x;}; print(list.map(range(4),square))`,
@@ -50,7 +51,6 @@ func TestInlineCallbackChecksAndDependencies(t *testing.T) {
 	}
 	for _, tc := range []struct{ source, want string }{
 		{`print(list.map([],fn(x,x){x}))`, "duplicate callback parameter"},
-		{`import python "math" as m; print(list.map([],fn(m){m}))`, "module alias"},
 		{`print(list.map([],fn(x){x; x}))`, "one expression"},
 		{`fn recurse(n:number){return list.map(range(n),fn(x){recurse(x)})}; print(recurse(2))`, "explicit return type"},
 	} {

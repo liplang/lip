@@ -1,9 +1,10 @@
-# LIP 0.6.1 字符串库
+# LIP 0.6.3 字符串库
 
 `string.*` 提供 19 个固定纯操作，可直接用于 Flow、本地 fn、if 分支、Map
 元素和 list callback。编译器与 Runtime 共用签名目录，生成代码直接调用运行库。
+显式导入同名外部命名空间时，调用归属于声明的后端；使用 as 可让外部库与核心 string.* 并存。
 
-本文件是 [0.6 规范](ALPHA-0.6-SPEC.md) 的组成部分。循序渐进的完整程序见
+本文件是 [0.6.3 规范](ALPHA-0.6-SPEC.md) 的组成部分。循序渐进的完整程序见
 [教程](TUTORIAL.md)，标签清洗见 [examples/strings.lip](../examples/strings.lip)。
 
 ## 字符与共同规则
