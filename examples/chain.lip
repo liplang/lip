@@ -1,4 +1,4 @@
-// Prototype 2: a multi-level dependency chain.
+# Prototype 2: a multi-level dependency chain.
 flow Chain() -> number {
     a = 10
     b = a * 2

@@ -1,4 +1,4 @@
-// Prototypes 6 and 7: independent consumers followed by a join.
+# Prototypes 6 and 7: independent consumers followed by a join.
 import host "extract_title"
 import host "extract_text"
 import host "extract_links"

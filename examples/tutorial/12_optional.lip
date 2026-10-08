@@ -1,0 +1,7 @@
+fn double(value: number?) -> number? {
+    match value { null => null, _ => value * 2 }
+}
+
+flow Optional(value: number?, label: string?) -> object {
+    return {value: double(value), label: label}
+}

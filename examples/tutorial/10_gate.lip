@@ -1,6 +1,9 @@
 flow Gated(input: number) -> number? {
-    when input > 0 {
-        doubled = input * 2
-        return doubled
+    match input > 0 {
+        true => {
+            doubled = input * 2
+            return doubled
+        },
+        false => {}
     }
 }

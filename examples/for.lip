@@ -1,0 +1,13 @@
+# Statement loops execute operations without building a result list.
+flow Each(stop: number) {
+    for i in range(stop) {
+        match i {
+            2 => { continue },
+            5 => { break },
+            _ => {}
+        }
+        squared = i ** 2
+        print(i, squared)
+    }
+    print("done")
+}

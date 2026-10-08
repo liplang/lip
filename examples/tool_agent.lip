@@ -1,4 +1,4 @@
-// Prototypes 27 and 28: plan once, call independent tools, then synthesize.
+# Prototypes 27 and 28: plan once, call independent tools, then synthesize.
 import host "plan_tools"
 import host "call_weather"
 import host "call_search"

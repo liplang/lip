@@ -1,0 +1,7 @@
+flow Lifetimes(count: number) -> object {
+    values = range(count)
+    size = len(values)
+    total = fold(values, 0, fn(sum, value) { sum + value })
+    print("computed", size, total)
+    return {count: size, total: total}
+}

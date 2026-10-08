@@ -1,8 +1,8 @@
-# 原型覆盖表（Alpha 0.6）
+# 原型覆盖表（Alpha 0.6.3）
 
-下面把早期 30 个原型按 Alpha 0.6 的真实能力分为三类：可直接表达、需要
+下面把早期 30 个原型按 Alpha 0.6.3 的真实能力分为三类：可直接表达、需要
 Go Host Adapter、以及必须等后续语言能力。示例统一使用当前语法：Flow、
-单赋值绑定、显式输入/输出类型、运算符、`when` 和单一 `return`。
+单赋值绑定、显式输入/输出类型、运算符，以及 `match` 分支选值和执行。
 
 核心入口新增 `core.lip`（结构化报告）、`range.lip`（区间/平方和）、
 `tree.lip`（纯递归）、`lists.lip`（分组/过滤/排序/转置）。它们不需要 adapter。
@@ -15,16 +15,17 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 1 Hello Data | `hello.lip` | 依赖、表达式、字符串连接 |
 | 2 多级依赖 | `chain.lip` | `a → b → c → d` |
 | 3 两条独立计算 | `fanout.lip` | 独立节点可自动调度 |
-| 4 条件依赖 | `gated.lip` | `when` 门控，假分支为 `Skipped` |
+| 4 条件依赖 | `gated.lip` | `match` 门控，假分支为 `Skipped` |
 | 5 条件值选择 | `select.lip` | `if condition { a } else { b }`，只选择值 |
 | 6 Fan-out | `fanout_fanin.lip` | 多个消费者 |
 | 7 Fan-in | `fanout_fanin.lip` | `combine` 等待多个依赖 |
 | 8 Map / 批量并行 | `map.lip` | 运行时展开 Map，结果保持输入顺序 |
 | 9 Map + Reduce | `core.lip` / `range.lip` / `lists.lip` | Map、fold、scan/sum/product，无需 Host |
+| 16 有限集合循环 | `for.lip` | 顺序 for、独立迭代作用域、match 和 break/continue；不构造结果列表 |
 | 11 网络请求 | `async_join.lip` | Host 可返回 `Await` |
 | 12 两个异步请求 | `async_join.lip` | 自动等待并 Join |
 | 19 HTTP Handler | `http_handler.lip` | Web 能力由 Host 提供 |
-| 20 并行数据库查询 | `db_parallel.lip` | 独立查询可注册为 Pure |
+| 20 并行数据库查询 | `db_parallel.lip` | 独立读取注册为 ReadOnly，可并行且每 Tick 重读 |
 | 22 文件 Pipeline | `file_pipeline.lip` | 顺序依赖和门控 |
 | 24 科学计算 DAG | `science_dag.lip` | 两条分支自动汇合 |
 | 27 Tool Agent | `tool_agent.lip` | 计划、工具、汇总 |
@@ -52,8 +53,7 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 原型 | 缺少的核心能力 |
 | --- | --- |
 | 15 外部状态变化 | Host 驱动 Tick/SetState 已支持；仍缺事件/流语法 |
-| 16 普通循环 | 普通 `for` / `while` 仍未进入语言核心 |
-| 18 Agent retry loop | 有界 Retry/Feedback 和 State 已支持；仍缺普通循环/动态控制流 |
+| 18 Agent retry loop | 有界 Retry/Feedback、有限 for 和 State 已支持；while、可变状态与无界循环尚未设计 |
 | 30 完整 Agent Workflow | Map、Feedback、State、Retry 已支持；事件/流及动态控制组合待设计 |
 
 ## 当前 Runtime 能力
@@ -62,6 +62,7 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | --- | --- | --- |
 | 持久 Flow / State | `NewInstance`, `Tick`, `SetState` | 见 `state.lip` |
 | 增量重算 | Instance dependency cache | 纯节点可复用 |
+| 临时值引用释放 | 生成图的消费者计数 | 见 [lifetimes.lip](lifetimes.lip) 与[生命周期契约](../docs/VALUE-LIFETIMES.md)；Go GC 负责回收 |
 | Cancellation | `context.Context` | 状态传播为 `Cancelled` / `Skipped` |
 | Effect / Ordering | `RegisterReadOnly`, `Register`, `NodeSpec.After` | 轻量 Runtime metadata |
 
@@ -75,5 +76,5 @@ for f in examples/*.lip tests/conformance/*.lip; do
 done
 ```
 
-这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.6 已落实 Map、State/Tick、Retry、Feedback
-和 Runtime Effect/Ordering；事件、流和普通循环仍由后续版本处理。
+这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.6.3 已落实 Map、State/Tick、Retry、Feedback
+和 Runtime Effect/Ordering，以及有限 for/break/continue；事件、流、while 和可变循环变量由后续版本处理。

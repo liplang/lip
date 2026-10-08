@@ -1,6 +1,6 @@
-// intent: 输入若干行文本；每行是“部门 金额”，忽略空行。
-// accept: 同一部门合并金额，按部门首次出现顺序输出；无有效行输出空报告。
-// error: 每个非空行必须恰有两项；金额必须是有限十进制数。
+# intent: 输入若干行文本；每行是“部门 金额”，忽略空行。
+# accept: 同一部门合并金额，按部门首次出现顺序输出；无有效行输出空报告。
+# error: 每个非空行必须恰有两项；金额必须是有限十进制数。
 fn nonempty(line: string) -> bool { return len(string.trim(line)) > 0 }
 fn parse_fields(fields: list) -> object {
     return if len(fields) == 2 {

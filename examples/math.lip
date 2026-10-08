@@ -1,0 +1,13 @@
+# Eight numeric operators; // rounds down, ** associates to the right.
+flow Math() -> object {
+    return {
+        add: 2 + 3,
+        subtract: 7 - 2,
+        multiply: 3 * 4,
+        divide: 7 / 2,
+        floor_divide: 7 // 2,
+        remainder: 7 % 2,
+        power: 2 ** 3,
+        logarithm: 8 */ 2
+    }
+}

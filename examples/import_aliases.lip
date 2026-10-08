@@ -1,0 +1,11 @@
+# Go namespaces, Host namespaces and individual Host operations all accept as.
+# Build as a library and register the canonical names in the Go host.
+import go "fmt" as f
+import host "service.*" as s
+import host "service.double" as double
+
+flow Aliases(value: number) -> string {
+    message = f.Sprintf("doubled=%v", double(value))
+    s.emit(message)
+    return message
+}

@@ -1,4 +1,5 @@
-// Prototype 20: independent database reads joined into one response.
+# Prototype 20: independent database reads joined into one response.
+# Register live database queries as ReadOnly so each Tick reads current data.
 import host "query_user"
 import host "query_orders"
 import host "query_recommendations"

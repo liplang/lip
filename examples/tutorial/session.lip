@@ -7,11 +7,14 @@ fn verify(candidate: number) -> bool { return candidate >= 3 }
 
 flow Session(input: number, enabled: bool) -> object? {
     count = state(0)
-    when enabled {
-        fetched = retry(fetch(input), 3)
-        candidate = feedback(start(fetched), revise, verify, 3)
-        report = {count: count, result: candidate}
-        write_report(report)
-        return report
+    match enabled {
+        true => {
+            fetched = retry(fetch(input), 3)
+            candidate = feedback(start(fetched), revise, verify, 3)
+            report = {count: count, result: candidate}
+            write_report(report)
+            return report
+        },
+        false => {}
     }
 }

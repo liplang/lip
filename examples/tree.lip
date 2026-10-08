@@ -1,4 +1,4 @@
-// Each node has value, left and right; absent children are explicit null.
+# Each node has value, left and right; absent children are explicit null.
 fn sum_tree(tree: object) -> number {
     return tree.value
         + if tree.left == null { 0 } else { sum_tree(tree.left) }
