@@ -21,12 +21,13 @@ func (p *Parser) Parse() (*ast.Program, error) {
 		return nil, err
 	}
 	var dependencies []ast.Dependency
-	for p.peek().Kind == token.Require {
+	for p.peek().Kind == token.Import {
 		dependency, err := p.parseDependency()
 		if err != nil {
 			return nil, err
 		}
 		dependencies = append(dependencies, dependency)
+		p.match(token.Semicolon)
 		if err := p.checkDirective(); err != nil {
 			return nil, err
 		}
@@ -38,26 +39,41 @@ func (p *Parser) Parse() (*ast.Program, error) {
 			return nil, err
 		}
 		functions = append(functions, fn)
+		p.match(token.Semicolon)
 		if err := p.checkDirective(); err != nil {
 			return nil, err
 		}
 	}
-	flow, err := p.parseFlow()
+	var flow *ast.Flow
+	var err error
+	if p.peek().Kind == token.Flow {
+		flow, err = p.parseFlow()
+	} else {
+		pos := p.peek().Pos
+		var body []ast.Stmt
+		body, err = p.parseStatementList(token.EOF)
+		flow = &ast.Flow{Name: "main", ParamTypes: map[string]string{}, ReturnType: "void", Body: body, Pos: pos}
+	}
 	if err != nil {
 		return nil, err
 	}
+	p.match(token.Semicolon)
 	if err := p.checkDirective(); err != nil {
 		return nil, err
 	}
 	if p.peek().Kind != token.EOF {
-		return nil, p.errorf(p.peek(), "expected end of file")
+		return nil, p.errorf(p.peek(), "expected end of file; an explicit flow cannot be mixed with top-level statements or another flow")
 	}
 	return &ast.Program{Functions: functions, Flow: flow, Dependencies: dependencies}, nil
 }
 
 func (p *Parser) checkDirective() error {
-	if p.peek().Kind == token.Ident && (p.peek().Text == "requires" || p.peek().Text == "import") {
-		return p.errorf(p.peek(), "unknown dependency directive %q; use singular %q", p.peek().Text, "require")
+	if p.peek().Kind == token.Ident && (p.peek().Text == "requires" || p.peek().Text == "require") && p.i+1 < len(p.tokens) && p.tokens[p.i+1].Kind == token.Ident {
+		kind := p.tokens[p.i+1].Text
+		if kind != "python" && kind != "host" && kind != "go" {
+			return nil
+		}
+		return p.errorf(p.peek(), "dependency directive %q has been replaced by %q; use import python, import host or import go", p.peek().Text, "import")
 	}
 	return nil
 }
@@ -67,18 +83,21 @@ func (p *Parser) parseType(optional bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !validTypeName(typ.Text) {
-		return "", p.errorf(typ, "unknown type %q", typ.Text)
+	if !validTypeName(typ.Text) && !(optional && typ.Text == "void") {
+		return "", p.errorf(typ, "unknown type %q; use any, number, bool, string, list or object (void is only for Flow output)", typ.Text)
 	}
 	name := typ.Text
 	if optional && p.match(token.Question) {
+		if name == "void" {
+			return "", p.errorf(typ, "void cannot be optional; omit the output declaration for a Flow without a result")
+		}
 		name += "?"
 	}
 	return name, nil
 }
 
 func (p *Parser) parseDependency() (ast.Dependency, error) {
-	kw, err := p.expect(token.Require)
+	kw, err := p.expect(token.Import)
 	if err != nil {
 		return ast.Dependency{}, err
 	}
@@ -93,12 +112,23 @@ func (p *Parser) parseDependency() (ast.Dependency, error) {
 	}
 	spec, err := p.expect(token.String)
 	if err != nil {
-		return ast.Dependency{}, err
+		return ast.Dependency{}, p.errorf(p.peek(), "expected string after import %s; put the dependency name in double quotes", kind.Text)
 	}
 	if strings.TrimSpace(spec.Text) == "" {
 		return ast.Dependency{}, p.errorf(spec, "dependency spec cannot be empty")
 	}
-	return ast.Dependency{Kind: kind.Text, Spec: spec.Text, Pos: kw.Pos}, nil
+	dependency := ast.Dependency{Kind: kind.Text, Spec: spec.Text, Pos: kw.Pos}
+	if p.match(token.As) {
+		if kind.Text != "python" {
+			return ast.Dependency{}, p.errorf(kind, "module aliases are supported by import python; Host/Go operations keep their registered names")
+		}
+		alias, err := p.expect(token.Ident)
+		if err != nil {
+			return ast.Dependency{}, p.errorf(p.peek(), "expected a module alias after as; choose one identifier, e.g. np")
+		}
+		dependency.Alias = alias.Text
+	}
+	return dependency, nil
 }
 
 func (p *Parser) parseFunction() (*ast.Function, error) {
@@ -121,20 +151,27 @@ func (p *Parser) parseFunction() (*ast.Function, error) {
 			return nil, err
 		}
 	}
-	if _, err = p.expect(token.LBrace); err != nil {
+	result, err := p.parseFunctionBody()
+	if err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(token.Return); err != nil {
+	return &ast.Function{Name: name.Text, Params: params, ParamTypes: paramTypes, ReturnType: returnType, Return: result, Pos: kw.Pos}, nil
+}
+
+func (p *Parser) parseFunctionBody() (ast.Expr, error) {
+	if _, err := p.expect(token.LBrace); err != nil {
 		return nil, err
 	}
+	p.match(token.Return)
 	result, err := p.parseExpr(0)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = p.expect(token.RBrace); err != nil {
-		return nil, err
+	p.match(token.Semicolon)
+	if _, err := p.expect(token.RBrace); err != nil {
+		return nil, p.errorf(p.peek(), "fn body needs one expression, optionally preceded by return; compose pure functions for more complex calculations")
 	}
-	return &ast.Function{Name: name.Text, Params: params, ParamTypes: paramTypes, ReturnType: returnType, Return: result, Pos: kw.Pos}, nil
+	return result, nil
 }
 
 func (p *Parser) parseFlow() (*ast.Flow, error) {
@@ -153,14 +190,15 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 	if err != nil {
 		return nil, err
 	}
-	returnType := ""
+	returnType := "void"
 	if p.match(token.Arrow) {
 		returnType, err = p.parseType(true)
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		return nil, p.errorf(p.peek(), "flow %q needs an explicit output type; add -> Type", name.Text)
+	}
+	if p.peek().Kind == token.Ident && (validTypeName(p.peek().Text) || p.peek().Text == "void") {
+		return nil, p.errorf(p.peek(), "output type needs '->' before it; write -> %s, or omit the output declaration for no result", p.peek().Text)
 	}
 	if _, err := p.expect(token.LBrace); err != nil {
 		return nil, err
@@ -173,6 +211,10 @@ func (p *Parser) parseFlow() (*ast.Flow, error) {
 }
 
 func (p *Parser) parseParameters() ([]string, map[string]string, error) {
+	return p.parseParameterList(false)
+}
+
+func (p *Parser) parseParameterList(inline bool) ([]string, map[string]string, error) {
 	if _, err := p.expect(token.LParen); err != nil {
 		return nil, nil, err
 	}
@@ -186,12 +228,14 @@ func (p *Parser) parseParameters() ([]string, map[string]string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if !p.match(token.Colon) {
+		typ := "any"
+		if p.match(token.Colon) {
+			typ, err = p.parseType(false)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else if !inline {
 			return nil, nil, p.errorf(param, "parameter %q needs an explicit type; use : any for dynamic values", param.Text)
-		}
-		typ, err := p.parseType(false)
-		if err != nil {
-			return nil, nil, err
 		}
 		params = append(params, param.Text)
 		paramTypes[param.Text] = typ
@@ -200,6 +244,9 @@ func (p *Parser) parseParameters() ([]string, map[string]string, error) {
 		}
 		if _, err := p.expect(token.Comma); err != nil {
 			return nil, nil, err
+		}
+		if p.match(token.RParen) {
+			return params, paramTypes, nil
 		}
 	}
 }
@@ -214,18 +261,50 @@ func validTypeName(name string) bool {
 }
 
 func (p *Parser) parseStatements() ([]ast.Stmt, error) {
+	return p.parseStatementList(token.RBrace)
+}
+
+func (p *Parser) parseStatementList(end token.Kind) ([]ast.Stmt, error) {
 	var out []ast.Stmt
-	for p.peek().Kind != token.RBrace && p.peek().Kind != token.EOF {
+	for p.peek().Kind != end && p.peek().Kind != token.EOF {
+		if end == token.EOF {
+			if err := p.checkDirective(); err != nil {
+				return nil, err
+			}
+			if p.peek().Kind == token.Flow {
+				return nil, p.errorf(p.peek(), "an explicit flow cannot be mixed with top-level statements; use one entry style per file")
+			}
+			if p.peek().Kind == token.Fn || p.peek().Kind == token.Import {
+				return nil, p.errorf(p.peek(), "import and fn declarations must precede top-level statements")
+			}
+		}
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, stmt)
+		if err := p.statementEnd(end); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := p.expect(token.RBrace); err != nil {
-		return nil, err
+	if end != token.EOF {
+		if _, err := p.expect(end); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
+}
+
+// A statement may end at a newline, an explicit semicolon, or the end of its
+// block/file. Whitespace alone cannot separate statements on the same line.
+func (p *Parser) statementEnd(end token.Kind) error {
+	if p.match(token.Semicolon) || p.peek().Kind == end || p.peek().Kind == token.EOF {
+		return nil
+	}
+	if p.peek().Pos.Line > p.tokens[p.i-1].Pos.Line {
+		return nil
+	}
+	return p.errorf(p.peek(), "statements on the same line must be separated by ';'; add ';' or start a new line")
 }
 
 func (p *Parser) parseStatement() (ast.Stmt, error) {
@@ -246,6 +325,9 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 		return &ast.WhenStmt{Cond: cond, Body: body, Pos: pos}, nil
 	case token.Return:
 		pos := p.next().Pos
+		if p.peek().Kind == token.RBrace || p.peek().Kind == token.EOF || p.peek().Kind == token.Semicolon {
+			return &ast.ReturnStmt{Pos: pos}, nil
+		}
 		expr, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
@@ -263,16 +345,20 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 			}
 			return &ast.BindStmt{Name: name.Text, Expr: expr, Pos: name.Pos}, nil
 		}
+		fallthrough
+	default:
+		start := p.peek()
+		if start.Kind == token.Semicolon {
+			return nil, p.errorf(start, "empty statement; remove the extra ';'")
+		}
 		expr, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
 		}
 		if _, ok := expr.(*ast.CallExpr); !ok {
-			return nil, p.errorf(p.peek(), "only a call can be used as a standalone statement")
+			return nil, p.errorf(start, "an expression alone does not display a value in a file; use print(expression) or name = expression, or enter it directly in lipc repl")
 		}
 		return &ast.ExprStmt{Expr: expr, Pos: tPos(expr)}, nil
-	default:
-		return nil, p.errorf(p.peek(), "expected binding, when or return")
 	}
 }
 
@@ -334,6 +420,23 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		expr = &ast.LiteralExpr{Value: false, Raw: t.Text, Pos: t.Pos}
 	case token.Null:
 		expr = &ast.LiteralExpr{Value: nil, Raw: t.Text, Pos: t.Pos}
+	case token.Fn:
+		params, types, err := p.parseParameterList(true)
+		if err != nil {
+			return nil, err
+		}
+		resultType := ""
+		if p.match(token.Arrow) {
+			resultType, err = p.parseType(false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		body, err := p.parseFunctionBody()
+		if err != nil {
+			return nil, err
+		}
+		expr = &ast.LambdaExpr{Params: params, ParamTypes: types, ReturnType: resultType, Return: body, Pos: t.Pos}
 	case token.LBrace:
 		fields := []ast.ObjectField{}
 		seen := map[string]bool{}
@@ -360,6 +463,9 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 				}
 				if _, err := p.expect(token.Comma); err != nil {
 					return nil, err
+				}
+				if p.match(token.RBrace) {
+					break
 				}
 			}
 		}
@@ -428,6 +534,9 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			if _, err := p.expect(token.Comma); err != nil {
 				return nil, err
 			}
+			if p.match(token.RBracket) {
+				break
+			}
 			item, err := p.parseExpr(0)
 			if err != nil {
 				return nil, err
@@ -445,7 +554,13 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 		}
 		return p.parsePostfix(expr)
 	default:
-		return nil, p.errorf(t, "expected expression")
+		if t.Kind == token.EOF {
+			if p.i > 1 {
+				return nil, p.errorf(t, "expected expression after %q, got end of input", p.tokens[p.i-2].Text)
+			}
+			return nil, p.errorf(t, "expected expression, got end of input")
+		}
+		return nil, p.errorf(t, "expected expression, got %s %q", t.Kind, t.Text)
 	}
 	return p.parsePostfix(expr)
 }
@@ -472,6 +587,9 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 					}
 					if _, err := p.expect(token.Comma); err != nil {
 						return nil, err
+					}
+					if p.match(token.RParen) {
+						break
 					}
 				}
 			}
@@ -525,6 +643,8 @@ func tPos(expr ast.Expr) token.Pos {
 		return e.Pos
 	case *ast.CallExpr:
 		return e.Pos
+	case *ast.LambdaExpr:
+		return e.Pos
 	case *ast.BinaryExpr:
 		return e.Pos
 	case *ast.IfExpr:
@@ -553,10 +673,13 @@ func (p *Parser) match(kind token.Kind) bool {
 }
 func (p *Parser) expect(kind token.Kind) (token.Token, error) {
 	if p.peek().Kind != kind {
-		return token.Token{}, p.errorf(p.peek(), "expected %s, got %s", kind, p.peek().Kind)
+		if p.peek().Kind == token.EOF {
+			return token.Token{}, p.errorf(p.peek(), "expected %s, got end of input", kind)
+		}
+		return token.Token{}, p.errorf(p.peek(), "expected %s, got %s %q", kind, p.peek().Kind, p.peek().Text)
 	}
 	return p.next(), nil
 }
 func (p *Parser) errorf(t token.Token, format string, args ...any) error {
-	return fmt.Errorf("%d:%d: %s", t.Pos.Line, t.Pos.Column, fmt.Sprintf(format, args...))
+	return &Error{Pos: t.Pos, Message: fmt.Sprintf(format, args...), Incomplete: t.Kind == token.EOF}
 }

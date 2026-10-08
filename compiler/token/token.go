@@ -18,7 +18,7 @@ const (
 	In
 	If
 	Else
-	Require
+	Import
 	Arrow
 	Question
 	Assign
@@ -44,6 +44,8 @@ const (
 	And
 	Or
 	Not
+	Semicolon
+	As
 )
 
 type Pos struct {
@@ -62,10 +64,12 @@ func (k Kind) String() string {
 	names := map[Kind]string{
 		EOF: "EOF", Ident: "identifier", Number: "number", String: "string",
 		True: "true", False: "false", Null: "null", Flow: "flow", Fn: "fn", Return: "return", When: "when",
-		If: "if", Else: "else", Require: "require", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
+		If: "if", Else: "else", Import: "import", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
 		LBrace: "{", RBrace: "}", LBracket: "[", RBracket: "]", Comma: ",", Colon: ":", Dot: ".", Plus: "+", Minus: "-", Star: "*", Slash: "/",
 		Equal: "==", NotEqual: "!=", Greater: ">", GreaterEqual: ">=", Less: "<", LessEqual: "<=",
 		And: "&&", Or: "||", Not: "!", Arrow: "->", Question: "?",
+		Semicolon: ";",
+		As:        "as",
 	}
 	if s, ok := names[k]; ok {
 		return s

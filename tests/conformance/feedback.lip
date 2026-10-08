@@ -1,6 +1,6 @@
-require host "start"
-require host "revise"
-require host "verify"
+import host "start"
+import host "revise"
+import host "verify"
 
 flow Verified(input: string) -> any {
     result = feedback(start(input), revise, verify, 3)

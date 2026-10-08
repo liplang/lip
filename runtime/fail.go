@@ -16,7 +16,7 @@ func Fail(ctx context.Context, message Value) (Value, error) {
 	}
 	text, ok := message.(string)
 	if !ok {
-		return nil, fmt.Errorf("fail expects string, got %T", message)
+		return nil, fmt.Errorf("fail expects string, got %s", TypeName(message))
 	}
 	return nil, fmt.Errorf("fail: %s", text)
 }

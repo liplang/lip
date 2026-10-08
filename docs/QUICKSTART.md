@@ -95,9 +95,12 @@ lipc run examples/range.lip 5
 # {"total":30,"values":[0,1,4,9,16]}
 ```
 
-`range(start, end[, step])` 使用半开区间，允许负步长；0 步长或超过 1,000,000
-个元素报错。Map 推导式先绑定区间；fold/list.* 可嵌套纯表达式。`fold(list, seed, fn)`
-按输入顺序归约，fn 是本地二参数纯函数；空列表返回 seed。
+`range(n)` 等价于 `range(0, n)`；`range(start, end[, step])` 使用半开区间，允许负步长；0 步长或超过 1,000,000
+个元素报错。Map、fold/list.* 可直接组合纯表达式，不需要中间绑定，例如
+`list.sum([x * x for x in range(1, 4)])` 得到 `14`。推导式也可在 fn 或条件分支中使用。
+独立 Map 保留有界并行，嵌套推导式顺序执行。`fold(list, seed, fn)`
+按输入顺序归约，回调是本地或内联二参数纯函数；空列表返回 seed，例如
+`fold(range(5), 0, fn(total, x) { total + x })` 得到 `10`。
 
 ## 4. 分组、合并和转置
 
@@ -109,8 +112,9 @@ list.transpose([[1, 2], [3, 4]])
 list.partition([1, 2, 3], 2, 1)
 ```
 
-callback 使用本地纯函数：`list.group_by(rows, department)`、
-`list.filter(rows, positive)`、`list.sort_by(rows, amount)`。完整程序见
+callback 使用本地纯函数名或内联 fn：`list.group_by(rows, fn(row) { row.department })`、
+`list.filter(rows, fn(row) { row.amount > 0 })`、`list.sort_by(rows, fn(row) { row.amount })`。
+参数类型可省略，单表达式 fn 的 return 也可省略。完整程序见
 [examples/lists.lip](../examples/lists.lip)，签名和边界见
 [LIST-LIBRARY.md](LIST-LIBRARY.md)。
 
@@ -170,7 +174,7 @@ lipc build examples/core.lip
 `.\Report.exe '[1,2,3]'` 运行。用 `--output 路径` 可以另选文件名或输出目录。
 Go 源码生成与库模式见[编译器文档](COMPILER.md#两种生成模式)。
 
-外部能力通过 `require` 声明。Host/Go 程序使用生成库和 adapter；Python
+外部能力通过 `import` 声明。Host/Go 程序使用生成库和 adapter；Python
 程序使用常驻 Worker。详见
 [COMPILER.md](COMPILER.md)、[Host 示例](../examples/host_adapter) 和
 [Python 集成](PYTHON-INTEGRATION.md)。

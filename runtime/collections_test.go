@@ -14,6 +14,8 @@ func TestRangeBoundsAndCancellation(t *testing.T) {
 		args []Value
 		want []Value
 	}{
+		{[]Value{4}, []Value{float64(0), float64(1), float64(2), float64(3)}},
+		{[]Value{0}, []Value{}}, {[]Value{-3}, []Value{}},
 		{[]Value{0, 5}, []Value{float64(0), float64(1), float64(2), float64(3), float64(4)}},
 		{[]Value{5, -1, -2}, []Value{float64(5), float64(3), float64(1)}},
 		{[]Value{1, 1}, []Value{}}, {[]Value{5, 0}, []Value{}},
@@ -25,7 +27,7 @@ func TestRangeBoundsAndCancellation(t *testing.T) {
 			t.Fatalf("range(%v)=%v, %v", tc.args, got, err)
 		}
 	}
-	for _, args := range [][]Value{{1}, {0, 3, 0}, {0, 1.5}, {0, math.Inf(1)}, {0, 9007199254740992.0}, {0, MaxRangeLength + 1}, {"0", 3}} {
+	for _, args := range [][]Value{{}, {0, 1, 2, 3}, {0, 3, 0}, {0, 1.5}, {0, math.Inf(1)}, {0, 9007199254740992.0}, {0, MaxRangeLength + 1}, {"0", 3}, {1.5}, {MaxRangeLength + 1}} {
 		if _, err := Range(context.Background(), args); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
@@ -62,6 +64,94 @@ func TestLocalCallDepthAndCancellation(t *testing.T) {
 	cancel()
 	if _, err := EnterFunction(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled local call: %v", err)
+	}
+}
+
+func TestMapValuesOrderFailuresAndCancellation(t *testing.T) {
+	ctx := context.Background()
+	visited := []int{}
+	value, err := MapValues(ctx, []int{3, 1, 2}, func(_ context.Context, item Value) Result {
+		visited = append(visited, item.(int))
+		return Ready(item)
+	})
+	if err != nil || !reflect.DeepEqual(visited, []int{3, 1, 2}) || !reflect.DeepEqual(value, []Value{3, 1, 2}) {
+		t.Fatalf("order: %v %v %v", visited, value, err)
+	}
+	calls := 0
+	mapper := func(context.Context, Value) Result { calls++; return Ready(0) }
+	if value, err := MapValues(ctx, []Value{}, mapper); err != nil || !reflect.DeepEqual(value, []Value{}) || calls != 0 {
+		t.Fatalf("empty: %v %v", value, err)
+	}
+	for _, source := range []Value{3, nil, "abc", make([]Value, MaxListLength+1)} {
+		if value, err := MapValues(ctx, source, mapper); value != nil || err == nil || calls != 0 {
+			t.Fatalf("bad source: %v %v, calls=%d", value, err, calls)
+		}
+	}
+	sentinel := errors.New("element failed")
+	value, err = MapValues(ctx, []int{0, 1, 2}, func(_ context.Context, item Value) Result {
+		if item == 1 {
+			return Failed(sentinel)
+		}
+		return Ready(item)
+	})
+	if value != nil || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "element 1") {
+		t.Fatalf("failed element: %v %v", value, err)
+	}
+	cancelCtx, cancel := context.WithCancel(ctx)
+	value, err = MapValues(cancelCtx, []int{0, 1, 2}, func(context.Context, Value) Result {
+		calls++
+		cancel()
+		return Ready(0)
+	})
+	if value != nil || !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("cancelled: %v %v, calls=%d", value, err, calls)
+	}
+	if _, err := MapValues(cancelCtx, []Value{}, mapper); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancelled empty source succeeded", err)
+	}
+}
+
+func TestMapExpressionSourceIsEvaluatedOnceAfterGate(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		calls := 0
+		graph := NewGraph()
+		graph.Add(NodeSpec{Name: "enabled", Effect: EffectPure, Eval: func(context.Context, map[string]Value) Result {
+			return Ready(enabled)
+		}})
+		graph.Add(NodeSpec{Name: "mapped", Gates: []string{"enabled"}, Effect: EffectPure, Output: true,
+			Gate: func(values map[string]Value) (bool, error) { return Bool(values["enabled"]) },
+			Map: &MapSpec{
+				SourceEval: func(ctx context.Context, _ map[string]Value) Result {
+					calls++
+					value, err := Range(ctx, []Value{1, 4})
+					if err != nil {
+						return Failed(err)
+					}
+					return Ready(value)
+				},
+				Eval: func(_ context.Context, item Value, _ map[string]Value) Result { return Ready(item) },
+			},
+		})
+		value, _, err := graph.RunParallel(context.Background(), DefaultHost(), nil, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if enabled {
+			if calls != 1 || !reflect.DeepEqual(value, []Value{float64(1), float64(2), float64(3)}) {
+				t.Fatalf("enabled source: %v, calls=%d", value, calls)
+			}
+		} else if calls != 0 || value != nil {
+			t.Fatalf("disabled source evaluated: %v, calls=%d", value, calls)
+		}
+	}
+	sentinel := errors.New("source failed")
+	called := false
+	result := evaluateMap(context.Background(), &MapSpec{
+		SourceEval: func(context.Context, map[string]Value) Result { return Failed(sentinel) },
+		Eval:       func(context.Context, Value, map[string]Value) Result { called = true; return Ready(0) },
+	}, nil, 2)
+	if !errors.Is(result.Err, sentinel) || !strings.Contains(result.Err.Error(), "map source") || called {
+		t.Fatalf("failed source ran elements: %+v, called=%v", result, called)
 	}
 }
 

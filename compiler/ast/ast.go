@@ -11,9 +11,10 @@ type Program struct {
 }
 
 type Dependency struct {
-	Kind string // "python", "go", or "host"
-	Spec string
-	Pos  token.Pos
+	Kind  string // "python", "go", or "host"
+	Spec  string
+	Alias string // Optional local name for a Python module.
+	Pos   token.Pos
 }
 
 type Function struct {
@@ -93,9 +94,25 @@ type CallExpr struct {
 	Name string
 	Args []Expr
 	Pos  token.Pos
+	// Explicit Python imports keep their identity after alias resolution, even
+	// when the module name also names a LIP standard-library namespace.
+	Python bool
 }
 
 func (*CallExpr) exprNode() {}
+
+// LambdaExpr is an inline pure collection callback. Omitted parameter types
+// are any; free variables are immutable captures and remain graph dependencies.
+type LambdaExpr struct {
+	Params             []string
+	ParamTypes         map[string]string
+	ReturnType         string
+	InferredReturnType string
+	Return             Expr
+	Pos                token.Pos
+}
+
+func (*LambdaExpr) exprNode() {}
 
 type BinaryExpr struct {
 	Op          string
@@ -141,9 +158,8 @@ type ObjectField struct {
 
 func (*ObjectExpr) exprNode() {}
 
-// ComprehensionExpr is the Alpha 0.2 one-shot dynamic map form:
-// [Element for Variable in Source]. The compiler keeps this as one graph node
-// and the runtime expands its execution instances after Source is available.
+// ComprehensionExpr is [Element for Variable in Source]. Standalone maps use
+// one dynamic graph node; composed maps evaluate inside their expression.
 type ComprehensionExpr struct {
 	Element  Expr
 	Variable string

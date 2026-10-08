@@ -19,12 +19,17 @@ lipc version
 ```text
 为 LIP Alpha 0.6.1 写一个完整 .lip 文件。
 采用 Rust 风格块式 if；snake_case 命名；所有参数与结果明确标注类型。
-每个文件一个 Flow，以一个 return 给出结果。fn 用单个返回表达式描述纯变换。
+每个文件一个入口：显式 Flow 或一组顶层语句。有返回值时声明输出类型并用一个 return 给出结果；
+只做打印等操作时可以省略整个 Flow 外壳。fn 用单个返回表达式描述纯变换。
+执行语句用换行分隔，同一行的多条语句必须用分号分隔。
 绑定不可变，先定义后使用。操作名称和签名参照当前标准库文档。
 纯数据处理使用 string.*、list.*、range、fold 或本地纯 fn。
-Map 推导式的 source 必须先绑定；list.map 可组合任意纯列表表达式。
-callback 传本文件的 fn 名。条件选值用 if，执行资格用 when。
-外部能力用 require 声明，操作先单独绑定为 Flow 节点；Host 由 Go 注册。
+Map 推导式、fold/list.* 可组合纯列表表达式，无需先绑定 source。
+推导式可嵌套在参数、fn 和条件表达式中；独立 Map 有界并行，嵌套推导式顺序求值。
+callback 传本文件的纯 fn 名或内联 fn(x) { expression }；内联参数默认 any，可显式标注。
+单表达式 fn 的 return 可省略。内联捕获是图依赖，回调不得隐藏外部调用。
+条件选值用 if，执行资格用 when。
+外部能力用 import 声明，操作先单独绑定为 Flow 节点；Host 由 Go 注册。
 用 // intent: 写意图，// accept: 写可复现输入/期望，// error: 写错误契约。
 先执行 lipc check --json，再验证正常、空输入与错误输入。
 根据诊断修正表达式和类型，并再次运行原有验收样例。
@@ -104,9 +109,10 @@ AI 应先确定意图：这里需要修正输入类型，还是确实需要 `str
 | `LIP_LEX_ERROR` / `LIP_SYNTAX_ERROR` | 核对字符串转义、括号、参数与输出声明 |
 | `LIP_NAME_ERROR` | 核对拼写、定义顺序和 when 作用域 |
 | `LIP_UNKNOWN_OPERATION` | 查标准库目录，使用实际支持的名称 |
-| `LIP_DEPENDENCY_ERROR` | 明确真实外部操作及其 require/adapter |
+| `LIP_DEPENDENCY_ERROR` | 明确真实外部操作及其 import/adapter |
 | `LIP_TYPE_ERROR` | 核对实际类型与显式转换 |
-| `LIP_CALLBACK_ERROR` | 传本地 fn 名并匹配参数数量、返回类型 |
+| `LIP_ARGUMENT_ERROR` | 核对调用签名与实际参数数量，或控制操作的参数形式 |
+| `LIP_CALLBACK_ERROR` | 传本地 fn 名或内联纯 fn，匹配参数数量、返回类型与 accumulator 类型 |
 | `LIP_EFFECT_ERROR` | 将外部调用移到独立 Flow 节点 |
 | `LIP_RECURSION_ERROR` | 给递归环的 fn 标注结果类型并提供终止分支 |
 | `LIP_CHECK_ERROR` | 按 message 修正其他契约错误，再检查 |
@@ -135,7 +141,7 @@ inspect 输出依赖图而不执行外部操作；trace 给出节点状态、Tic
 
 ## 本版做了什么，后续如何取舍
 
-0.6.1 提供 12 个语法关键字、
+当前语法提供 13 个关键字、
 19 个字符串操作、34 个列表操作、显式 fail、JSON 检查结果、图/执行观察、
 有输入输出验收的渐进教程。标准库函数名不等同于新增关键字。
 

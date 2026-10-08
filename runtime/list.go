@@ -66,12 +66,12 @@ func ListCall(ctx context.Context, name string, args []Value, callback Op) (resu
 	provided := len(args)
 	if spec.Callback >= 0 {
 		if callback == nil {
-			return nil, fmt.Errorf("needs a local pure callback")
+			return nil, fmt.Errorf("needs a pure callback")
 		}
 		provided++
 	}
 	if provided < spec.MinArgs || spec.MaxArgs >= 0 && provided > spec.MaxArgs {
-		return nil, fmt.Errorf("invalid argument count: got %d", provided)
+		return nil, argumentCountError(spec.MinArgs, spec.MaxArgs, provided)
 	}
 	for index, arg := range args {
 		if err := CheckType(arg, spec.TypeAt(index)); err != nil {
@@ -437,7 +437,7 @@ func listTranspose(ctx context.Context, items []Value) (Value, error) {
 		}
 		row, err := listInput(item)
 		if err != nil {
-			return nil, fmt.Errorf("row %d must be a list", index)
+			return nil, fmt.Errorf("row %d: %w", index, err)
 		}
 		if index == 0 {
 			cols = len(row)
@@ -628,12 +628,12 @@ func listSort(ctx context.Context, name string, items []Value, callback Op) (Val
 		} else {
 			number, err := Number(key)
 			if err != nil {
-				return nil, fmt.Errorf("sort key at element %d must be number or string", index)
+				return nil, fmt.Errorf("sort key at element %d must be number or string, got %s: %w", index, TypeName(key), err)
 			}
 			entry.number = number
 		}
 		if category != "" && category != kind {
-			return nil, fmt.Errorf("sort keys must have one type")
+			return nil, fmt.Errorf("sort key at element %d has type %s, expected %s; sort keys must have one type", index, kind, category)
 		}
 		category = kind
 		values[index] = entry

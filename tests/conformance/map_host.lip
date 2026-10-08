@@ -1,4 +1,4 @@
-require host "double"
+import host "double"
 
 flow ConformanceHostMap(values: any) -> any {
     doubled = [double(x) for x in values]

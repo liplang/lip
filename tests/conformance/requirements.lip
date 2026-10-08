@@ -1,5 +1,5 @@
 // Dependency metadata is part of the source program and is checked before the Flow.
-require python "math"
+import python "math"
 
 flow RequiredInput(input: number) -> any {
     result = math.sqrt(input)

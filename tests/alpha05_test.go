@@ -26,24 +26,24 @@ func TestAlpha05Diagnostics(t *testing.T) {
 		{"wrong output", `flow Bad() -> string { return 1 }`, "declared output"},
 		{"wrong function output", `fn f(x: number) -> string { return x } flow Bad() -> any { return f(1) }`, "declared string"},
 		{"gated output", `flow Bad(x: bool) -> number { when x { return 1 } }`, "may produce no value"},
-		{"multiple outputs", `flow Bad(x: bool) -> number? { when x { return 1 } return 2 }`, "exactly one return"},
-		{"impure function", `require host "fetch" fn f(x: string) { return fetch(x) } flow Bad() -> any { return f("x") }`, "must be pure"},
-		{"nested external", `require host "fetch" flow Bad() -> string { return str(fetch()) }`, "Flow binding first"},
+		{"multiple outputs", `flow Bad(x: bool) -> number? { when x { return 1 }; return 2 }`, "exactly one return"},
+		{"impure function", `import host "fetch" fn f(x: string) { return fetch(x) } flow Bad() -> any { return f("x") }`, "must be pure"},
+		{"nested external", `import host "fetch" flow Bad() -> string { return str(fetch()) }`, "Flow binding first"},
 		{"recursive function", `fn f(x: number) { return f(x) } flow Bad() -> number { return f(1) }`, "recursive"},
-		{"control in map", `require host "fetch" flow Bad(values: any) -> any { return [retry(fetch(x), 2) for x in values] }`, "not Map elements"},
+		{"control in map", `import host "fetch" flow Bad(values: any) -> any { return [retry(fetch(x), 2) for x in values] }`, "not Map elements"},
 		{"numeric map source", `flow Bad(values: number) -> any { return [x * 2 for x in values] }`, "must be a list"},
 		{"wrong feedback verifier", `fn initial() -> number { return 1 } fn step(x: number) -> number { return x } fn verify(x: number) -> number { return x } flow Bad() -> number { return feedback(initial(), step, verify, 3) }`, "must return bool"},
 		{"wrong feedback arity", `fn initial() -> number { return 1 } fn step(x: number, y: number) -> number { return x + y } fn verify(x: number) -> bool { return x > 0 } flow Bad() -> number { return feedback(initial(), step, verify, 3) }`, "supplies one candidate"},
 		{"reserved function", `fn str(x: number) { return x } flow Bad() -> number { return str(1) }`, "reserved"},
 		{"str arity", `flow Bad() -> string { return str(1, 2) }`, "1 argument"},
-		{"effect arity", `flow Bad() -> string { str(1, 2) return "x" }`, "1 argument"},
-		{"incomplete require", `require python flow Bad() -> number { return 1 }`, "expected string"},
-		{"malformed require", `require python ">=1.0" flow Bad() -> number { return 1 }`, "invalid python dependency"},
-		{"distribution name", `require python "scikit-learn" flow Bad() -> number { return 1 }`, "invalid python dependency"},
-		{"duplicate require", `require python "math" require python "math" flow Bad() -> number { return 1 }`, "duplicate python"},
-		{"requires alias", `requires python "math" flow Bad() -> number { return 1 }`, "use singular \"require\""},
-		{"import alias", `import python "math" flow Bad() -> number { return 1 }`, "use singular \"require\""},
-		{"late alias", `require python "math" requires python "numpy" flow Bad() -> number { return 1 }`, "use singular \"require\""},
+		{"effect arity", `flow Bad() -> string { str(1, 2); return "x" }`, "1 argument"},
+		{"incomplete import", `import python flow Bad() -> number { return 1 }`, "expected string"},
+		{"malformed import", `import python ">=1.0" flow Bad() -> number { return 1 }`, "invalid python dependency"},
+		{"distribution name", `import python "scikit-learn" flow Bad() -> number { return 1 }`, "invalid python dependency"},
+		{"duplicate import", `import python "math" import python "math" flow Bad() -> number { return 1 }`, "duplicate python"},
+		{"requires alias", `requires python "math" flow Bad() -> number { return 1 }`, "has been replaced"},
+		{"legacy require", `require python "math" flow Bad() -> number { return 1 }`, "has been replaced"},
+		{"late alias", `import python "math" requires python "numpy" flow Bad() -> number { return 1 }`, "has been replaced"},
 		{"two flows", `flow One() -> number { return 1 } flow Two() -> number { return 2 }`, "end of file"},
 	}
 	for _, tc := range cases {
@@ -111,7 +111,7 @@ func generatedSource(t *testing.T, source string, main bool) string {
 func TestAlpha05GeneratedLibrary(t *testing.T) {
 	root, _ := filepath.Abs("..")
 	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `require host "fetch"
+	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `import host "fetch"
 fn twice(x: number) -> number { return x * 2 }
 fn choose(x: number) -> string { return if x > 0 { str(twice(x)) } else { "nonpositive" } }
 flow Checked(x: number) -> string {
@@ -226,9 +226,9 @@ func TestAlpha05EndToEnd(t *testing.T) {
 			name, source, want string
 			failure            bool
 		}{
-			{"standard library", `require python "math" flow SquareRoot(x: number) -> number { return math.sqrt(x) }`, "3\n", false},
-			{"missing module", `require python "lip_missing_module_alpha05" flow Missing(x: number) -> number { return lip_missing_module_alpha05.sqrt(x) }`, "lip_missing_module_alpha05", true},
-			{"real attribute path", `require python "datetime" flow Date(x: string) -> any { value = datetime.datetime.fromisoformat(x) return python.to_json(value) }`, "2026-10-07 00:00:00\n", false},
+			{"standard library", `import python "math" flow SquareRoot(x: number) -> number { return math.sqrt(x) }`, "3\n", false},
+			{"missing module", `import python "lip_missing_module_alpha05" flow Missing(x: number) -> number { return lip_missing_module_alpha05.sqrt(x) }`, "lip_missing_module_alpha05", true},
+			{"real attribute path", `import python "datetime" flow Date(x: string) -> any { value = datetime.datetime.fromisoformat(x); return python.to_json(value) }`, "2026-10-07 00:00:00\n", false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				source := filepath.Join(dir, "python.lip")
@@ -261,22 +261,22 @@ func TestAlpha05EndToEnd(t *testing.T) {
 	})
 	t.Run("metadata", func(t *testing.T) {
 		source := filepath.Join(dir, "deps.lip")
-		writeTestFile(t, source, `require python "math" require go "example.com/adapter" require host "fetch" flow Deps() -> number { return 1 }`)
+		writeTestFile(t, source, `import python "math" import go "example.com/adapter" import host "fetch" flow Deps() -> number { return 1 }`)
 		out, err := command(lipc, "check", source)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, dep := range []string{"python:math", "go:example.com/adapter", "host:fetch"} {
-			if !strings.Contains(out, "require: "+dep) {
+			if !strings.Contains(out, "import: "+dep) {
 				t.Fatal(out)
 			}
 		}
 		library := filepath.Join(dir, "deps.go")
-		writeTestFile(t, library, generatedSource(t, `require python "math" require go "example.com/adapter" require host "fetch" flow Deps() -> number { return 1 }`, false))
+		writeTestFile(t, library, generatedSource(t, `import python "math" import go "example.com/adapter" import host "fetch" flow Deps() -> number { return 1 }`, false))
 		metadataMain := filepath.Join(dir, "deps_main.go")
 		writeTestFile(t, metadataMain, `package main
 import "fmt"
-func main(){for _,dependency:=range RequiredDependencies(){fmt.Printf("require: %s:%s\n",dependency.Kind,dependency.Spec)}}`)
+func main(){for _,dependency:=range RequiredDependencies(){fmt.Printf("import: %s:%s\n",dependency.Kind,dependency.Spec)}}`)
 		queried, queryErr := command("go", "run", library, metadataMain)
 		if queryErr != nil || strings.Join(strings.Split(out, "\n")[1:], "\n") != queried {
 			t.Fatalf("check/library metadata differ: %q vs %q (%v)", out, queried, queryErr)
@@ -291,7 +291,7 @@ func main(){for _,dependency:=range RequiredDependencies(){fmt.Printf("require: 
 func TestAlpha05DynamicOutputFailure(t *testing.T) {
 	root, _ := filepath.Abs("..")
 	dir := t.TempDir()
-	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `require host "fetch" flow Dynamic() -> number { return fetch() }`, false))
+	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `import host "fetch" flow Dynamic() -> number { return fetch() }`, false))
 	writeTestFile(t, filepath.Join(dir, "flow_test.go"), `package main
 import("context";"strings";"testing";"lipalpha/runtime")
 func TestDynamic(t *testing.T){

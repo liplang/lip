@@ -43,7 +43,7 @@ func Length(value Value) (Value, error) {
 			return float64(v.Len()), nil
 		}
 	}
-	return nil, fmt.Errorf("len expects string, list or object, got %T", value)
+	return nil, fmt.Errorf("len expects string, list or object, got %s", TypeName(value))
 }
 
 // Range materializes a finite half-open interval; there is no iterator state.
@@ -54,8 +54,8 @@ func Range(ctx context.Context, args []Value) (Value, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(args) != 2 && len(args) != 3 {
-		return nil, fmt.Errorf("range expects 2 or 3 arguments")
+	if len(args) < 1 || len(args) > 3 {
+		return nil, fmt.Errorf("range expects 1 to 3 arguments")
 	}
 	numbers := []float64{0, 0, 1}
 	for i, arg := range args {
@@ -63,7 +63,11 @@ func Range(ctx context.Context, args []Value) (Value, error) {
 		if err != nil || math.Abs(n) > 9007199254740991 || n != math.Trunc(n) {
 			return nil, fmt.Errorf("range argument %d must be a safe integer", i+1)
 		}
-		numbers[i] = n
+		if len(args) == 1 {
+			numbers[1] = n
+		} else {
+			numbers[i] = n
+		}
 	}
 	start, end, step := numbers[0], numbers[1], numbers[2]
 	if step == 0 {
@@ -87,6 +91,29 @@ func Range(ctx context.Context, args []Value) (Value, error) {
 		items = append(items, value)
 	}
 	return items, nil
+}
+
+// MapValues evaluates a composed comprehension in source order. Unlike a
+// standalone Map node it never starts more workers, so nested comprehensions
+// cannot multiply the enclosing scheduler's parallelism limit.
+func MapValues(ctx context.Context, source Value, mapper func(context.Context, Value) Result) (Value, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if mapper == nil {
+		return nil, fmt.Errorf("comprehension has no element evaluator")
+	}
+	items, err := listInput(source)
+	if err != nil {
+		return nil, fmt.Errorf("comprehension source: %w", err)
+	}
+	spec := &MapSpec{Eval: func(ctx context.Context, item Value, _ map[string]Value) Result {
+		return mapper(ctx, item)
+	}}
+	return ResolveValue(ctx, mapSequential(ctx, spec, items, nil))
 }
 
 // Fold always visits source order, even when the enclosing graph is parallel.

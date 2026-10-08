@@ -17,8 +17,9 @@ func InspectJSON(g *Graph) ([]byte, error) {
 		Type string `json:"type"`
 	}
 	type dependency struct {
-		Kind string `json:"kind"`
-		Spec string `json:"spec"`
+		Kind  string `json:"kind"`
+		Spec  string `json:"spec"`
+		Alias string `json:"alias,omitempty"`
 	}
 	type location struct {
 		Line   int `json:"line"`
@@ -47,7 +48,7 @@ func InspectJSON(g *Graph) ([]byte, error) {
 		document.Parameters = append(document.Parameters, input{name, g.ParamTypes[name]})
 	}
 	for _, requirement := range g.Dependencies {
-		document.Requirements = append(document.Requirements, dependency{requirement.Kind, requirement.Spec})
+		document.Requirements = append(document.Requirements, dependency{requirement.Kind, requirement.Spec, requirement.Alias})
 	}
 	for _, item := range g.Nodes {
 		kind := "value"

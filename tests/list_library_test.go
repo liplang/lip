@@ -13,13 +13,13 @@ func TestListLibraryDiagnosticsAndDependencies(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
 		{`flow Bad()->list{return list.unknown([])}`, "unknown list operation"},
 		{`flow Bad()->list{return list.concat([],1)}`, "expects list"},
-		{`flow Bad()->list{return list.transpose()}`, "argument count"},
+		{`flow Bad()->list{return list.transpose()}`, "expects 1 argument"},
 		{`flow Bad()->list{return list.map([],missing)}`, "local pure function"},
-		{`fn f(x:number,y:number)->number{return x+y} flow Bad()->list{return list.map([],f)}`, "1 parameters"},
+		{`fn f(x:number,y:number)->number{return x+y} flow Bad()->list{return list.map([],f)}`, "1 parameter, got 2"},
 		{`fn f(x:number)->number{return x} flow Bad()->list{return list.filter([],f)}`, "return bool"},
 		{`fn f(x:number)->number{return x} flow Bad()->list{return list.map([],f(1))}`, "local pure function"},
 		{`fn add(x:number,y:number)->number{return x+y} flow Bad()->list{return list.scan([],"bad",add)}`, "accumulator type"},
-		{`require host "fetch" fn f(x:number)->number{return fetch(x)} flow Bad()->list{return list.map([],f)}`, "must be pure"},
+		{`import host "fetch" fn f(x:number)->number{return fetch(x)} flow Bad()->list{return list.map([],f)}`, "must be pure"},
 		{`fn tree(node:object){return list.sum(list.map(node.children,tree))} flow Bad(node:object)->number{return tree(node)}`, "explicit return type"},
 	} {
 		_, err := compiler.ParseAndBuild(tc.source)

@@ -21,7 +21,7 @@ func TestAlpha06Diagnostics(t *testing.T) {
 		{`flow Bad() -> bool { return !1 }`, "expects bool"},
 		{`flow Bad() -> number { return len(1) }`, "len expects"},
 		{`flow Bad() -> number { return len([], []) }`, "1 argument"},
-		{`flow Bad() -> list { return range(5) }`, "2 or 3 arguments"},
+		{`flow Bad() -> list { return range() }`, "1 to 3 arguments"},
 		{`flow Bad() -> list { return range("0", 5) }`, "expects numbers"},
 		{`flow Bad() -> number { return fold([], 0, missing) }`, "local pure function"},
 		{`fn add(a: number) -> number { return a } flow Bad() -> number { return fold([], 0, add) }`, "2 parameters"},
@@ -29,7 +29,7 @@ func TestAlpha06Diagnostics(t *testing.T) {
 		{`fn add(a: number, b: number) -> number { return a+b } flow Bad() -> number { return fold([], "bad", add) }`, "seed"},
 		{`fn add(a: number, b: number) -> string { return str(a+b) } flow Bad() -> any { return fold([], 0, add) }`, "accumulator requires"},
 		{`fn add(a: number, b: number) -> number { return a+b } flow Bad() -> number { return fold([], 0, add()) }`, "local pure function"},
-		{`require host "fetch" flow Bad() -> object { return {value: fetch()} }`, "Flow binding first"},
+		{`import host "fetch" flow Bad() -> object { return {value: fetch()} }`, "Flow binding first"},
 		{`fn recurse(n: number) { return if n==0 { 0 } else { recurse(n-1) } } flow Bad() -> number { return recurse(1) }`, "explicit return type"},
 		{`fn a(n: number) -> number { return b(n) } fn b(n: number) { return a(n) } flow Bad() -> number { return a(1) }`, "explicit return type"},
 		{`flow Bad() -> list { return {} }`, "declared output"},
@@ -560,7 +560,7 @@ func TestLipcOutsideCheckout(t *testing.T) {
 				// accessible even though Go compilation happens elsewhere.
 				writeTestFile(t, filepath.Join(project, "local_helper.py"), "def read():\n    with open('message.txt', encoding='utf-8') as source:\n        return source.read()\n")
 				writeTestFile(t, filepath.Join(project, "message.txt"), "来自调用目录")
-				writeTestFile(t, filepath.Join(project, "python.lip"), "require python \"local_helper\"\nflow Local() -> string {\n message = local_helper.read()\n return message\n}\n")
+				writeTestFile(t, filepath.Join(project, "python.lip"), "import python \"local_helper\"\nflow Local() -> string {\n message = local_helper.read()\n return message\n}\n")
 				stdout, stderr, code := command(env, lipc, "run", "python.lip")
 				if code != 0 || stdout != "来自调用目录\n" || stderr != "" {
 					t.Fatalf("local Python module: exit=%d stdout=%q stderr=%s", code, stdout, stderr)

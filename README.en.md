@@ -7,8 +7,7 @@ LIP (Logical / Incremental / Parallel) is a small dependency-oriented language:
 selection, Map, aggregation and pure recursion with immutable bindings, then
 inspect the graph and execution trace.
 
-Syntax follows Rust, and ranges follow Python conventions. Here is a complete
-data program:
+Here is a complete data program:
 
 ```lip
 fn add(total: number, value: number) -> number {
@@ -49,8 +48,36 @@ With uncustomized Go settings, the usual path is `~/go/bin/lipc`, so
 `~/go/bin/lipc help` also works. On Windows it is usually `go\bin\lipc.exe` under
 your user directory. See [quickstart](docs/QUICKSTART.md#安装) for direct invocation.
 
+Use `lipc repl` to try expressions, bindings and `fn` declarations interactively:
+
+```text
+In [1]: value = 79 / 134
+In [2]: value
+Out[2]: 0.5895522388059702
+In [3]: print(value)
+0.5895522388059702
+```
+
+Values and functions persist between cells; open delimiters allow multiline input.
+Use `:help` for commands and `:quit` to exit. Each cell is compiled; previous effects
+are not replayed. Arrow keys edit input and browse history, Tab completes names,
+and Ctrl-C cancels a pending cell. Files can also contain just a group of statements:
+
+```lip
+a = 2
+b = 3
+print(a / (a + b))
+```
+
+`lipc run examples/statements.lip` prints `0.4`. Top-level statements implicitly run
+inside `flow main() { ... }` with no inputs or result. Explicit Flows can also omit
+their output declaration and return; optional `-> void` is accepted.
+`print` accepts every value type. Declare `-> number`, etc. when returning a value.
+Newlines separate statements; statements on the same line need semicolons:
+`a = 2; b = 3; print(a / b)`. This also applies to the REPL.
+
 `lipc` bundles its runtime sources, so installed `run/build` commands work in any
-project directory without a LIP checkout or project `go.mod`. Both still require
+project directory without a LIP checkout or project `go.mod`. Both still need
 the Go toolchain; compiled core executables run independently.
 Place tool options before the file and program inputs directly after it.
 
@@ -58,7 +85,7 @@ Place tool options before the file and program inputs directly after it.
 
 | Capability | 0.6 contract |
 | --- | --- |
-| Complete program | Requirements, pure fn, one flow, explicit inputs/output, one return |
+| Complete program | Requirements, pure fn, explicit flow or top-level statements; declared output and one return for results |
 | Data | null, bool, number, string, list, object; nested construction |
 | Composition | Immutable bindings, operators, Rust-style if, when gates, Map |
 | Pure operations | str, len, half-open range, ordered fold with an explicit seed, explicit fail |
@@ -69,10 +96,15 @@ Place tool options before the file and program inputs directly after it.
 | Observation | inspect graph JSON, run --trace lifecycle JSON |
 | Existing extensions | Host Adapters, Await, bounded Retry/Feedback, Python Worker |
 
-`range(start, end[, step])` materializes at most 1,000,000 elements. Map comprehensions
-require a bound source; fold/list.* also accept nested pure expressions. The [list library](docs/LIST-LIBRARY.md) adds collection
-operations without new syntax. A fold reducer is a local two-parameter pure fn; an empty
-list returns its seed. Prefer Map/fold for collection traversal and recursion for
+`range(end)` or `range(start, end[, step])` materializes at most 1,000,000 elements. Comprehensions
+accept pure list expressions as sources and compose in arguments, e.g.
+`np.mean([x for x in range(1, 19)])` after `import python "numpy" as np`.
+Standalone Maps retain bounded parallelism; composed comprehensions run in source order.
+The [list library](docs/LIST-LIBRARY.md) provides composable collection operations.
+Callbacks accept a local function name or an inline pure `fn(x) { x * x }`, e.g.
+`list.map(range(5), fn(x) { x * x })`. Fold accepts a two-parameter callback;
+an empty list returns its seed. Single-expression fn bodies may omit `return`.
+Prefer Map/fold for collection traversal and recursion for
 trees or divide-and-conquer.
 
 list/object annotations validate outer shape; dynamic element types are checked
@@ -118,11 +150,11 @@ Go Host, Python and pure libraries use the same calls and value dependencies.
 Ordinary Python values compose directly; [mixed.lip](examples/tutorial/mixed.lip)
 combines Go file reading, text parsing, Python math and pure aggregation. Run
 `go run ./examples/tutorial/mixed_demo` with standard Python, without scientific packages.
-Python NaN/Inf and colliding object keys fail; sets require explicit ordering.
+Python NaN/Inf and colliding object keys fail; sets need explicit ordering.
 
 ```bash
 lipc check --json examples/strings.lip
-lipc run examples/strings.lip ' Rust, LIP, rust, ,你好 '
+lipc run examples/strings.lip ' Go, LIP, go, ,你好 '
 lipc inspect examples/core.lip
 lipc run --trace report-trace.json examples/core.lip '[1,2,3]'
 lipc run examples/range.lip 5
@@ -140,7 +172,10 @@ inspect does not execute Host work and emits `lip.graph.v1`. Trace writes
 `lip.trace.v1` states, Ticks and reasons to a separate file on success or execution
 failure, preserving ordinary result output.
 
-Declare external work with `require`. Generate libraries with `--no-main
+Declare external work with `import`. Python modules support explicit aliases such as
+`import python "numpy" as np`. Without `as`, the actual Python module name is
+preserved; the compiler does not map installation names to module names.
+Generate libraries with `--no-main
 --package name` for Host/Go adapters. Python requirements enable a resident
 Worker using installed packages. See the [Host example](examples/host_adapter)
 and [Python integration](docs/PYTHON-INTEGRATION.md).

@@ -52,6 +52,8 @@ func execute(args []string) int {
 		return build(args[1:])
 	case "run":
 		return run(args[1:])
+	case "repl":
+		return repl(args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			return usageError("", fmt.Sprintf("unknown option %q", args[0]))
@@ -87,7 +89,11 @@ func check(args []string) int {
 	}
 	fmt.Printf("ok: flow %s, %d graph nodes\n", graph.Flow, len(graph.Nodes))
 	for _, dependency := range graph.Dependencies {
-		fmt.Printf("require: %s:%s\n", dependency.Kind, dependency.Spec)
+		fmt.Printf("import: %s:%s", dependency.Kind, dependency.Spec)
+		if dependency.Alias != "" {
+			fmt.Printf(" as %s", dependency.Alias)
+		}
+		fmt.Println()
 	}
 	return 0
 }
@@ -212,12 +218,22 @@ func run(args []string) int {
 	}
 	command := exec.Command(binary, programArgs...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := runCommand(command); err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return exitError.ExitCode()
+		}
+		return fail(err)
+	}
+	return 0
+}
+
+// Forward cancellation while allowing callers to clean up temporary builds.
+func runCommand(command *exec.Cmd) error {
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	if err := command.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "lipc:", err)
-		return 1
+		return err
 	}
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
@@ -226,14 +242,7 @@ func run(args []string) int {
 		case received := <-signals:
 			_ = command.Process.Signal(received)
 		case err := <-done:
-			if err == nil {
-				return 0
-			}
-			if exitError, ok := err.(*exec.ExitError); ok {
-				return exitError.ExitCode()
-			}
-			fmt.Fprintln(os.Stderr, "lipc:", err)
-			return 1
+			return err
 		}
 	}
 }
@@ -274,6 +283,10 @@ func compileGenerated(code []byte, output string) error {
 		return err
 	}
 	defer cleanup()
+	return compileModule(root, output)
+}
+
+func compileModule(root, output string) error {
 	absoluteOutput, err := filepath.Abs(output)
 	if err != nil {
 		return err
@@ -286,7 +299,7 @@ func compileGenerated(code []byte, output string) error {
 	command.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	return command.Run()
+	return runCommand(command)
 }
 
 func temporarySource(code []byte) (root string, cleanup func(), err error) {
@@ -410,6 +423,7 @@ func displayArgument(arg string) string {
 func usage() {
 	fmt.Print("usage: lipc <command> [options]\n\n")
 	for _, command := range [][3]string{
+		{"repl", "[--quiet]", "Start an interactive session"},
 		{"run", "[--trace path.json] file.lip [inputs...]", "Compile and run"},
 		{"build", "[--output path] file.lip", "Build an executable"},
 		{"check", "[--json] file.lip", "Check a program"},
@@ -435,6 +449,12 @@ func help(args []string) int {
 		return 0
 	}
 	switch args[0] {
+	case "repl":
+		fmt.Println("usage: lipc repl [--quiet]")
+		fmt.Println("Evaluate expressions, bindings and fn declarations with Go 1.27 or newer.")
+		fmt.Println("Values and functions persist between cells; completed cells are not replayed.")
+		fmt.Println("Unclosed (), [] or {} continue on the next line. :help lists session commands.")
+		fmt.Println("Use --quiet for piped input without a banner or prompts. End with :quit or EOF (Ctrl-D).")
 	case "version":
 		fmt.Println("usage: lipc version")
 		fmt.Println("Show the compiler version.")
@@ -455,6 +475,7 @@ func help(args []string) int {
 	case "run":
 		fmt.Println("usage: lipc run [--trace path.json] file.lip [inputs...]")
 		fmt.Println("Compile and run in the current directory with Go 1.27 or newer; temporary files are cleaned up.")
+		fmt.Println("The file may contain a Flow or just top-level statements, such as a = 2; b = 3; print(a / (a + b)).")
 		fmt.Println("Tool options go before the file; everything after it is passed in Flow parameter order, including --help or --trace.")
 		fmt.Println("Example: lipc run --trace trace.json file.lip args...")
 		fmt.Println("Use --trace to record success or execution failure; normal output still goes to stdout.")

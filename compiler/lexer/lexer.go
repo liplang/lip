@@ -77,8 +77,10 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.If
 		case "else":
 			kind = token.Else
-		case "require":
-			kind = token.Require
+		case "import":
+			kind = token.Import
+		case "as":
+			kind = token.As
 		case "true":
 			kind = token.True
 		case "false":
@@ -119,6 +121,9 @@ func (l *Lexer) next() (token.Token, error) {
 		l.advance()
 		var b strings.Builder
 		for l.i < len(l.src) && l.src[l.i] != '"' {
+			if l.src[l.i] == '\n' || l.src[l.i] == '\r' {
+				return token.Token{}, l.errorAt(start, `newline in string; write \n inside double quotes`)
+			}
 			if l.src[l.i] == '\\' {
 				if l.i+1 >= len(l.src) {
 					return token.Token{}, l.errorAt(start, "unterminated string")
@@ -138,7 +143,7 @@ func (l *Lexer) next() (token.Token, error) {
 		l.advance()
 		decoded, err := strconv.Unquote(`"` + b.String() + `"`)
 		if err != nil {
-			return token.Token{}, l.errorAt(start, "invalid string: %v", err)
+			return token.Token{}, l.errorAt(start, `invalid string escape; use \n, \t, \", \\ or \uNNNN`)
 		}
 		return token.Token{Kind: token.String, Text: decoded, Pos: start}, nil
 	}
@@ -156,6 +161,7 @@ func (l *Lexer) next() (token.Token, error) {
 	one := map[rune]token.Kind{'=': token.Assign, '(': token.LParen, ')': token.RParen, '{': token.LBrace, '}': token.RBrace, '[': token.LBracket, ']': token.RBracket, ',': token.Comma, ':': token.Colon, '.': token.Dot, '+': token.Plus, '-': token.Minus, '*': token.Star, '/': token.Slash, '>': token.Greater, '<': token.Less}
 	one['?'] = token.Question
 	one['!'] = token.Not
+	one[';'] = token.Semicolon
 	if kind, ok := one[ch]; ok {
 		l.advance()
 		return token.Token{Kind: kind, Text: string(ch), Pos: start}, nil

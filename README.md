@@ -6,7 +6,7 @@ LIP（Logical / Incremental / Parallel）是一门面向依赖关系的小语言
 **描述依赖，让 Runtime 决定执行。** 用简洁的不可变绑定组合数据、选择、
 Map、聚合与纯递归，再通过图和轨迹观察执行。
 
-语法参考 Rust，区间遵循 Python 的习惯。下面是一份完整的数据程序：
+下面是一份完整的数据程序：
 
 ```lip
 fn add(total: number, value: number) -> number {
@@ -47,6 +47,31 @@ lipc run examples/core.lip '[]'
 `~/go/bin/lipc help`；Windows 通常是用户目录下的 `go\bin\lipc.exe`。
 完整路径的调用方式见[快速入门](docs/QUICKSTART.md#安装)。
 
+想直接试表达式，运行 `lipc repl`：
+
+```text
+In [1]: value = 79 / 134
+In [2]: value
+Out[2]: 0.5895522388059702
+In [3]: print(value)
+0.5895522388059702
+```
+
+变量和 `fn` 跨输入保留，未闭合的括号支持多行；`:help` 查看命令，`:quit`
+退出。左右方向键编辑、上下方向键回看历史，Tab 补全；Ctrl-C 取消当前输入。
+后端仍编译每次输入，已完成的打印不会重放。文件也可直接写一组语句：
+
+```lip
+a = 2
+b = 3
+print(a / (a + b))
+```
+
+`lipc run examples/statements.lip` 输出 `0.4`。顶层语句等价于放在 `flow main() { ... }`
+里，没有输入参数或返回值。显式 Flow 也可省略输出声明和 `return`，或写 `-> void`。
+`print` 接受任意类型，有返回值时再声明 `-> number` 等输出类型。
+换行可以分隔语句；多条语句放在同一行时，分号必须保留：`a = 2; b = 3; print(a / b)`。
+
 `lipc` 内置 Runtime 源码，安装后可在任意项目目录 `run/build`，无需 LIP 仓库
 或项目 `go.mod`。这两个命令仍需 Go 工具链；编译出的核心程序可独立运行。
 工具选项放在文件前，程序输入放在文件后，无需 `--`。
@@ -55,7 +80,7 @@ lipc run examples/core.lip '[]'
 
 | 能力 | 0.6 契约 |
 | --- | --- |
-| 完整程序 | 依赖头、纯 fn、唯一 flow、显式输入/输出、单一 return |
+| 完整程序 | 依赖头、纯 fn、显式 flow 或顶层语句；有返回值时声明输出与单一 return |
 | 数据 | null、bool、number、string、list、object；对象/列表可嵌套 |
 | 组合 | 不可变绑定、运算符、Rust 式 if、when 门控、Map |
 | 纯操作 | str、len、半开区间 range、带初值的顺序 fold、显式 fail |
@@ -66,7 +91,7 @@ lipc run examples/core.lip '[]'
 | 观察 | check --json 修复诊断、inspect 依赖图、run --trace 生命周期 |
 | 已有扩展 | Host Adapter、Await、有界 Retry/Feedback、Python Worker |
 
-`range(start, end[, step])` 最多构造 1,000,000 个元素；Map 推导式使用已绑定的区间，fold/list.* 可嵌套纯表达式。list 库通过纯函数补齐集合处理，完整签名见 [LIST-LIBRARY.md](docs/LIST-LIBRARY.md)。fold 的 reducer 是本文件的二参数纯 fn，空列表返回初值。递归适合树和分治，集合遍历优先用 Map/fold。
+`range(end)` 或 `range(start, end[, step])` 最多构造 1,000,000 个元素；列表推导式可直接使用纯列表表达式，也可放入调用参数，例如 `np.mean([x for x in range(1, 19)])`（先 `import python "numpy" as np`）。独立 Map 保留有界并行，嵌套推导式按顺序求值。集合回调可用本地函数名或内联 `fn(x) { x * x }`，例如 `list.map(range(5), fn(x) { x * x })`。fold 的二参数回调也可内联，空列表返回初值。单表达式 fn 的 return 可省略。完整签名见 [LIST-LIBRARY.md](docs/LIST-LIBRARY.md)。递归适合树和分治，集合遍历优先用 Map/fold。
 
 `list`/`object` 检查外层形状，动态元素在实际运算中校验。CLI 的 string 参数
 原样传递，number 为有限十进制，bool 为 true/false，any/list/object 使用 JSON。
@@ -98,8 +123,8 @@ Pure 可在未变化的 Tick 复用，ReadOnly 可并行但每 Tick 重读，外
 
 ```bash
 lipc check --json examples/strings.lip
-lipc run examples/strings.lip ' Rust, LIP, rust, ,你好 '
-# {"count":3,"label":"rust / lip / 你好","tags":["rust","lip","你好"]}
+lipc run examples/strings.lip ' go, LIP, Go, ,你好 '
+# {"count":3,"label":"go / lip / 你好","tags":["go","lip","你好"]}
 lipc inspect examples/core.lip
 lipc run --trace report-trace.json examples/core.lip '[1,2,3]'
 lipc run examples/range.lip 5
@@ -125,7 +150,9 @@ Go/Python/纯库都用调用与值依赖自然组合，普通 Python 返回值�
 完整例子见 [mixed.lip](examples/tutorial/mixed.lip)，运行
 `go run ./examples/tutorial/mixed_demo`（只需 Python 标准库）。
 
-外部操作通过 `require` 声明。Host/Go 程序用 `--no-main --package name`
+外部操作通过 `import` 声明。Python 支持 `import python "numpy" as np`；
+不写 `as` 就保留实际模块名，例如 `sklearn`，编译器不根据安装包名改名。
+Host/Go 程序用 `--no-main --package name`
 生成库，由宿主注册 adapter；Python 依赖启用常驻 Worker，使用已安装的包。
 详见 [Host 示例](examples/host_adapter) 和 [Python 集成](docs/PYTHON-INTEGRATION.md)。
 

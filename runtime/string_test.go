@@ -67,7 +67,7 @@ func TestStringErrorsAndBounds(t *testing.T) {
 		args []Value
 		want string
 	}{
-		{"unknown", nil, "unknown string operation"}, {"trim", nil, "argument count"},
+		{"unknown", nil, "unknown string operation"}, {"trim", nil, "expects 1 argument"},
 		{"trim", []Value{3}, "expected string"}, {"trim", []Value{string([]byte{255})}, "valid UTF-8"},
 		{"join", []Value{[]Value{"a", 3}, ","}, "element 1"}, {"join", []Value{"abc", ","}, "expected list"},
 		{"split", []Value{"abc", ""}, "nonempty"}, {"count", []Value{"abc", ""}, "nonempty"},

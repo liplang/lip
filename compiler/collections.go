@@ -13,7 +13,7 @@ func inferCollectionCall(call *ast.CallExpr, env, fnTypes map[string]string, fnP
 	switch call.Name {
 	case "len":
 		if len(args) != 1 {
-			return "any", fmt.Errorf("len expects 1 argument, got %d", len(args))
+			return "any", argumentCountError("len", 1, 1, len(args))
 		}
 		typ, err := inferExprType(args[0], env, fnTypes, fnParams)
 		if err != nil {
@@ -24,8 +24,8 @@ func inferCollectionCall(call *ast.CallExpr, env, fnTypes map[string]string, fnP
 		}
 		return "number", nil
 	case "range":
-		if len(args) != 2 && len(args) != 3 {
-			return "any", fmt.Errorf("range expects 2 or 3 arguments, got %d", len(args))
+		if len(args) < 1 || len(args) > 3 {
+			return "any", argumentCountError("range", 1, 3, len(args))
 		}
 		for _, arg := range args {
 			typ, err := inferExprType(arg, env, fnTypes, fnParams)
@@ -39,15 +39,11 @@ func inferCollectionCall(call *ast.CallExpr, env, fnTypes map[string]string, fnP
 		return "list", nil
 	case "fold":
 		if len(args) != 3 {
-			return "any", fmt.Errorf("fold expects 3 arguments, got %d", len(args))
+			return "any", argumentCountError("fold", 3, 3, len(args))
 		}
-		reducer, ok := args[2].(*ast.IdentExpr)
-		if !ok {
-			return "any", fmt.Errorf("fold reducer must name a local pure function")
-		}
-		params, ok := fnParams[reducer.Name]
-		if !ok || len(params) != 2 {
-			return "any", fmt.Errorf("fold reducer %q must be a local pure function with 2 parameters", reducer.Name)
+		params, result, err := inferCallback("fold", args[2], 2, env, fnTypes, fnParams)
+		if err != nil {
+			return "any", err
 		}
 		source, err := inferExprType(args[0], env, fnTypes, fnParams)
 		if err != nil {
@@ -61,14 +57,10 @@ func inferCollectionCall(call *ast.CallExpr, env, fnTypes map[string]string, fnP
 			return "any", err
 		}
 		if !compatibleType(params[0], seed) {
-			return "any", fmt.Errorf("fold reducer %s expects accumulator %s, seed is %s", reducer.Name, params[0], seed)
-		}
-		result := fnTypes[reducer.Name]
-		if result == "" {
-			result = "any"
+			return "any", fmt.Errorf("fold reducer expects accumulator %s, seed is %s", params[0], seed)
 		}
 		if !compatibleType(params[0], result) {
-			return "any", fmt.Errorf("fold reducer %s returns %s, accumulator requires %s", reducer.Name, result, params[0])
+			return "any", fmt.Errorf("fold reducer returns %s, accumulator requires %s", result, params[0])
 		}
 		// The result includes the seed because the source can be empty.
 		if result == seed {
@@ -82,7 +74,7 @@ func inferCollectionCall(call *ast.CallExpr, env, fnTypes map[string]string, fnP
 func inferStringCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParams map[string][]string) (string, error) {
 	spec, _ := stringops.Lookup(call.Name)
 	if len(call.Args) < spec.MinArgs || len(call.Args) > spec.MaxArgs {
-		return "any", fmt.Errorf("%s has invalid argument count: got %d", call.Name, len(call.Args))
+		return "any", argumentCountError(call.Name, spec.MinArgs, spec.MaxArgs, len(call.Args))
 	}
 	for index, arg := range call.Args {
 		actual, err := inferExprType(arg, env, fnTypes, fnParams)
@@ -97,6 +89,9 @@ func inferStringCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParam
 }
 
 func callbackIndex(call *ast.CallExpr) int {
+	if call.Python {
+		return -1
+	}
 	if call.Name == "fold" && len(call.Args) == 3 {
 		return 2
 	}
@@ -106,35 +101,41 @@ func callbackIndex(call *ast.CallExpr) int {
 	return -1
 }
 
+func callbackArity(call *ast.CallExpr) int {
+	if call.Name == "fold" {
+		return 2
+	}
+	spec, _ := listops.Lookup(call.Name)
+	return spec.CallbackArity
+}
+
 func inferListCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParams map[string][]string) (string, error) {
 	spec, _ := listops.Lookup(call.Name)
 	if len(call.Args) < spec.MinArgs || spec.MaxArgs >= 0 && len(call.Args) > spec.MaxArgs {
-		return "any", fmt.Errorf("%s has invalid argument count: got %d", call.Name, len(call.Args))
+		return "any", argumentCountError(call.Name, spec.MinArgs, spec.MaxArgs, len(call.Args))
 	}
 	for index, arg := range call.Args {
 		if index == spec.Callback {
-			fn, ok := arg.(*ast.IdentExpr)
-			if !ok {
-				return "any", fmt.Errorf("%s callback must name a local pure function", call.Name)
-			}
-			params, ok := fnParams[fn.Name]
-			if !ok || len(params) != spec.CallbackArity {
-				return "any", fmt.Errorf("%s callback must be a local pure function with %d parameters", call.Name, spec.CallbackArity)
-			}
-			result := fnTypes[fn.Name]
-			if result == "" {
-				result = "any"
+			params, result, err := inferCallback(call.Name, arg, spec.CallbackArity, env, fnTypes, fnParams)
+			if err != nil {
+				return "any", err
 			}
 			if !compatibleType(spec.CallbackResult, result) {
-				return "any", fmt.Errorf("%s callback must return %s, got %s", call.Name, spec.CallbackResult, result)
+				return "any", callbackTypeError(fmt.Sprintf("%s callback must return %s, got %s", call.Name, spec.CallbackResult, result))
+			}
+			if call.Name == "list.sort_by" && result != "any" && result != "never" && result != "number" && result != "string" {
+				return "any", callbackTypeError(fmt.Sprintf("list.sort_by callback must return number or string, got %s", result))
 			}
 			if call.Name == "list.scan" {
 				seed, err := inferExprType(call.Args[1], env, fnTypes, fnParams)
 				if err != nil {
 					return "any", err
 				}
-				if !compatibleType(params[0], seed) || !compatibleType(params[0], result) {
-					return "any", fmt.Errorf("list.scan seed and reducer result must match the accumulator type")
+				if !compatibleType(params[0], seed) {
+					return "any", fmt.Errorf("list.scan seed has type %s, accumulator type is %s", seed, params[0])
+				}
+				if !compatibleType(params[0], result) {
+					return "any", fmt.Errorf("list.scan reducer result has type %s, accumulator type is %s", result, params[0])
 				}
 			}
 			continue
@@ -148,4 +149,38 @@ func inferListCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParams 
 		}
 	}
 	return spec.Result, nil
+}
+
+// Check collection signatures before visiting their arguments so an extra or
+// missing argument does not produce a misleading callback/dependency error.
+func validateCollectionCallShape(call *ast.CallExpr) error {
+	if call.Python {
+		return nil
+	}
+	minimum, maximum := -1, -1
+	if spec, ok := listops.Lookup(call.Name); ok {
+		minimum, maximum = spec.MinArgs, spec.MaxArgs
+	} else if spec, ok := stringops.Lookup(call.Name); ok {
+		minimum, maximum = spec.MinArgs, spec.MaxArgs
+	} else {
+		switch call.Name {
+		case "range":
+			minimum, maximum = 1, 3
+		case "fold":
+			minimum, maximum = 3, 3
+		case "len", "str", "fail":
+			minimum, maximum = 1, 1
+		}
+	}
+	if minimum >= 0 && (len(call.Args) < minimum || maximum >= 0 && len(call.Args) > maximum) {
+		return argumentCountError(call.Name, minimum, maximum, len(call.Args))
+	}
+	if index := callbackIndex(call); index >= 0 {
+		switch call.Args[index].(type) {
+		case *ast.IdentExpr, *ast.LambdaExpr:
+		default:
+			return callbackError(call.Name, callbackArity(call), fmt.Sprintf("%s callback must be a local pure function name or inline fn", call.Name))
+		}
+	}
+	return nil
 }

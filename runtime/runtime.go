@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -284,16 +283,12 @@ func DefaultHost() Host {
 		if len(args) != 1 {
 			return Failed(fmt.Errorf("str expects 1 argument, got %d", len(args)))
 		}
-		return Ready(fmt.Sprint(args[0]))
+		return Ready(StringValue(args[0]))
 	})
 	h.Register("print", func(_ context.Context, args []Value) Result {
-		for i, arg := range args {
-			if i > 0 {
-				_, _ = io.WriteString(os.Stdout, " ")
-			}
-			_, _ = io.WriteString(os.Stdout, fmt.Sprint(arg))
+		if err := PrintValues(os.Stdout, args); err != nil {
+			return Failed(err)
 		}
-		_, _ = io.WriteString(os.Stdout, "\n")
 		return Ready(nil)
 	})
 	return h
@@ -336,13 +331,13 @@ func rawNumber(v Value) (float64, error) {
 	case json.Number:
 		return n.Float64()
 	}
-	return 0, fmt.Errorf("expected number, got %T (%v)", v, v)
+	return 0, fmt.Errorf("expected number, got %s (%s)", TypeName(v), StringValue(v))
 }
 
 func Bool(v Value) (bool, error) {
 	b, ok := v.(bool)
 	if !ok {
-		return false, fmt.Errorf("expected bool, got %T (%v)", v, v)
+		return false, fmt.Errorf("expected bool, got %s (%s)", TypeName(v), StringValue(v))
 	}
 	return b, nil
 }
@@ -389,12 +384,12 @@ func CheckType(v Value, typ string) error {
 	default:
 		return fmt.Errorf("unknown type %q", typ)
 	}
-	return fmt.Errorf("expected %s, got %T (%v)", typ, v, v)
+	return fmt.Errorf("expected %s, got %s (%s)", typ, TypeName(v), StringValue(v))
 }
 
 func Field(object Value, name string) (Value, error) {
 	if object == nil {
-		return nil, fmt.Errorf("cannot read field %q from nil", name)
+		return nil, fmt.Errorf("cannot read field %q from null", name)
 	}
 	v := reflect.ValueOf(object)
 	if v.Kind() == reflect.Pointer {
@@ -424,7 +419,7 @@ func Field(object Value, name string) (Value, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("field %q is not available on %T", name, object)
+	return nil, fmt.Errorf("field %q is not available on %s", name, TypeName(object))
 }
 
 func Index(object, index Value) (Value, error) {
@@ -464,7 +459,7 @@ func Index(object, index Value) (Value, error) {
 	case reflect.Map:
 		if v.Type().Key().Kind() == reflect.String {
 			if _, ok := index.(string); !ok {
-				return nil, fmt.Errorf("object index must be string, got %T", index)
+				return nil, fmt.Errorf("object index must be string, got %s", TypeName(index))
 			}
 		}
 		key := reflect.ValueOf(index)
@@ -481,7 +476,7 @@ func Index(object, index Value) (Value, error) {
 		}
 		return value.Interface(), nil
 	default:
-		return nil, fmt.Errorf("cannot index %T", object)
+		return nil, fmt.Errorf("cannot index %s", TypeName(object))
 	}
 }
 
@@ -496,7 +491,7 @@ func Binary(op string, left, right Value) (value Value, err error) {
 		if ls, ok := left.(string); ok {
 			rs, ok := right.(string)
 			if !ok {
-				return nil, fmt.Errorf("operator + expects two strings or two numbers, got string and %T", right)
+				return nil, fmt.Errorf("operator + expects two strings or two numbers, got string and %s", TypeName(right))
 			}
 			if _, err := stringInput(ls); err != nil {
 				return nil, err
@@ -510,7 +505,7 @@ func Binary(op string, left, right Value) (value Value, err error) {
 			return ls + rs, nil
 		}
 		if _, ok := right.(string); ok {
-			return nil, fmt.Errorf("operator + expects two strings or two numbers, got %T and string", left)
+			return nil, fmt.Errorf("operator + expects two strings or two numbers, got %s and string", TypeName(left))
 		}
 		l, err := Number(left)
 		if err != nil {
@@ -670,12 +665,14 @@ type NodeSpec struct {
 
 // MapSpec describes a one-shot dynamic map. The graph contains one node for
 // the map; the runtime creates one execution instance per source element.
-// Eval receives the current item and a stable outer-values snapshot so it can
-// use Flow bindings while evaluating the element expression.
+// Source names an existing graph value, or SourceEval computes a source once
+// after dependencies and gates are ready. Eval receives the current item and
+// a stable outer-values snapshot while evaluating the element expression.
 type MapSpec struct {
-	Source string
-	Ops    []string
-	Eval   func(context.Context, Value, map[string]Value) Result
+	Source     string
+	SourceEval func(context.Context, map[string]Value) Result
+	Ops        []string
+	Eval       func(context.Context, Value, map[string]Value) Result
 }
 
 // RetrySpec applies a bounded retry policy to one computation. Attempts
@@ -1480,13 +1477,23 @@ func evaluateMap(ctx context.Context, spec *MapSpec, values map[string]Value, li
 	if spec == nil || spec.Eval == nil {
 		return Failed(errors.New("map node has no evaluator"))
 	}
-	input, ok := values[spec.Source]
-	if !ok {
-		return Failed(fmt.Errorf("map source %q is unavailable", spec.Source))
+	var input Value
+	if spec.SourceEval != nil {
+		var err error
+		input, err = ResolveValue(ctx, spec.SourceEval(ctx, values))
+		if err != nil {
+			return Failed(fmt.Errorf("map source: %w", err))
+		}
+	} else {
+		var ok bool
+		input, ok = values[spec.Source]
+		if !ok {
+			return Failed(fmt.Errorf("map source %q is unavailable", spec.Source))
+		}
 	}
 	items, err := listInput(input)
 	if err != nil {
-		return Failed(err)
+		return Failed(fmt.Errorf("map source: %w", err))
 	}
 	if limit < 1 {
 		limit = 1
@@ -1599,14 +1606,14 @@ func mapParallel(ctx context.Context, spec *MapSpec, items []Value, values map[s
 
 func sequenceValues(value Value) ([]Value, error) {
 	if value == nil {
-		return nil, errors.New("map source must be a list or slice, got nil")
+		return nil, errors.New("expected list, got null")
 	}
 	if values, ok := value.([]Value); ok {
 		return append([]Value(nil), values...), nil
 	}
 	rv := reflect.ValueOf(value)
 	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
-		return nil, fmt.Errorf("map source must be a list or slice, got %T", value)
+		return nil, fmt.Errorf("expected list, got %s", TypeName(value))
 	}
 	items := make([]Value, rv.Len())
 	for i := 0; i < rv.Len(); i++ {

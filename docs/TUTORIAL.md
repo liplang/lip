@@ -24,7 +24,7 @@ lipc version
 ```
 
 安装后的 `run/build` 也可在自己的项目目录使用，编译器内置 Runtime，无需保留
-仓库；构建仍需 Go。
+仓库；构建仍需 Go。后面可以直接运行lipc；若找不到可使用全路径，如`~/go/bin/lipc`。
 工具选项写在文件前，程序输入直接跟在文件后，无需 `--`。
 每节先运行，再修改一处核对结果。
 JSON 对象的键顺序以实际输出为准，列表保持元素顺序。行注释使用 `//`。
@@ -51,12 +51,61 @@ lipc run examples/tutorial/01_hello.lip 小林
 
 flow 是可执行入口，name:string 是输入，->string 是输出契约。greeting 创建
 不可变绑定，也是一个依赖图节点；return 提供结果。每文件只有一个 Flow，
-可有多个 fn；每个 Flow 用一个 return 收束结果。绑定直接写 `名字 = 表达式`，
+可有多个 fn；有返回值的 Flow 用一个 return 收束结果。绑定直接写 `名字 = 表达式`，
 按定义顺序使用，每个名字绑定一次。
 
 继续处理 greeting 时，为新结果取名，例如 normalized=string.trim(greeting)，
 再让 return 引用 normalized。文件后的参数按 Flow 声明顺序传入；试着少传
 或多传一个名字，工具会给出参数提示。
+
+只需要打印时，省略输出声明和 return 就可以自然结束：
+
+```lip
+flow main() {
+    print(79 / 134)
+}
+```
+
+`print` 可以接收数字、布尔、字符串、列表、对象等任意值，也可传多个值。
+它只负责控制台输出，调用结果是 null。有返回值的 Flow 需要 `-> number`
+等类型和一个 return；没有返回值的 Flow 可省略输出声明，或显式写 `-> void`。
+可在块末尾写裸 `return`，但不需要写；return 不会取消此前声明的图节点。
+
+一组无参数、无返回值的语句还可直接写在文件顶层，连 Flow 外壳都省略。
+[statements.lip](../examples/statements.lip) 是完整可运行示例：
+
+```lip
+a = 2
+b = 3
+print(a / (a + b))
+```
+
+运行 `lipc run examples/statements.lip` 输出 `0.4`。这等价于 `flow main() { ... }`；
+需要输入参数、指定入口名字或返回值时，使用显式 Flow。`import` 和 `fn` 声明
+仍放在文件开头；一个文件使用一种入口形式，不能把顶层执行语句和显式 Flow 混写。
+
+多条执行语句在同一行时必须用分号分隔：`a = 2; b = 3; print(a / b)`。
+换行可以直接分隔；块末或文件末尾的分号可省略。这个规则适用于顶层语句、
+Flow/when 内的语句和 REPL。参数、列表元素仍用逗号；分号不是逗号的替代。
+
+不想创建文件时，用 `lipc repl` 直接试验：
+
+```text
+In [1]: value = 79 / 134
+In [2]: value
+Out[2]: 0.5895522388059702
+In [3]: print(value)
+0.5895522388059702
+```
+
+REPL 直接接收表达式、绑定和 fn，不需要 Flow 外壳或 return。变量、函数跨输入
+保留；括号未闭合时显示 `...:` 并继续接收下一行。`:vars` 查看变量，`:history`
+查看输入，`:reset` 清空变量与声明，`:cancel` 丢弃未完成输入，`:quit` 或 Ctrl-D
+退出。绑定仍不可重复；失败的输入不会写入会话变量，已发生的外部副作用不会回滚。
+每次输入经 Go 编译后运行，只保存成功的值和声明，不重复执行历史操作。
+左右方向键编辑光标，上下方向键回看历史，Tab 补全，Ctrl-C 取消当前单元。
+整段多行粘贴后按 Enter 提交。管道输入自动隐藏提示符，也可显式用 `--quiet`。
+详见[编译器文档](COMPILER.md#交互式-repl)。
 
 ## 2. 六种边界类型与结构化数据
 
@@ -69,7 +118,7 @@ flow 是可执行入口，name:string 是输入，->string 是输出契约。gre
 | object | JSON，如 `'{"name":"Lin"}'` | 外层对象 |
 | any | 任意 JSON，如 `'null'`、`'"text"'` | 明确的动态边界 |
 
-所有参数必须有类型，Flow 必须写输出类型。本地非递归 fn 可推断结果，教程
+所有参数必须有类型，有返回值的 Flow 必须写输出类型。本地非递归 fn 可推断结果，教程
 统一写出便于阅读。null 是值，可通过 any 输入。可选输出写 number? 等，
 允许结果为 null 或由门控跳过；输入按上表中的六种类型声明。
 
@@ -112,7 +161,8 @@ len 对字符串、列表、对象分别数 Unicode 字符、元素、字段。�
 混合条件时加括号，让分组一目了然。
 数字支持四则运算；字符串支持 + 连接、* 非负整数重复。"count="+3 是错误，
 写 "count="+str(3)。文本转数值用 string.parse_number。str 是显示转换，
-结构化结果由入口自动打印成 JSON。除零、非有限结果和错误动态类型返回错误。
+字符串原样显示，列表、对象、bool、number 和 null 按 JSON 显示；print、str、
+REPL 和入口保持一致。除零、非有限结果和错误动态类型返回错误。
 
 [03_choice.lip](../examples/tutorial/03_choice.lip)：
 
@@ -176,7 +226,7 @@ lipc run examples/tutorial/04_text.lip '  Hello   LIP  '
 ```
 
 trim 去两端空白 → split_whitespace 切词并忽略连续空白 → join 统一分隔 →
-lower 转小写。这些纯表达式可嵌套，无需 require，不依赖机器 locale。
+lower 转小写。这些纯表达式可嵌套，无需 import，不依赖机器 locale。
 
 | 需求 | 表达式片段 | 结果 |
 | --- | --- | --- |
@@ -231,7 +281,9 @@ lipc run examples/strings.lip ''
 ```
 
 clean 命名“清理单项”，nonempty 命名保留条件；Flow 组合 split → map → filter
-→ unique → join。callback 传 fn 名，例如 list.map(parts,clean)。
+→ unique → join。callback 可传 fn 名，例如 list.map(parts,clean)，也可写
+`list.map(parts, fn(text) { string.trim(text) })`。内联参数默认 any，也可明确标注类型。
+具名和内联 fn 都只写一个结果表达式，return 可省略。
 
 fn 用一个返回表达式描述纯变换，可以组合其他纯 fn、标准库和 fail。中间步骤
 可拆成小函数，或放在 Flow 绑定中；例如 normalize(string.trim(tag)) 组合清理
@@ -263,7 +315,7 @@ lipc run examples/tutorial/05_range.lip 0
 # {"running":[0],"squares":[],"total":0}
 ```
 
-range(0,4) 是 0、1、2、3，不含终点。Map 每项求平方；fold 从 seed=0 起，
+range(4) 与 range(0,4) 都是 0、1、2、3，不含终点。Map 每项求平方；fold 从 seed=0 起，
 依次加 0、1、4、9，得 14。scan 保存初值及每步结果，所以两个开头的 0
 分别是 seed 与处理首项后的值。空 fold 返回 seed，空 scan 返回 [seed]。
 
@@ -499,8 +551,10 @@ lipc build --output department-report examples/tutorial/11_report.lip
 ## 12. 图、自动等待、有限并行
 
 Flow 引用产生数据依赖，报表中 lines → rows → groups → return 自动等待。
-fn 表达式不展开独立节点，list.map 是顺序纯表达式；Map 推导式是 Runtime
-动态展开节点。已有 [fanout.lip](../examples/fanout.lip) 的 left/right 只依赖
+fn 表达式不展开独立节点，list.map 和嵌入表达式的推导式顺序求值；独立的
+Map 推导式是 Runtime 动态展开节点。两种推导式都可直接使用 range 等纯列表表达式，
+例如 `list.sum([x * x for x in range(1, 4)])` 得到 `14`。
+已有 [fanout.lip](../examples/fanout.lip) 的 left/right 只依赖
 input，可以并行，total 等待两者。Run 自动，RunSequential 顺序，
 RunParallel(...,2) 最多同时调度两个节点；三者共用输入与结果契约。
 
@@ -566,7 +620,7 @@ lipc check --json examples/tutorial/11_report.lip
 | undefined or forward reference | 名字、定义顺序、when 作用域 |
 | unknown string/list operation | 查实际目录，不猜别名、不回退外部操作 |
 | expects string/number/list/bool | 核对契约和显式转换，运行验证动态元素 |
-| callback ... local pure function | 传 fn 名，匹配参数数量与结果 |
+| callback ... local pure function | 传 fn 名或内联纯 fn，匹配参数数量与结果 |
 | recursive ... explicit return type | 给递归环各 fn 标注结果 |
 | must be pure / nested external call | 外部调用拆成 Flow 绑定 |
 | no return / 多 return | 唯一输出，用 if 选值；when 输出可选 |
@@ -579,7 +633,7 @@ lipc check --json examples/tutorial/11_report.lip
 ## 15. Go Host：显式接入外部能力
 
 文件/网络/数据库或专门 parser 由 Go adapter 实现。LIP 文件头写
-require host "load_profile"，调用单独绑定在 Flow；声明不安装或提供实现。
+import host "load_profile"，调用单独绑定在 Flow；声明不安装或提供实现。
 已有 [host_adapter/flow.lip](../examples/host_adapter/flow.lip) 读取两次文件。
 使用库模式，让 Go 主程序注册能力：
 
@@ -620,8 +674,8 @@ g.Add(runtime.NodeSpec{Name: "save", Op: "save", After: []string{"prepare"}, Eva
 
 <!-- example: examples/tutorial/session.lip -->
 ```lip
-require host "fetch"
-require host "write_report"
+import host "fetch"
+import host "write_report"
 
 fn start(input: number) -> number { return input }
 fn revise(candidate: number) -> number { return candidate + 1 }
@@ -722,8 +776,8 @@ Runtime 无法安全抢占不合作的 Go callback。失败停止新工作并跳
 
 <!-- example: examples/tutorial/mixed.lip -->
 ```lip
-require host "load_text"
-require python "math"
+import host "load_text"
+import python "math"
 
 fn parse(text: string) -> number { return string.parse_number(text) }
 fn render(value: number) -> string { return str(value) }
@@ -750,7 +804,7 @@ go run -buildvcs=false ./examples/tutorial/mixed_demo
 遵循同一规则，不把 IO 藏进纯 callback。普通返回值自动进入 LIP 值域；不能
 直接表示的长期对象才使用下面的句柄 API。
 
-科学计算交给已安装 Python 包：require python "numpy" 等声明启用 Worker，
+科学计算交给已安装 Python 包：import python "numpy" 等声明启用 Worker，
 普通 dotted operation 由 Python Host 解析，不执行 pip 或锁定环境。
 完整 [examples/python/flow.lip](../examples/python/flow.lip) 调用 numpy.sum/mean、
 pandas.Series、describe 方法：
@@ -790,7 +844,7 @@ go run hello.go 小林
 Go 或仓库。`--emit-go` 的源码仍引用 `lipalpha/runtime`，以上 go run 在仓库
 模块上下文执行。库模式用 `--no-main --package name`，宿主提供 adapter。
 Host/Go 依赖的 standalone 入口
-会提示使用库模式。require go 也是环境元数据，不自动导入 Go 函数。
+会提示使用库模式。import go 也是环境元数据，不自动导入 Go 函数。
 
 完整本地验证：
 
@@ -810,5 +864,6 @@ bash scripts/verify-release.sh
 5. Report 加业务条件和 fail，同时补正常/失败样例。
 6. Host Demo 更新输入/State，观察复用，用取消 context 验证停止。
 
-当前仍无普通循环、闭包、泛型 iterator、代码热重载和自动包管理。小核心
+当前支持捕获不可变值的内联集合回调；普通循环、通用函数值/闭包、泛型 iterator、
+代码热重载和自动包管理仍未提供。小核心
 已可处理有界结构化任务，后续扩展依据真实程序的缺口和可验证失败契约。

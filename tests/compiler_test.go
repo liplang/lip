@@ -60,9 +60,9 @@ func TestGeneratedMainUsesOnlyDeclaredInputs(t *testing.T) {
 }
 
 func TestDependencyDeclarationsArePreserved(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`require python "numpy>=1.26"
-		require go "github.com/acme/adapter"
-		require host "load_profile"
+	graph, err := compiler.ParseAndBuild(`import python "numpy>=1.26"
+		import go "github.com/acme/adapter"
+		import host "load_profile"
 		flow Scientific(values: any) -> any { return values }`)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	if !strings.Contains(mainCode, "host/go dependencies require a Go host program") || strings.Contains(mainCode, "runtime.NewPythonWorker") {
 		t.Fatal("Host/Go standalone rejection must precede any Worker startup")
 	}
-	pythonOnly, err := compiler.ParseAndBuild(`require python "math" flow Root(x: number) -> number { return math.sqrt(x) }`)
+	pythonOnly, err := compiler.ParseAndBuild(`import python "math" flow Root(x: number) -> number { return math.sqrt(x) }`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,14 +97,14 @@ func TestDependencyDeclarationsArePreserved(t *testing.T) {
 	if !strings.Contains(pythonMain, "runtime.NewPythonWorker") || !strings.Contains(pythonMain, "runtime.NewPythonHost") {
 		t.Fatal("Python-only dependency did not activate the standalone worker")
 	}
-	if _, err := compiler.ParseAndBuild(`require python "numpy"
-		require python "numpy"
+	if _, err := compiler.ParseAndBuild(`import python "numpy"
+		import python "numpy"
 		flow Duplicate() -> any { return 1 }`); err == nil {
 		t.Fatal("expected duplicate dependency error")
 	}
 	if _, err := compiler.ParseAndBuild(`requires python "numpy"
-		flow Legacy() -> any { return 1 }`); err == nil || !strings.Contains(err.Error(), "require") {
-		t.Fatalf("expected singular require diagnostic, got %v", err)
+		flow Legacy() -> any { return 1 }`); err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("expected import migration diagnostic, got %v", err)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestBindingErrorsAreCompileErrors(t *testing.T) {
 }
 
 func TestDottedHostCallBuilds(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`require python "math"
+	graph, err := compiler.ParseAndBuild(`import python "math"
 	flow Python(input: number) -> any {
 		root = math.sqrt(input)
 		return root
@@ -144,18 +144,18 @@ func TestDottedHostCallBuilds(t *testing.T) {
 func TestExternalCallsNeedDependencyDeclarations(t *testing.T) {
 	if _, err := compiler.ParseAndBuild(`flow MissingPython(input: number) -> any {
 		return math.sqrt(input)
-	}`); err == nil || !strings.Contains(err.Error(), `require python "math"`) {
+	}`); err == nil || !strings.Contains(err.Error(), `import python "math"`) {
 		t.Fatalf("expected missing Python dependency diagnostic, got %v", err)
 	}
 	if _, err := compiler.ParseAndBuild(`flow MissingHost(input: string) -> any {
 		return fetch(input)
-	}`); err == nil || !strings.Contains(err.Error(), `require host "fetch"`) {
+	}`); err == nil || !strings.Contains(err.Error(), `import host "fetch"`) {
 		t.Fatalf("expected missing Host dependency diagnostic, got %v", err)
 	}
 }
 
 func TestEffectCallStatement(t *testing.T) {
-	graph, err := compiler.ParseAndBuild(`require host "print"
+	graph, err := compiler.ParseAndBuild(`import host "print"
 	flow Log(value: string) -> any {
         print(value)
         return value
@@ -747,7 +747,7 @@ func TestDynamicMapRejectsNonSequenceSource(t *testing.T) {
 	rt.Add(runtime.NodeSpec{Name: "mapped", Deps: []string{"value"}, Effect: runtime.EffectPure, Map: &runtime.MapSpec{Source: "value", Eval: func(_ context.Context, item runtime.Value, _ map[string]runtime.Value) runtime.Result {
 		return runtime.Ready(item)
 	}}})
-	if _, _, err := rt.Run(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "map source must be a list or slice") {
+	if _, _, err := rt.Run(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "map source: expected list, got number") {
 		t.Fatalf("error = %v, want sequence-source error", err)
 	}
 }

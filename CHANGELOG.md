@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- unified collection callbacks across map/filter/fold/scan/grouping/sorting with
+  inline pure `fn(x) { expression }` callbacks, optional type annotations and
+  immutable captures tracked as dependencies;
+- added `range(end)` and optional `return` for single-expression named/inline fn
+  bodies; improved callback signatures, accumulator types, sorting keys and
+  transpose errors while preserving their actual causes;
+- allowed comprehensions to use pure source expressions directly and compose in
+  call arguments, pure functions, conditionals and nested comprehensions;
+  standalone Maps retain bounded parallelism, composed Maps preserve ordered,
+  lazy evaluation without multiplying workers;
+- unified external declarations under `import`; Python modules now support explicit
+  `as` aliases and dotted module paths, preserving original names by default;
+- added REPL cursor editing, history with draft restoration, Unicode-aware deletion,
+  Tab completion, cancellation and bracketed multiline paste; piped input is quiet;
+- separated diagnostic repairs by their actual cause, with expected argument counts,
+  operation spelling suggestions and focused callback, type, dependency and return advice;
+- unified print/str/REPL value formatting and language type names in runtime errors;
+- added a compiled `lipc repl` with persistent values/functions, multiline input,
+  session commands and recovery after failed cells without replaying effects;
+- allowed effect-only Flows to omit their output declaration and return, with
+  optional explicit `-> void`; these programs no longer print an automatic null;
+- allowed files to contain top-level statements without a Flow wrapper, implicitly
+  executing as main() with no inputs or result through the same CLI/compiler path;
+- required newlines or semicolons between executable statements; same-line
+  statements now need `;`, with a repair hint in files and the REPL;
+- improved source errors with caret markers and specific repair examples; runtime
+  failures identify the source statement and suggest fixes instead of dumping graph internals;
 - consolidated line comments to `//` and conditionals to block-style `if`;
   removed legacy syntax parsing, migration, source-generation shorthand and short options;
 - consolidated Python adapter names to PythonWorker/PythonWorkerConfig and Python/Script;
@@ -111,7 +138,7 @@ Python control/data plane included in this release:
   mapped-array benchmarks.
 - made generated entry points strict: Flow parameters are required positional inputs,
   typed values are parsed without defaults or `LIP_INPUT`, and `any` uses JSON;
-- added top-level singular `require python/go/host "..."` dependency metadata, `lipc check`
+- added top-level Python/Go/Host dependency metadata, `lipc check`
   reporting, generated `RequiredDependencies()`, and automatic Python Worker startup
   for standalone programs that declare a Python requirement.
 - rejected Flows without any `return` output and declared Host requirements in the

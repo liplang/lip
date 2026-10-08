@@ -5,6 +5,18 @@ Go/Python/纯库组合从[教程](TUTORIAL.md)第 19 节的 mixed Flow 开始。
 set/frozenset 保留句柄，需要有序列表时调用 builtins.sorted。
 非有限数值和字符串化后冲突的对象键会报告错误。
 
+Python 调用参数可以直接组合 LIP 的纯列表表达式，在文件和 REPL 中均可使用：
+
+```lip
+import python "numpy" as np
+
+result = np.mean([x for x in range(1, 19)])
+print(result) // 9.5，range 包含 1 到 18。
+```
+
+推导式在 LIP 中生成列表，再传给 Python；不用为范围和变换各写一个中间变量。
+嵌套推导式顺序求值，独立 Map 仍使用现有有界调度。
+
 LIP 负责依赖图、Logical Tick、取消和调度，Python 提供 Worker 环境中
 已安装的科学计算、数据处理、机器学习和自定义库。
 `runtime.PythonWorker` 用 `os/exec` 管理常驻进程，通过
@@ -75,8 +87,8 @@ value, trace, err := scientific.Run(ctx, host, map[string]runtime.Value{
 对应的 LIP 仍是普通 Host 调用：
 
 ```lip
-require python "numpy>=1.26"
-require python "pandas"
+import python "numpy>=1.26"
+import python "pandas"
 
 flow Scientific(values: any) -> any {
     total = numpy.sum(values)
@@ -106,14 +118,21 @@ flow Scientific(values: any) -> any {
 拥有自身的操作系统权限；生产环境应使用专用虚拟环境、容器或外部 sandbox，并按需
 设置模块策略。
 
-文件头的 `require python "导入根或版本范围"` 是显式的依赖声明（例如 `sklearn`
-是 `scikit-learn` 的导入根）。`require go "模块"`
-用于说明承载生成包的 Go 程序需要哪个 Go module，`require host "操作名"` 用于
+文件头的 `import python "导入根或版本范围"` 是显式的依赖声明（例如 `sklearn`
+是 `scikit-learn` 的导入根，编译器不改名）。可以显式写
+`import python "sklearn" as ml`，随后调用 `ml.preprocessing.scale(...)`；
+不写 `as` 则仍用 `sklearn.preprocessing.scale(...)`。
+模块字符串也支持点分路径，如 `import python "xml.etree.ElementTree" as et`。
+别名只影响源码名称，不修改真实 Python 路径、安装包名或模块访问策略。
+模块与 LIP 标准库同名时，也可以用显式别名区分，如
+`import python "string" as text`，同时保留 LIP 的 `string.*` 操作。
+`import go "模块"`
+用于说明承载生成包的 Go 程序需要哪个 Go module，`import host "操作名"` 用于
 说明必须由宿主注册哪个 Host operation。`lipc check` 会打印这些声明，库模式的
 `RequiredDependencies()` 会把它们返回给部署代码；声明不会联网安装、不会自动
 修改解释器，也不会把一个固定库白名单写进编译器。Alpha 0.5 要求 dotted
-Python operation 有匹配的 `require python`（或明确的 `require host`），bare Host
-operation 有 `require host`；缺声明在 `lipc check` 阶段失败。这样通用库调用不受
+Python operation 有匹配的 `import python`（或明确的 `import host`），bare Host
+operation 有 `import host`；缺声明在 `lipc check` 阶段失败。这样通用库调用不受
 白名单限制，但源文件仍然完整地说明运行环境。
 
 ### 通用库调用，而不是逐个内置库
@@ -381,7 +400,7 @@ Effect、Tick 和取消语义不应改变。
 
 ## 暂不做的事情
 
-- 不把 Python/Go `import` 执行语义和包管理塞进 LIP 核心；`require` 只提供可审计
+- 不把 Python/Go `import` 执行语义和包管理塞进 LIP 核心；`import` 只提供可审计
   的依赖元数据，库调用通过 Python Host 的通用 dotted operation 完成；
 - 不让 Python Worker 反向驱动隐式 Tick、绕过 State 或持有无界后台任务；
 - 不把 JSON 数组协议宣传成高性能张量通道；

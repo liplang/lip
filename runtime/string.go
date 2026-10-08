@@ -19,7 +19,7 @@ const MaxStringBytes = 16 * 1024 * 1024
 func stringInput(value Value) (string, error) {
 	text, ok := value.(string)
 	if !ok {
-		return "", fmt.Errorf("expects string, got %T", value)
+		return "", fmt.Errorf("expects string, got %s", TypeName(value))
 	}
 	if len(text) > MaxStringBytes {
 		return "", fmt.Errorf("string exceeds %d bytes", MaxStringBytes)
@@ -58,7 +58,7 @@ func StringCall(ctx context.Context, name string, args []Value) (result Value, e
 		return nil, fmt.Errorf("unknown string operation")
 	}
 	if len(args) < spec.MinArgs || len(args) > spec.MaxArgs {
-		return nil, fmt.Errorf("invalid argument count: got %d", len(args))
+		return nil, argumentCountError(spec.MinArgs, spec.MaxArgs, len(args))
 	}
 	for index, arg := range args {
 		if err := CheckType(arg, spec.Types[index]); err != nil {

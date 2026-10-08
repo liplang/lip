@@ -12,9 +12,10 @@ import (
 )
 
 type GenerateOptions struct {
-	PackageName string
-	IncludeMain bool
-	TracePath   string // Explicit standalone execution trace destination.
+	PackageName        string
+	IncludeMain        bool
+	TracePath          string // Explicit standalone execution trace destination.
+	IncludeDiagnostics bool   // Include source-aware executionError for custom entry points.
 }
 
 func GenerateGo(g *Graph) (string, error) {
@@ -53,9 +54,13 @@ func GenerateGoWithOptions(g *Graph, options GenerateOptions) (string, error) {
 		}
 	}
 	b.WriteString("\n\t\"lipalpha/runtime\"\n)\n\n")
-	b.WriteString("type Dependency struct { Kind string; Spec string }\n\nfunc RequiredDependencies() []Dependency { return []Dependency{")
+	b.WriteString("type Dependency struct { Kind string; Spec string; Alias string }\n\nfunc RequiredDependencies() []Dependency { return []Dependency{")
 	for _, dependency := range g.Dependencies {
-		fmt.Fprintf(&b, "{Kind: %s, Spec: %s},", quote(dependency.Kind), quote(dependency.Spec))
+		fmt.Fprintf(&b, "{Kind: %s, Spec: %s", quote(dependency.Kind), quote(dependency.Spec))
+		if dependency.Alias != "" {
+			fmt.Fprintf(&b, ", Alias: %s", quote(dependency.Alias))
+		}
+		b.WriteString("},")
 	}
 	b.WriteString("} }\n\n")
 	if options.IncludeMain {
@@ -168,13 +173,21 @@ func GenerateGoWithOptions(g *Graph, options GenerateOptions) (string, error) {
 			continue
 		}
 		if comp, ok := n.Expr.(*ast.ComprehensionExpr); ok {
-			source, sourceOK := comp.Source.(*ast.IdentExpr)
-			if !sourceOK {
-				return "", fmt.Errorf("node %s: comprehension source must be an identifier", n.Name)
-			}
 			ops := callNames(comp.Element)
 			effect := generatedEffect(comp.Element, g.Functions)
-			fmt.Fprintf(&b, "\tg.Add(runtime.NodeSpec{Name: %s, Effect: %s, Deps: %s, Gates: %s, Map: &runtime.MapSpec{Source: %s, Ops: %s, Eval: func(ctx context.Context, item runtime.Value, values map[string]runtime.Value) runtime.Result {\n", quote(n.Name), effect, stringSlice(n.Deps), stringSlice(n.Gates), quote(source.Name), stringSlice(ops))
+			fmt.Fprintf(&b, "\tg.Add(runtime.NodeSpec{Name: %s, Effect: %s, Deps: %s, Gates: %s, Map: &runtime.MapSpec{", quote(n.Name), effect, stringSlice(n.Deps), stringSlice(n.Gates))
+			if source, ok := comp.Source.(*ast.IdentExpr); ok {
+				fmt.Fprintf(&b, "Source: %s,", quote(source.Name))
+			} else {
+				b.WriteString("SourceEval: func(ctx context.Context, values map[string]runtime.Value) runtime.Result {\n")
+				source, err := emitExpr(comp.Source)
+				if err != nil {
+					return "", fmt.Errorf("node %s: comprehension source: %w", n.Name, err)
+				}
+				b.WriteString(source)
+				b.WriteString("\n\t\t},")
+			}
+			fmt.Fprintf(&b, " Ops: %s, Eval: func(ctx context.Context, item runtime.Value, values map[string]runtime.Value) runtime.Result {\n", stringSlice(ops))
 			expr, err := emitMapElement(comp)
 			if err != nil {
 				return "", fmt.Errorf("node %s: %w", n.Name, err)
@@ -243,6 +256,23 @@ func GenerateGoWithOptions(g *Graph, options GenerateOptions) (string, error) {
 	b.WriteString("func Run(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error) { if err := checkInputs(inputs); err != nil { return nil, nil, err }; if err := checkHost(host); err != nil { return nil, nil, err }; return buildGraph(host).RunAuto(ctx, host, inputs) }\n\n")
 	b.WriteString("func RunSequential(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value) (runtime.Value, []runtime.TraceEvent, error) { if err := checkInputs(inputs); err != nil { return nil, nil, err }; if err := checkHost(host); err != nil { return nil, nil, err }; return buildGraph(host).Run(ctx, inputs) }\n\n")
 	b.WriteString("func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runtime.Value, limit int) (runtime.Value, []runtime.TraceEvent, error) { if err := checkInputs(inputs); err != nil { return nil, nil, err }; if err := checkHost(host); err != nil { return nil, nil, err }; return buildGraph(host).RunParallel(ctx, host, inputs, limit) }\n")
+	if options.IncludeMain || options.IncludeDiagnostics {
+		b.WriteString("\nfunc executionError(err error, trace []runtime.TraceEvent) error {\n\tmessage, context := err.Error(), \"\"\n\tfor _, event := range trace {\n\t\tif event.Status != runtime.Error { continue }; switch event.Node {\n")
+		lines := strings.Split(g.Source, "\n")
+		for _, node := range g.Nodes {
+			path := g.SourceName
+			if path == "" {
+				path = "<input>"
+			}
+			d := Diagnostic{Line: node.Pos.Line, Column: node.Pos.Column}
+			if d.Line > 0 && d.Line <= len(lines) {
+				d.SourceLine = strings.TrimSuffix(lines[d.Line-1], "\r")
+			}
+			prefix := fmt.Sprintf("%s:%d:%d: ", path, d.Line, d.Column)
+			fmt.Fprintf(&b, "\t\tcase %s: message = %s + event.Reason; context = %s\n", quote(node.Name), quote(prefix), quote(diagnosticContext(d)))
+		}
+		b.WriteString("\t\t}; break\n\t}\n\tif hint := runtime.ExecutionHint(err); hint != \"\" { context += \"\\n  hint: \" + hint }; return fmt.Errorf(\"%s%s\", message, context)\n}\n")
+	}
 	if options.IncludeMain {
 		b.WriteString("\nfunc main() { os.Exit(runMain()) }\n\nfunc runMain() int {\n\tinputs, err := parseCLIInputs(os.Args[1:])\n\tif err != nil { fmt.Fprintln(os.Stderr, err); return 2 }\n\t_ = inputs\n")
 		if hasHostOrGoDependency(g) {
@@ -251,7 +281,7 @@ func GenerateGoWithOptions(g *Graph, options GenerateOptions) (string, error) {
 			b.WriteString("\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\thost := runtime.DefaultHost()\n")
 			if hasPythonDependency(g) {
 				// A standalone program opts into the Python process only through an
-				// explicit require python declaration. Library mode leaves ownership
+				// explicit import python declaration. Library mode leaves ownership
 				// to its Go host so it can choose the interpreter and policy.
 				b.WriteString("\tworker, err := runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{})\n\tif err != nil { fmt.Fprintln(os.Stderr, \"python worker:\", err); return 1 }\n\tdefer worker.Close()\n\thost = runtime.NewPythonHost(worker)\n")
 			}
@@ -261,8 +291,12 @@ func GenerateGoWithOptions(g *Graph, options GenerateOptions) (string, error) {
 				fmt.Fprintf(&b, "\tif traceErr == nil { var traceFile *os.File; traceFile, traceErr = os.Create(%s); if traceErr == nil { traceErr = runtime.WriteTrace(traceFile, trace, err); closeErr := traceFile.Close(); if traceErr == nil { traceErr = closeErr } } }\n", quote(options.TracePath))
 				b.WriteString("\tif traceErr != nil { if err != nil { fmt.Fprintln(os.Stderr, \"error:\", err) }; fmt.Fprintln(os.Stderr, \"trace:\", traceErr); return 1 }\n")
 			}
-			b.WriteString("\tif err != nil { fmt.Fprintln(os.Stderr, \"error:\", err); for _, event := range trace { fmt.Fprintf(os.Stderr, \"%s %s %s\\n\", event.Node, event.Status, event.Reason) }; return 1 }\n")
-			b.WriteString("\toutput, err := runtime.FormatValue(value); if err != nil { fmt.Fprintln(os.Stderr, err); return 1 }; fmt.Println(output)\n\treturn 0\n")
+			b.WriteString("\tif err != nil { fmt.Fprintln(os.Stderr, \"error:\", executionError(err, trace)); return 1 }\n")
+			if g.ReturnType == "void" {
+				b.WriteString("\t_ = value\n\treturn 0\n")
+			} else {
+				b.WriteString("\toutput, err := runtime.FormatValue(value); if err != nil { fmt.Fprintln(os.Stderr, err); return 1 }; fmt.Println(output)\n\treturn 0\n")
+			}
 		}
 		b.WriteString("}\n")
 	}
@@ -305,7 +339,7 @@ func emitMapElement(comp *ast.ComprehensionExpr) (string, error) {
 }
 
 func emitResultExpr(expr ast.Expr, emitter *valueEmitter) (string, error) {
-	if call, ok := expr.(*ast.CallExpr); ok && !pureBuiltinName(call.Name) {
+	if call, ok := expr.(*ast.CallExpr); ok && (call.Python || !pureBuiltinName(call.Name)) {
 		args := make([]string, len(call.Args))
 		for i, arg := range call.Args {
 			value, err := emitter.value(arg)
@@ -361,7 +395,7 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 	case *ast.IdentExpr:
 		return e.ident(x.Name), nil
 	case *ast.CallExpr:
-		if _, ok := stringops.Lookup(x.Name); ok {
+		if _, ok := stringops.Lookup(x.Name); ok && !x.Python {
 			args := make([]string, len(x.Args))
 			for index, arg := range x.Args {
 				value, err := e.value(arg)
@@ -375,16 +409,16 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 			e.line("if err != nil { return runtime.Failed(err) }")
 			return value, nil
 		}
-		if spec, ok := listops.Lookup(x.Name); ok {
+		if spec, ok := listops.Lookup(x.Name); ok && !x.Python {
 			args := []string{}
 			reducer := "nil"
 			for index, arg := range x.Args {
 				if index == spec.Callback {
-					fn, ok := arg.(*ast.IdentExpr)
-					if !ok {
-						return "", fmt.Errorf("list callback must name a local function")
+					var err error
+					reducer, err = e.callback(arg)
+					if err != nil {
+						return "", err
 					}
-					reducer = "__lip_fn_" + fn.Name + "(host)"
 				} else {
 					value, err := e.value(arg)
 					if err != nil {
@@ -402,10 +436,6 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 			if len(x.Args) != 3 {
 				return "", fmt.Errorf("fold expects 3 arguments")
 			}
-			reducer, ok := x.Args[2].(*ast.IdentExpr)
-			if !ok {
-				return "", fmt.Errorf("fold reducer must name a local function")
-			}
 			source, err := e.value(x.Args[0])
 			if err != nil {
 				return "", err
@@ -414,8 +444,12 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			reducer, err := e.callback(x.Args[2])
+			if err != nil {
+				return "", err
+			}
 			value := e.temp()
-			e.line("%s, err := runtime.Fold(ctx, %s, %s, __lip_fn_%s(host))", value, source, seed, reducer.Name)
+			e.line("%s, err := runtime.Fold(ctx, %s, %s, %s)", value, source, seed, reducer)
 			e.line("if err != nil { return runtime.Failed(err) }")
 			return value, nil
 		}
@@ -523,6 +557,28 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 			items[i] = value
 		}
 		return "[]runtime.Value{" + strings.Join(items, ", ") + "}", nil
+	case *ast.ComprehensionExpr:
+		// Keep composed maps inside the current expression: lifting them into
+		// eager graph nodes would break short-circuiting and evaluation order.
+		source, err := e.value(x.Source)
+		if err != nil {
+			return "", err
+		}
+		value, item := e.temp(), e.temp()
+		e.line("%s, err := runtime.MapValues(ctx, %s, func(ctx context.Context, %s runtime.Value) runtime.Result {", value, source, item)
+		body := e.child(e.indent + "\t")
+		body.ident = func(name string) string {
+			if name == x.Variable {
+				return item
+			}
+			return e.ident(name)
+		}
+		if _, err := emitResultExpr(x.Element, body); err != nil {
+			return "", err
+		}
+		e.line("})")
+		e.line("if err != nil { return runtime.Failed(err) }")
+		return value, nil
 	case *ast.FieldExpr:
 		object, err := e.value(x.Object)
 		if err != nil {
@@ -576,6 +632,48 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 	}
 }
 
+func (e *valueEmitter) callback(expr ast.Expr) (string, error) {
+	if named, ok := expr.(*ast.IdentExpr); ok {
+		return "__lip_fn_" + named.Name + "(host)", nil
+	}
+	fn, ok := expr.(*ast.LambdaExpr)
+	if !ok {
+		return "", fmt.Errorf("callback must be a local pure function name or inline fn")
+	}
+	callback, args := e.temp(), e.temp()
+	e.line("%s := runtime.Op(func(ctx context.Context, %s []runtime.Value) runtime.Result {", callback, args)
+	body := e.child(e.indent + "\t")
+	params := map[string]int{}
+	for index, param := range fn.Params {
+		params[param] = index
+	}
+	body.ident = func(name string) string {
+		if index, exists := params[name]; exists {
+			return fmt.Sprintf("%s[%d]", args, index)
+		}
+		return e.ident(name)
+	}
+	body.line("ctx, err := runtime.EnterFunction(ctx); if err != nil { return runtime.Failed(err) }")
+	body.line("if len(%s) != %d { return runtime.Failed(fmt.Errorf(\"callback expects %d arguments, got %%d\", len(%s))) }", args, len(fn.Params), len(fn.Params), args)
+	for index, param := range fn.Params {
+		if typ := paramType(fn.ParamTypes, param); typ != "any" {
+			body.line("if err := runtime.CheckType(%s[%d], %s); err != nil { return runtime.Failed(fmt.Errorf(\"callback argument %s: %%w\", err)) }", args, index, quote(typ), param)
+		}
+	}
+	value, err := body.value(fn.Return)
+	if err != nil {
+		return "", err
+	}
+	resultType := fn.ReturnType
+	if resultType == "" {
+		resultType = fn.InferredReturnType
+	}
+	body.line("if err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"callback result: %%w\", err)) }", value, quote(runtimeType(resultType)))
+	body.line("return runtime.Ready(%s)", value)
+	e.line("})")
+	return callback, nil
+}
+
 func emitFunction(fn *ast.Function) (string, error) {
 	params := make(map[string]int, len(fn.Params))
 	for i, param := range fn.Params {
@@ -610,54 +708,70 @@ func emitFunction(fn *ast.Function) (string, error) {
 	return b.String(), nil
 }
 
+func visitCalls(expr ast.Expr, visit func(*ast.CallExpr)) {
+	switch x := expr.(type) {
+	case *ast.CallExpr:
+		visit(x)
+		for _, arg := range x.Args {
+			visitCalls(arg, visit)
+		}
+	case *ast.UnaryExpr:
+		visitCalls(x.Operand, visit)
+	case *ast.LambdaExpr:
+		visitCalls(x.Return, visit)
+	case *ast.ObjectExpr:
+		for _, field := range x.Fields {
+			visitCalls(field.Value, visit)
+		}
+	case *ast.BinaryExpr:
+		visitCalls(x.Left, visit)
+		visitCalls(x.Right, visit)
+	case *ast.IfExpr:
+		visitCalls(x.Cond, visit)
+		visitCalls(x.Then, visit)
+		visitCalls(x.Else, visit)
+	case *ast.ListExpr:
+		for _, item := range x.Items {
+			visitCalls(item, visit)
+		}
+	case *ast.ComprehensionExpr:
+		visitCalls(x.Element, visit)
+		visitCalls(x.Source, visit)
+	case *ast.FieldExpr:
+		visitCalls(x.Object, visit)
+	case *ast.IndexExpr:
+		visitCalls(x.Object, visit)
+		visitCalls(x.Index, visit)
+	}
+}
+
+func firstPythonCall(expr ast.Expr) *ast.CallExpr {
+	var result *ast.CallExpr
+	visitCalls(expr, func(call *ast.CallExpr) {
+		if call.Python && result == nil {
+			result = call
+		}
+	})
+	return result
+}
+
 func callNames(expr ast.Expr) []string {
 	seen := map[string]bool{}
 	var names []string
-	var visit func(ast.Expr)
-	visit = func(e ast.Expr) {
-		switch x := e.(type) {
-		case *ast.CallExpr:
-			if !seen[x.Name] {
-				seen[x.Name] = true
-				names = append(names, x.Name)
-			}
-			if index := callbackIndex(x); index >= 0 {
-				if reducer, ok := x.Args[index].(*ast.IdentExpr); ok && !seen[reducer.Name] {
-					seen[reducer.Name] = true
-					names = append(names, reducer.Name)
-				}
-			}
-			for _, arg := range x.Args {
-				visit(arg)
-			}
-		case *ast.UnaryExpr:
-			visit(x.Operand)
-		case *ast.ObjectExpr:
-			for _, field := range x.Fields {
-				visit(field.Value)
-			}
-		case *ast.BinaryExpr:
-			visit(x.Left)
-			visit(x.Right)
-		case *ast.IfExpr:
-			visit(x.Cond)
-			visit(x.Then)
-			visit(x.Else)
-		case *ast.ListExpr:
-			for _, item := range x.Items {
-				visit(item)
-			}
-		case *ast.ComprehensionExpr:
-			visit(x.Element)
-			visit(x.Source)
-		case *ast.FieldExpr:
-			visit(x.Object)
-		case *ast.IndexExpr:
-			visit(x.Object)
-			visit(x.Index)
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
 		}
 	}
-	visit(expr)
+	visitCalls(expr, func(call *ast.CallExpr) {
+		add(call.Name)
+		if index := callbackIndex(call); index >= 0 {
+			if reducer, ok := call.Args[index].(*ast.IdentExpr); ok {
+				add(reducer.Name)
+			}
+		}
+	})
 	return names
 }
 
@@ -723,6 +837,9 @@ func generatedEffect(expr ast.Expr, functions []*ast.Function) string {
 }
 
 func pureExpression(expr ast.Expr, functions []*ast.Function) bool {
+	if firstPythonCall(expr) != nil {
+		return false
+	}
 	for _, called := range callNames(expr) {
 		if pureBuiltinName(called) {
 			continue

@@ -11,6 +11,8 @@
 | 构造数据与完整边界 | ObjectExpr/UnaryExpr/null，list/object 参数与可选 null 输出；三条 CLI 路径 conformance |
 | Rust 优先的表达式风格 | 唯一块式 if、// 行注释、显式 Flow 边界；拒绝旧语法的回归测试 |
 | range/Map/fold | 半开区间、数量上限、稳定 Map、顺序归约、空输入、错误索引和取消测试 |
+| 可组合推导式 | 纯 source 表达式、调用参数、fn、多层嵌套；变量遮蔽、惰性分支、错误顺序、取消、增量复用与真实 Python/REPL 验证 |
+| 统一集合回调 | map/filter/fold/scan/group_by/split_by/sort_by/any/all 内联纯 fn；捕获依赖、参数遮蔽、短路、类型/元素错误与 REPL 验证 |
 | 纯递归 | 递归环结果类型验证、每次调用的 Context/256 深度检查；直接/间接及经 list.map 的递归 conformance |
 | 34 个纯 list 操作 | internal/listops 共用签名，全部目录项正面测试；空输入、分组/排序稳定性、形状、取消、错误与不修改输入 |
 | 19 个纯 string 操作 | internal/stringops 共用签名；Unicode、空项、字面匹配、解析、资源/错误与组合验证 |
@@ -24,10 +26,13 @@
 | Go/Python/库自然组合 | 同一 Flow 的调用/native 值，三种调度一致；所有外部调用遵循相同纯性规则 |
 | Python 数据完整性 | 非有限、键碰撞、无序 set 不隐式丢信息；失败转换回收新句柄 |
 | AI 修复接口 | diagnostics.v1、位置/源行/hints/退出码实际 CLI 测试，仍检查首个错误 |
+| 交互输入编辑 | 光标/历史/草稿恢复、中文/组合字符/emoji、删除/取消/多行粘贴和补全回归 |
+| 导入名称归属 | import 与 Python as；保留真实模块名，别名冲突、点分模块、AST 不变与 REPL 持续声明验证 |
+| 诊断与显示一致性 | 参数数量独立分类，拼写建议与具体类型/回调修法；print/str/REPL 使用相同核心值格式 |
 
 list 标准库不是新增控制流或 Host 操作集合；纯调用由生成代码直接分派，不能
-被宿主同名 operation 重定义。list.map 顺序执行，Map 推导式保留 Runtime 展开和
-并行能力。大区间、大组合结果、非矩形转置和过深递归均明确失败。
+被宿主同名 operation 重定义。list.map 和嵌入表达式的推导式顺序执行，独立
+Map 推导式保留 Runtime 展开和并行能力。大区间、大组合结果、非矩形转置和过深递归均明确失败。
 
 ## 收敛决定
 
@@ -37,7 +42,7 @@ list 标准库不是新增控制流或 Host 操作集合；纯调用由生成代
 - 所有 CLI 工具选项使用长形式并位于入口文件前，文件后全部是程序输入。
 - 删除旧语法解析、迁移入口、隐式源码生成与过期规范，版本历史集中在 CHANGELOG。
 - 新的数据操作进入独立纯标准库和统一目录，语法不为每个列表操作增加关键字。
-- 普通循环、闭包、泛型 iterator 与新后端延后；用实际项目缺口决定下一步。
+- 普通循环、通用函数值/闭包、泛型 iterator 与新后端延后；内联集合回调已支持不可变捕获。
 - 字符串索引改为 Unicode 字符字符串，与 len 一致；这是显式记录的 Alpha 语义变更。
 
 ## 验证入口
@@ -48,9 +53,9 @@ bash scripts/verify-release.sh
 
 脚本执行 tests/race/vet/build、全部示例与 conformance 的检查/Go 生成/构建/vet，
 以及 core/range/tree/lists 的独立运行验收。最新结果见 [RELEASE.md](../RELEASE.md)。
-0.6.0 完整验收为 33 份源程序；0.6.1 扩至 47 份，最新完整执行结果记录在
-RELEASE：2026-10-07 tests/race/vet/build 与 47 份源程序全部通过。
-额外 compiler fuzz 设置 10 秒、2 worker，通过 240,582 次执行，
+0.6.0 完整验收为 33 份源程序；0.6.1 最初扩至 47 份，现为 51 份。
+最新完整执行结果记录在 RELEASE：2026-10-08 tests/race/vet/build 与 51 份源程序全部通过。
+额外 compiler fuzz 含嵌套推导式与内联回调 seed，设置 10 秒、2 worker，通过 75,461 次执行，
 检查随机输入无崩溃、接受的程序能生成可格式化 Go。
 
 实际修正：字符串 * 仅防整数溢出仍可巨量分配；Map/fold 缺输入上限；文件

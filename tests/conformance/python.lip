@@ -1,4 +1,4 @@
-require python "math"
+import python "math"
 
 flow Python(value: number) -> number {
     return math.sqrt(value)

@@ -64,6 +64,9 @@ test "$("$verify_dir/lipc" run examples/strings.lip '')" = '{"count":0,"label":"
 test "$("$verify_dir/lipc" run --trace "$verify_dir/trace.json" examples/core.lip '[1,2,3]')" = '{"average":4,"count":3,"total":12,"values":[2,4,6]}'
 test "$("$verify_dir/lipc" run examples/core.lip '[]')" = '{"average":null,"count":0,"total":0,"values":[]}'
 test "$("$verify_dir/lipc" run examples/range.lip 5)" = '{"total":30,"values":[0,1,4,9,16]}'
+test "$("$verify_dir/lipc" run examples/comprehensions.lip 4)" = '{"count":3,"rows":[[1],[2,3],[3,4,5]],"total":14,"values":[1,4,9]}'
+test "$("$verify_dir/lipc" run examples/aggregation.lip 4)" = '{"descending":[3,2,1,0],"groups":[{"key":false,"values":[0,1,2]},{"key":true,"values":[3]}],"prefixes":[0,0,1,3,6],"selected":[3],"squares":[0,1,4,9],"total":6}'
+test "$("$verify_dir/lipc" run examples/aggregation.lip 0)" = '{"descending":[],"groups":[],"prefixes":[0],"selected":[],"squares":[],"total":0}'
 test "$("$verify_dir/lipc" run examples/tree.lip '{"value":1,"left":{"value":2,"left":null,"right":null},"right":null}')" = '3'
 "$verify_dir/lipc" run examples/lists.lip '[{"department":"A","amount":3},{"department":"B","amount":2},{"department":"A","amount":-1}]' >"$verify_dir/lists.json"
 "$verify_dir/lipc" build --output "$verify_dir/report" examples/core.lip >/dev/null

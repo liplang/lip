@@ -196,3 +196,21 @@ func TestListCallbacksShortCircuitAndErrors(t *testing.T) {
 		t.Fatalf("cancelled callback: %v %d", err, calls)
 	}
 }
+
+func TestListErrorsKeepTheActualCause(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []Value
+		want string
+	}{
+		{"list.transpose", []Value{[]Value{[]Value{1}, 2}}, "row 1: expected list, got number"},
+		{"list.transpose", []Value{[]Value{make([]Value, MaxListLength+1)}}, "row 0: list result exceeds"},
+		{"list.sort", []Value{[]Value{1, "two"}}, "element 1 has type string, expected number"},
+		{"list.sort", []Value{[]Value{nil}}, "element 0 must be number or string, got null"},
+	} {
+		_, err := ListCall(context.Background(), tc.name, tc.args, nil)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+	}
+}

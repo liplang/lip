@@ -11,13 +11,13 @@ import (
 
 func TestStringStaticChecks(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
-		{`fn f(flag:bool){return if flag {fail("stop")} else {"wrong"}} flow Bad(flag:bool)->number{x=f(flag) return x}`, "return has type string"},
+		{`fn f(flag:bool){return if flag {fail("stop")} else {"wrong"}} flow Bad(flag:bool)->number{x=f(flag); return x}`, "return has type string"},
 		{`flow Bad()->number{return fail(1)}`, "expects string"},
-		{`flow Bad()->number{return fail()}`, "expects 1 string argument"},
-		{`require host "string.nope" flow Bad()->string{return string.nope("x")}`, "unknown string operation"},
+		{`flow Bad()->number{return fail()}`, "expects 1 argument"},
+		{`import host "string.nope" flow Bad()->string{return string.nope("x")}`, "unknown string operation"},
 		{`flow Bad()->string{return string.trim(1)}`, "expects string"},
 		{`flow Bad()->string{return string.join("x",",")}`, "expects list"},
-		{`flow Bad()->string{return string.replace("x","x")}`, "argument count"},
+		{`flow Bad()->string{return string.replace("x","x")}`, "expects 3 or 4 arguments"},
 		{`flow Bad()->number{return string.slice("x",0,1)}`, "return has type string"},
 		{`flow Bad()->list{return string.split("x",1)}`, "expects string"},
 	} {
