@@ -13,7 +13,7 @@ type Program struct {
 type Dependency struct {
 	Kind  string // "python", "go", or "host"
 	Spec  string
-	Alias string // Optional local name for a Python module.
+	Alias string // Optional local name for an imported namespace or Host operation.
 	Pos   token.Pos
 }
 
@@ -49,13 +49,41 @@ type BindStmt struct {
 
 func (*BindStmt) stmtNode() {}
 
-type WhenStmt struct {
-	Cond Expr
-	Body []Stmt
+type MatchStmt struct {
+	Value Expr
+	Arms  []MatchArm
+	Pos   token.Pos
+}
+
+func (*MatchStmt) stmtNode() {}
+
+// ForStmt executes a finite list in source order without collecting results.
+type ForStmt struct {
+	Variable string
+	Source   Expr
+	Body     []Stmt
+	Pos      token.Pos
+}
+
+func (*ForStmt) stmtNode() {}
+
+// Loop controls target the closest enclosing statement for.
+type LoopControlStmt struct {
+	Kind string
 	Pos  token.Pos
 }
 
-func (*WhenStmt) stmtNode() {}
+func (*LoopControlStmt) stmtNode() {}
+
+// A nil Pattern is the wildcard _. Guards are evaluated only after the pattern
+// matches. Statement arms use Body; expression arms use Expr.
+type MatchArm struct {
+	Pattern *LiteralExpr
+	Guard   Expr
+	Body    []Stmt
+	Expr    Expr
+	Pos     token.Pos
+}
 
 type ReturnStmt struct {
 	Expr Expr
@@ -64,8 +92,8 @@ type ReturnStmt struct {
 
 func (*ReturnStmt) stmtNode() {}
 
-// ExprStmt is an effect-only call such as print(value). Alpha 0.2 does not
-// allow arbitrary unused expressions; the compiler accepts only call forms.
+// ExprStmt discards a call's result, as in print(value). Files accept only call
+// forms as expression statements; the REPL also displays a final expression.
 type ExprStmt struct {
 	Expr Expr
 	Pos  token.Pos
@@ -78,6 +106,8 @@ type Expr interface{ exprNode() }
 type IdentExpr struct {
 	Name string
 	Pos  token.Pos
+	// OperationKind records the backend for feedback operation references.
+	OperationKind string
 }
 
 func (*IdentExpr) exprNode() {}
@@ -94,9 +124,18 @@ type CallExpr struct {
 	Name string
 	Args []Expr
 	Pos  token.Pos
+	// Local distinguishes pure functions from imported Host operations with
+	// the same canonical name.
+	Local bool
 	// Explicit Python imports keep their identity after alias resolution, even
 	// when the module name also names a LIP standard-library namespace.
 	Python bool
+	// Host preserves imported Host/Go identity even when its canonical name
+	// coincides with a core builtin or standard-library namespace.
+	Host bool
+	// PythonAttribute reads Name instead of invoking it. Modules and callables
+	// are returned as descriptive references; scalar attributes are values.
+	PythonAttribute bool
 }
 
 func (*CallExpr) exprNode() {}
@@ -136,6 +175,14 @@ type IfExpr struct {
 }
 
 func (*IfExpr) exprNode() {}
+
+type MatchExpr struct {
+	Value Expr
+	Arms  []MatchArm
+	Pos   token.Pos
+}
+
+func (*MatchExpr) exprNode() {}
 
 type ListExpr struct {
 	Items []Expr

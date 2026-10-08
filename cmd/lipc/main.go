@@ -19,7 +19,7 @@ import (
 	"lipalpha/runtime"
 )
 
-const version = "0.6.1"
+const version = runtime.Version
 
 func main() {
 	os.Exit(execute(os.Args[1:]))
@@ -54,6 +54,8 @@ func execute(args []string) int {
 		return run(args[1:])
 	case "repl":
 		return repl(args[1:])
+	case "learn":
+		return learn(args[1:])
 	default:
 		if strings.HasPrefix(args[0], "-") {
 			return usageError("", fmt.Sprintf("unknown option %q", args[0]))
@@ -294,7 +296,9 @@ func compileModule(root, output string) error {
 	if err := os.MkdirAll(filepath.Dir(absoluteOutput), 0o755); err != nil {
 		return err
 	}
-	command := exec.Command("go", "build", "-buildvcs=false", "-mod=readonly", "-o", absoluteOutput, ".")
+	// Normalize disposable module paths so identical bundled runtime sources
+	// share Go's cache and binaries contain no discarded build-directory paths.
+	command := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-mod=readonly", "-o", absoluteOutput, ".")
 	command.Dir = root
 	command.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
 	command.Stdout = os.Stdout
@@ -424,6 +428,7 @@ func usage() {
 	fmt.Print("usage: lipc <command> [options]\n\n")
 	for _, command := range [][3]string{
 		{"repl", "[--quiet]", "Start an interactive session"},
+		{"learn", "[--list] [--lesson id] [--no-progress]", "Learn LIP through guided exercises"},
 		{"run", "[--trace path.json] file.lip [inputs...]", "Compile and run"},
 		{"build", "[--output path] file.lip", "Build an executable"},
 		{"check", "[--json] file.lip", "Check a program"},
@@ -449,6 +454,13 @@ func help(args []string) int {
 		return 0
 	}
 	switch args[0] {
+	case "learn":
+		fmt.Println("usage: lipc learn [--list] [--lesson id|number] [--progress path] [--no-progress]")
+		fmt.Println("中文交互课程：讲解、可运行示例、代码练习、多组输入验证和逐步提示。")
+		fmt.Println("课程内置于 lipc，无需仓库或网络；执行代码需要 Go 1.27，Python 课程另需 Python。")
+		fmt.Println("默认在当前目录的 .lip-learn-progress.json 保存进度；--no-progress 禁用读写。")
+		fmt.Println("--list 查看课程，--lesson 从编号或课程 ID 开始，--progress 指定进度文件。")
+		fmt.Println(":help 查看交互命令。多行程序用 :edit 开始、:submit 提交；:quit 或 EOF 退出。")
 	case "repl":
 		fmt.Println("usage: lipc repl [--quiet]")
 		fmt.Println("Evaluate expressions, bindings and fn declarations with Go 1.27 or newer.")

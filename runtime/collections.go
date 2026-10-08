@@ -31,7 +31,7 @@ func EnterFunction(ctx context.Context) (context.Context, error) {
 }
 
 func Length(value Value) (Value, error) {
-	if text, ok := value.(string); ok {
+	if text, ok := scalarString(value); ok {
 		if _, err := stringInput(text); err != nil {
 			return nil, err
 		}

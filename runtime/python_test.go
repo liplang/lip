@@ -27,6 +27,69 @@ func newTestPythonWorker(t *testing.T) *PythonWorker {
 	return worker
 }
 
+func TestPythonWorkerAttributesAndNamedReferences(t *testing.T) {
+	worker := newTestPythonWorker(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		path string
+		want Value
+	}{
+		{"math.pi", 3.141592653589793},
+		{"math.sqrt", map[string]any{"$python_ref": "math.sqrt", "kind": "function"}},
+		{"math", map[string]any{"$python_ref": "math", "kind": "module"}},
+		{"datetime.datetime", map[string]any{"$python_ref": "datetime.datetime", "kind": "class"}},
+		{"xml.etree.ElementTree.VERSION", "1.3.0"},
+	} {
+		result := worker.Call(ctx, "python.getattr", []Value{tc.path})
+		if result.Err != nil || !reflect.DeepEqual(result.Value, tc.want) {
+			t.Fatalf("%s: value=%#v error=%v", tc.path, result.Value, result.Err)
+		}
+	}
+	// References survive the end of a worker, unlike opaque object handles.
+	reference := worker.Call(ctx, "python.getattr", []Value{"math.sqrt"})
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next := newTestPythonWorker(t)
+	result := next.Call(ctx, "python.call", []Value{reference.Value, "__call__", []Value{81}})
+	if result.Err != nil || result.Value != float64(9) {
+		t.Fatalf("reference in another worker: %#v, %v", result.Value, result.Err)
+	}
+	result = next.Call(ctx, "python.getattr", []Value{"math.squrt"})
+	var pythonErr *PythonError
+	if !errors.As(result.Err, &pythonErr) || pythonErr.Type != "AttributeError" || !strings.Contains(pythonErr.Message, "did you mean 'sqrt'") {
+		t.Fatalf("attribute spelling diagnostic: %v", result.Err)
+	}
+}
+
+func TestPythonAttributeAndReferenceModulePolicy(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 unavailable")
+	}
+	worker, err := NewPythonWorker(context.Background(), PythonWorkerConfig{
+		Python: "python3", AllowedModules: []string{"math", "statistics"}, DeniedModules: []string{"statistics"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	ctx := context.Background()
+	if result := worker.Call(ctx, "python.getattr", []Value{"math.pi"}); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	for _, path := range []string{"os", "statistics.mean"} {
+		for _, result := range []Result{
+			worker.Call(ctx, "python.getattr", []Value{path}),
+			worker.Call(ctx, "echo", []Value{map[string]any{"$python_ref": path, "kind": "function"}}),
+		} {
+			var pythonErr *PythonError
+			if !errors.As(result.Err, &pythonErr) || pythonErr.Type != "PermissionError" {
+				t.Fatalf("%s bypassed module policy: %v", path, result.Err)
+			}
+		}
+	}
+}
+
 func TestPythonWorkerRoundTripAndCapabilities(t *testing.T) {
 	worker := newTestPythonWorker(t)
 	if worker.PythonVersion() == "" {

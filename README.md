@@ -1,6 +1,6 @@
-# LIP Alpha 0.6
+# LIP Alpha 0.6.3
 
-[English README](README.en.md) · 参考实现 `0.6.1`（[VERSION](VERSION)）
+[English README](README.en.md) · 参考实现 `0.6.3`（[VERSION](VERSION)）
 
 LIP（Logical / Incremental / Parallel）是一门面向依赖关系的小语言：
 **描述依赖，让 Runtime 决定执行。** 用简洁的不可变绑定组合数据、选择、
@@ -47,6 +47,15 @@ lipc run examples/core.lip '[]'
 `~/go/bin/lipc help`；Windows 通常是用户目录下的 `go\bin\lipc.exe`。
 完整路径的调用方式见[快速入门](docs/QUICKSTART.md#安装)。
 
+Vim 9、Neovim 和 Emacs 原生插件提供 `.lip` 高亮、缩进、补全与编译器诊断。
+分别使用 Vim9script、Lua 和 Elisp，安装与配置见[编辑器支持](docs/EDITORS.md)。
+
+想循序渐进地学习，运行 `lipc learn`（仓库内也可 `go run ./cmd/lipc learn`）。
+26 节中文交互课程提供讲解、可运行示例、代码练习和多组输入验证，覆盖关键字、
+程序组织、list/string 库、依赖图、State/Tick、Host 和 Python。
+`:hint` 获取逐步提示，`:next` 进入下一课；进度自动保存。
+`lipc learn --list` 查看课程，完整用法见[交互学习](docs/INTERACTIVE-LEARNING.md)。
+
 想直接试表达式，运行 `lipc repl`：
 
 ```text
@@ -78,11 +87,12 @@ print(a / (a + b))
 
 ## 语言与运行库
 
-| 能力 | 0.6 契约 |
+| 能力 | 0.6.3 契约 |
 | --- | --- |
-| 完整程序 | 依赖头、纯 fn、显式 flow 或顶层语句；有返回值时声明输出与单一 return |
+| 完整程序 | 依赖头（Python/Host/Go 都支持 as 别名）、纯 fn、显式 flow 或顶层语句；有返回值时声明类型，用 return 或 match 分支给出结果 |
 | 数据 | null、bool、number、string、list、object；对象/列表可嵌套 |
-| 组合 | 不可变绑定、运算符、Rust 式 if、when 门控、Map |
+| 组合 | 不可变绑定、运算符、Rust 式 if/match、字面量模式、默认分支、守卫、Map、顺序 for、break/continue |
+| 数学 | + - * /、向下取整 //、取余 %、乘方 **、对数 */；[示例](examples/math.lip) |
 | 纯操作 | str、len、半开区间 range、带初值的顺序 fold、显式 fail |
 | list 标准库 | 34 个纯函数：分组、合并、转置、窗口、过滤、排序、去重、累计与笛卡尔积 |
 | string 标准库 | 19 个纯操作：清理、切词、分行、合并、查询、截取、替换与数值解析 |
@@ -95,12 +105,15 @@ print(a / (a + b))
 
 `list`/`object` 检查外层形状，动态元素在实际运算中校验。CLI 的 string 参数
 原样传递，number 为有限十进制，bool 为 true/false，any/list/object 使用 JSON。
-Flow 的 `T?` 输出可以是 null，或在门控关闭时无值完成。
+参数、fn/回调结果与 Flow 输出都支持 `T?`，表示 T 或 null；Flow 输出还可在
+门控关闭时无值完成。CLI 可空参数用 `null`，文本 null 用 string? 的 JSON 字符串
+`'"null"'`。Flow 中可直接组合 `print(np.mean(values))` 等外部调用，按表达式
+顺序等待，调度/缓存考虑所有调用效果；fn 和集合回调保持纯计算。
 
 ## 依赖是执行语义
 
 Flow 绑定形成图节点，变量引用形成依赖；fn 内部的纯表达式不展开为图。
-独立节点允许并行，消费者等待依赖。`if` 选择值，`when` 控制执行资格；if 的
+独立节点允许并行，消费者等待依赖。`if` 选择值；`match` 可以选值或执行匹配分支；if 的
 短路不会取消已经声明为独立节点的外部工作。
 
 Host 把真实能力接入图：
@@ -150,16 +163,25 @@ Go/Python/纯库都用调用与值依赖自然组合，普通 Python 返回值�
 完整例子见 [mixed.lip](examples/tutorial/mixed.lip)，运行
 `go run ./examples/tutorial/mixed_demo`（只需 Python 标准库）。
 
-外部操作通过 `import` 声明。Python 支持 `import python "numpy" as np`；
+外部操作通过 `import` 声明。Python/Host/Go 都支持 `as`，例如 `import python "numpy" as np`、
+`import host "service.*" as s`、`import go "fmt" as f`；
 不写 `as` 就保留实际模块名，例如 `sklearn`，编译器不根据安装包名改名。
-Host/Go 程序用 `--no-main --package name`
-生成库，由宿主注册 adapter；Python 依赖启用常驻 Worker，使用已安装的包。
+实际使用 Host/Go 操作的程序用 `--no-main --package name`
+生成库，由宿主注册 adapter；实际 Python 调用启用常驻 Worker，使用已安装的包。
+未使用的导入仅保留元数据。命名空间别名可与内置操作或本地 fn 同名，裸调用和
+成员调用分别解析；单操作别名按显式声明解析。
 详见 [Host 示例](examples/host_adapter) 和 [Python 集成](docs/PYTHON-INTEGRATION.md)。
 
 ## 规范与验证
 
-[语言规范](docs/ALPHA-0.6-SPEC.md)统一定义当前规则，行注释使用 `//`，
-条件选值使用块式 `if`，执行门控使用 `when`。后续计划见[路线图](docs/ROADMAP.md)。
+生成图会在最后一个消费者完成或跳过后解除中间值引用，并行任务仅携带自身依赖。
+LIP 管理计算生命周期，Go GC 管理内存回收；输出、State 与有效纯缓存继续保留。
+见[值生命周期与测量](docs/VALUE-LIFETIMES.md)。
+
+[语言规范](docs/ALPHA-0.6-SPEC.md)统一定义当前规则，行注释使用 `#`，
+条件选值使用块式 `if`，执行分支使用 `match`。顺序操作可写 `for i in range(100) { print(i) }`，
+循环内支持绑定、match、嵌套循环和 break/continue，取消或错误停止执行；每次迭代独立作用域，
+不构造结果列表。列表转换用推导式，累加用 fold。见[循环示例](examples/for.lip)；后续计划见[路线图](docs/ROADMAP.md)。
 
 ```bash
 bash scripts/verify-release.sh
@@ -169,7 +191,10 @@ bash scripts/verify-release.sh
 Python 专项测试在相应环境可用时执行；独立核心示例不要求 Python。
 
 - [快速入门](docs/QUICKSTART.md) · [编程教程](docs/TUTORIAL.md)
+- [编辑器支持](docs/EDITORS.md)（Neovim / Vim 9 / Emacs）
 - [字符串库](docs/STRING-LIBRARY.md) · [Vibe Coding 流程](docs/VIBE-CODING.md)
 - [编译器与宿主 API](docs/COMPILER.md) · [规范索引](docs/SPECS.md)
 - [收敛路线图](docs/ROADMAP.md) · [一致性审计](docs/CONSISTENCY-AUDIT.md)
 - [原型覆盖](examples/PROTOTYPES.md) · [变更记录](CHANGELOG.md) · [发布清单](RELEASE.md)
+
+本地源码包与平台工具包的生成、SHA-256 校验和离线验收见 [RELEASE.md](RELEASE.md#本地发行包)。

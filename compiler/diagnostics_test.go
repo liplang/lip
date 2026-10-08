@@ -68,14 +68,18 @@ func TestStatementSeparators(t *testing.T) {
 	for _, source := range []string{
 		"a = 2\nb = 3\nprint(a / b)",
 		"a = 2; b = 3; print(a / b)",
+		";;; a = 2;; b = 3;;; print(a / b);;",
+		";",
+		`fn twice(a: number) -> number { ;; return a * 2;;; };;; print(twice(3));;`,
+		`flow main() { ;; for i in range(2) { ;; print(i);; }; ; };;;`,
 		"a = 2;\nb = 3;\nprint(a / b);",
 		`flow main() { a = 2; b = 3; print(a / b) }`,
 		`flow main() { print(1); return; }`,
 		`flow main() -> number { a = 2; return a; }`,
 		"a = (\n 2 + 3\n); print(a)",
 		"a = [\n 2, 3\n]\nprint(a)",
-		"a = 2 // next statement on a new line\nb = 3\nprint(a / b)",
-		`when true { print(2); print(3); }; print(4)`,
+		"a = 2 # next statement on a new line\nb = 3\nprint(a / b)",
+		`match true { true => { print(2); print(3); }, false => {} }; print(4)`,
 		`fn twice(a: number) -> number { return a * 2; }; print(twice(3));`,
 		`fn twice(a: number) -> number { return a * 2 }; twice(3)`,
 	} {
@@ -88,8 +92,8 @@ func TestStatementSeparators(t *testing.T) {
 		`print(2) print(3)`,
 		`flow main() { a = 2 b = 3; print(a / b) }`,
 		`flow main() -> number { a = 2 return a }`,
-		`when true { print(2) print(3) }`,
-		`when true { print(2) } print(3)`,
+		`match true { true => { print(2) print(3) }, false => {} }`,
+		`match true { true => { print(2) }, false => {} } print(3)`,
 		"a = (\n 2 + 3\n) print(a)",
 	} {
 		report := CheckSource("separators.lip", source)
@@ -97,25 +101,9 @@ func TestStatementSeparators(t *testing.T) {
 			t.Fatalf("%s: %+v", source, report)
 		}
 	}
-	for _, source := range []string{`a = 2;; b = 3`, `print(2; 3)`, `a = [2; 3]`} {
+	for _, source := range []string{`print(2; 3)`, `a = [2; 3]`} {
 		if _, err := ParseAndBuild(source); err == nil {
 			t.Fatal("semicolon is a statement separator, not a comma:", source)
-		}
-	}
-}
-
-func TestComprehensionEffectHints(t *testing.T) {
-	for _, tc := range []struct{ source, hint string }{
-		{`import host "fetch"; a = [x for x in fetch()]`, "Bind the external source"},
-		{`import host "fetch"; print([fetch(x) for x in range(0, 3)])`, "mapped = [fetch(x)"},
-	} {
-		report := CheckSource("map.lip", tc.source)
-		if report.OK || len(report.Diagnostics) != 1 {
-			t.Fatal(report)
-		}
-		d := report.Diagnostics[0]
-		if d.Code != "LIP_EFFECT_ERROR" || len(d.Hints) != 1 || !strings.Contains(d.Hints[0], tc.hint) {
-			t.Fatal(d)
 		}
 	}
 }
@@ -125,11 +113,11 @@ func TestVoidFlowContract(t *testing.T) {
 		`flow main() {}`,
 		`a = 2; b = 3; print(a / (a + b))`,
 		`fn add(a: number, b: number) -> number { return a + b } print(add(2, 3))`,
-		`when false { print(true) }`,
+		`match false { true => { print(true) }, false => {} }`,
 		`flow main() { print(79 / 134) }`,
 		`flow main() -> void { print(79 / 134) }`,
 		`flow main() { print(79 / 134); return }`,
-		`flow main() { when false { print(true) } }`,
+		`flow main() { match false { true => { print(true) }, false => {} } }`,
 	} {
 		graph, err := ParseAndBuild(source)
 		if err != nil || graph.ReturnType != "void" {
@@ -167,14 +155,13 @@ func TestVoidFlowContract(t *testing.T) {
 func TestFocusedDiagnostics(t *testing.T) {
 	for _, tc := range []struct{ source, hint string }{
 		{`require python "math"`, `import python`},
-		{`import python "math" as print`, `Choose an alias`},
+		{`import python "math" as python`, `Choose an alias`},
 		{`import python "scikit-learn"`, `installation name`},
 		{`print([1 2])`, `commas`},
 		{`print(1; 2)`, `commas`},
 		{`a = if true { 1 }`, `both values`},
 		{`79 / 134`, `lipc repl`},
 		{`print("hello)`, `Close the string`},
-		{`a=2;; b=3`, `single semicolon`},
 	} {
 		report := CheckSource("input.lip", tc.source)
 		if report.OK || !strings.Contains(strings.Join(report.Diagnostics[0].Hints, " "), tc.hint) {
@@ -212,14 +199,13 @@ func TestDiagnosticsAddressTheActualCause(t *testing.T) {
 		{`fn add(a:number,b:number)->number { return a+b }; print(fold([1],"",add))`, "LIP_CALLBACK_ERROR", "seed", "Pass the name"},
 		{`print(if 2 { 1 } else { 0 })`, "LIP_TYPE_ERROR", "bool expression", "parse_number"},
 		{`flow f() -> string { return 2 }`, "LIP_TYPE_ERROR", "returned value", "print"},
-		{`flow f() -> number { when false { return 2 } }`, "LIP_RETURN_ERROR", "optional output", "effects only"},
-		{`fn f(x:number) { return missing }; print(f(1))`, "LIP_NAME_ERROR", "parameters", "when-local"},
-		{`print(missing)`, "LIP_NAME_ERROR", "spelling", "when-local"},
+		{`flow f() -> number { match false { true => { return 2 }, false => {} } }`, "LIP_RETURN_ERROR", "optional output", "effects only"},
+		{`fn f(x:number) { return missing }; print(f(1))`, "LIP_NAME_ERROR", "parameters", "match-local"},
+		{`print(missing)`, "LIP_NAME_ERROR", "spelling", "match-local"},
 		{`print(string.trm("x"))`, "LIP_UNKNOWN_OPERATION", "string.trim", "import host"},
 		{`fn f(x:string) { return string.trm(x) }; print(f("x"))`, "LIP_UNKNOWN_OPERATION", "string.trim", "must be pure"},
 		{`pritn(1)`, "LIP_UNKNOWN_OPERATION", "print", "str(value)"},
 		{`print(strng.trim("x"))`, "LIP_UNKNOWN_OPERATION", "string.trim", "import python"},
-		{`import python "math"; print(math.sqrt(9))`, "LIP_EFFECT_ERROR", "Bind the external call", "return type"},
 		{`print(list.map([1],fn(x){print(x)}))`, "LIP_EFFECT_ERROR", "capture immutable", "as parameters"},
 	} {
 		report := CheckSource("input.lip", tc.source)

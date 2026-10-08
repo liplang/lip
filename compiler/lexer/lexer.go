@@ -40,7 +40,7 @@ func (l *Lexer) next() (token.Token, error) {
 			l.advance()
 			continue
 		}
-		if ch == '/' && l.peek(1) == '/' {
+		if ch == '#' {
 			for l.i < len(l.src) && l.src[l.i] != '\n' {
 				l.advance()
 			}
@@ -67,10 +67,14 @@ func (l *Lexer) next() (token.Token, error) {
 			kind = token.Fn
 		case "return":
 			kind = token.Return
-		case "when":
-			kind = token.When
+		case "match":
+			kind = token.Match
 		case "for":
 			kind = token.For
+		case "break":
+			kind = token.Break
+		case "continue":
+			kind = token.Continue
 		case "in":
 			kind = token.In
 		case "if":
@@ -150,7 +154,7 @@ func (l *Lexer) next() (token.Token, error) {
 	for _, op := range []struct {
 		text string
 		kind token.Kind
-	}{{"->", token.Arrow}, {"==", token.Equal}, {"!=", token.NotEqual}, {">=", token.GreaterEqual}, {"<=", token.LessEqual}, {"&&", token.And}, {"||", token.Or}} {
+	}{{"->", token.Arrow}, {"=>", token.FatArrow}, {"//", token.FloorDiv}, {"**", token.Power}, {"*/", token.Log}, {"==", token.Equal}, {"!=", token.NotEqual}, {">=", token.GreaterEqual}, {"<=", token.LessEqual}, {"&&", token.And}, {"||", token.Or}} {
 		if ch == rune(op.text[0]) && l.peekString(op.text) {
 			for range op.text {
 				l.advance()
@@ -162,6 +166,7 @@ func (l *Lexer) next() (token.Token, error) {
 	one['?'] = token.Question
 	one['!'] = token.Not
 	one[';'] = token.Semicolon
+	one['%'] = token.Modulo
 	if kind, ok := one[ch]; ok {
 		l.advance()
 		return token.Token{Kind: kind, Text: string(ch), Pos: start}, nil

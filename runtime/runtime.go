@@ -14,6 +14,8 @@ import (
 	stdruntime "runtime"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"lipalpha/internal/listops"
 	"lipalpha/internal/stringops"
@@ -219,6 +221,22 @@ func (h Host) EffectOf(name string) Effect {
 	return EffectUnknown
 }
 
+// EffectsOf classifies a whole expression, including calls inside arguments,
+// sources and conditional branches. Unknown operations are write barriers.
+func (h Host) EffectsOf(names []string) Effect {
+	effect := EffectPure
+	for _, name := range names {
+		switch h.EffectOf(name) {
+		case EffectPure:
+		case EffectReadOnly:
+			effect = EffectReadOnly
+		default:
+			return EffectExternalWrite
+		}
+	}
+	return effect
+}
+
 func (h Host) Call(ctx context.Context, name string, args []Value) Result {
 	if err := checkContext(ctx); err != nil {
 		return Failed(err)
@@ -331,12 +349,26 @@ func rawNumber(v Value) (float64, error) {
 	case json.Number:
 		return n.Float64()
 	}
+	rv := reflect.ValueOf(v)
+	if rv.IsValid() {
+		switch rv.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return float64(rv.Int()), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return float64(rv.Uint()), nil
+		case reflect.Float32, reflect.Float64:
+			return rv.Float(), nil
+		}
+	}
 	return 0, fmt.Errorf("expected number, got %s (%s)", TypeName(v), StringValue(v))
 }
 
 func Bool(v Value) (bool, error) {
 	b, ok := v.(bool)
 	if !ok {
+		if rv := reflect.ValueOf(v); rv.IsValid() && rv.Kind() == reflect.Bool {
+			return rv.Bool(), nil
+		}
 		return false, fmt.Errorf("expected bool, got %s (%s)", TypeName(v), StringValue(v))
 	}
 	return b, nil
@@ -345,6 +377,16 @@ func Bool(v Value) (bool, error) {
 // CheckType validates an explicitly annotated Alpha input or function
 // argument. "any" deliberately accepts every value, including nil.
 func CheckType(v Value, typ string) error {
+	base := strings.TrimSuffix(typ, "?")
+	switch base {
+	case "any", "string", "number", "bool", "list", "object":
+	case "":
+		if typ != "" {
+			return fmt.Errorf("unknown type %q", typ)
+		}
+	default:
+		return fmt.Errorf("unknown type %q", typ)
+	}
 	if strings.HasSuffix(typ, "?") {
 		if v == nil {
 			return nil
@@ -355,7 +397,7 @@ func CheckType(v Value, typ string) error {
 	case "any", "":
 		return nil
 	case "string":
-		if _, ok := v.(string); ok {
+		if _, ok := scalarString(v); ok {
 			_, err := stringInput(v)
 			return err
 		}
@@ -364,7 +406,7 @@ func CheckType(v Value, typ string) error {
 			return nil
 		}
 	case "bool":
-		if _, ok := v.(bool); ok {
+		if _, err := Bool(v); err == nil {
 			return nil
 		}
 	case "list":
@@ -413,7 +455,8 @@ func Field(object Value, name string) (Value, error) {
 		// Go convention: a LIP field uses lower-case names while exported Go
 		// fields are usually title-cased.
 		if len(name) > 0 {
-			field = v.FieldByName(strings.ToUpper(name[:1]) + name[1:])
+			first, size := utf8.DecodeRuneInString(name)
+			field = v.FieldByName(string(unicode.ToUpper(first)) + name[size:])
 			if field.IsValid() && field.CanInterface() {
 				return field.Interface(), nil
 			}
@@ -458,7 +501,7 @@ func Index(object, index Value) (Value, error) {
 		return v.Index(n).Interface(), nil
 	case reflect.Map:
 		if v.Type().Key().Kind() == reflect.String {
-			if _, ok := index.(string); !ok {
+			if _, ok := scalarString(index); !ok {
 				return nil, fmt.Errorf("object index must be string, got %s", TypeName(index))
 			}
 		}
@@ -469,6 +512,9 @@ func Index(object, index Value) (Value, error) {
 			} else {
 				return nil, fmt.Errorf("index type %T is not %s", index, v.Type().Key())
 			}
+		}
+		if !key.Comparable() {
+			return nil, fmt.Errorf("map index must be comparable, got %s", TypeName(index))
 		}
 		value := v.MapIndex(key)
 		if !value.IsValid() {
@@ -488,8 +534,8 @@ func Binary(op string, left, right Value) (value Value, err error) {
 	}()
 	switch op {
 	case "+":
-		if ls, ok := left.(string); ok {
-			rs, ok := right.(string)
+		if ls, ok := scalarString(left); ok {
+			rs, ok := scalarString(right)
 			if !ok {
 				return nil, fmt.Errorf("operator + expects two strings or two numbers, got string and %s", TypeName(right))
 			}
@@ -504,7 +550,7 @@ func Binary(op string, left, right Value) (value Value, err error) {
 			}
 			return ls + rs, nil
 		}
-		if _, ok := right.(string); ok {
+		if _, ok := scalarString(right); ok {
 			return nil, fmt.Errorf("operator + expects two strings or two numbers, got %s and string", TypeName(left))
 		}
 		l, err := Number(left)
@@ -516,7 +562,7 @@ func Binary(op string, left, right Value) (value Value, err error) {
 			return nil, err
 		}
 		return l + r, nil
-	case "-", "/":
+	case "-", "/", "//", "%", "**", "*/":
 		l, err := Number(left)
 		if err != nil {
 			return nil, err
@@ -525,17 +571,54 @@ func Binary(op string, left, right Value) (value Value, err error) {
 		if err != nil {
 			return nil, err
 		}
-		if op == "/" && r == 0 {
+		if (op == "/" || op == "//") && r == 0 {
 			return nil, errors.New("division by zero")
+		}
+		if op == "%" && r == 0 {
+			return nil, errors.New("modulo by zero")
 		}
 		switch op {
 		case "-":
 			return l - r, nil
+		case "//":
+			quotient := math.Floor(l / r)
+			if quotient == 0 {
+				return float64(0), nil
+			}
+			return quotient, nil
+		case "**":
+			return math.Pow(l, r), nil
+		case "%":
+			remainder := math.Mod(l, r)
+			if remainder != 0 && (remainder < 0) != (r < 0) {
+				remainder += r
+			}
+			if remainder == 0 {
+				return float64(0), nil
+			}
+			return remainder, nil
+		case "*/":
+			if l <= 0 {
+				return nil, errors.New("logarithm argument must be positive")
+			}
+			if r <= 0 || r == 1 {
+				return nil, errors.New("logarithm base must be positive and different from 1")
+			}
+			if l == 1 {
+				return float64(0), nil
+			}
+			if r == 2 {
+				return math.Log2(l), nil
+			}
+			if r == 10 {
+				return math.Log10(l), nil
+			}
+			return math.Log(l) / math.Log(r), nil
 		default:
 			return l / r, nil
 		}
 	case "*":
-		if ls, ok := left.(string); ok {
+		if ls, ok := scalarString(left); ok {
 			n, err := integer(right)
 			if err != nil {
 				return nil, fmt.Errorf("operator * on a string expects a non-negative integer: %w", err)
@@ -545,7 +628,7 @@ func Binary(op string, left, right Value) (value Value, err error) {
 			}
 			return repeatString(ls, n)
 		}
-		if rs, ok := right.(string); ok {
+		if rs, ok := scalarString(right); ok {
 			n, err := integer(left)
 			if err != nil {
 				return nil, fmt.Errorf("operator * on a string expects a non-negative integer: %w", err)
@@ -640,6 +723,14 @@ func equalValues(left, right Value) bool {
 			return l == r
 		}
 	}
+	if l, ok := scalarString(left); ok {
+		r, ok := scalarString(right)
+		return ok && l == r
+	}
+	if l, err := Bool(left); err == nil {
+		r, err := Bool(right)
+		return err == nil && l == r
+	}
 	return reflect.DeepEqual(left, right)
 }
 
@@ -701,20 +792,38 @@ type TraceEvent struct {
 }
 
 type Graph struct {
-	mu          sync.Mutex
-	nodes       []NodeSpec
-	trace       []TraceEvent
-	output      Value
-	hasOut      bool
-	outputIndex int
+	mu           sync.Mutex
+	nodes        []NodeSpec
+	trace        []TraceEvent
+	output       Value
+	hasOut       bool
+	outputIndex  int
+	options      GraphOptions
+	lifetimePlan *valueLifetimePlan
 }
 
 func NewGraph() *Graph { return &Graph{} }
+
+// GraphOptions controls optional optimizations for graphs with explicit contracts.
+type GraphOptions struct {
+	// ReleaseIntermediates removes execution-table references after the last
+	// declared consumer completes or is skipped. Every value read by Eval, Gate,
+	// Map, Retry or Feedback must be declared in Deps/Gates (including Map.Source),
+	// and node/input value names must be unique. Callbacks must treat the values map as
+	// read-only and may use it only until their final asynchronous result completes.
+	// Individual values may still escape to outputs or Host-owned storage.
+	ReleaseIntermediates bool
+}
+
+// NewGraphWithOptions creates a graph with opt-in execution contracts. NewGraph
+// preserves the full values-map behavior for existing hand-written Go graphs.
+func NewGraphWithOptions(options GraphOptions) *Graph { return &Graph{options: options} }
 
 func (g *Graph) Add(node NodeSpec) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.nodes = append(g.nodes, node)
+	g.lifetimePlan = nil
 }
 
 func (g *Graph) Trace() []TraceEvent {
@@ -759,7 +868,7 @@ func (g *Graph) NewInstance(host Host, inputs map[string]Value) *Instance {
 	defer g.mu.Unlock()
 	initial := cloneValues(inputs)
 	return &Instance{
-		graph:          &Graph{nodes: append([]NodeSpec(nil), g.nodes...)},
+		graph:          &Graph{nodes: append([]NodeSpec(nil), g.nodes...), options: g.options, lifetimePlan: g.lifetimePlan},
 		host:           host,
 		inputs:         initial,
 		states:         make(map[string]Value),
@@ -839,8 +948,11 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 	i.trace = nil
 	defer func() { i.stateOverrides = make(map[string]Value) }()
 	values := cloneValues(i.inputs)
+	lifetime := i.graph.newValueLifetime(values)
 	status := make([]Status, len(i.graph.nodes))
-	nextCache := append([]instanceNode(nil), i.cache...)
+	// Tick is serialized and already commits completed nodes on failure. Updating
+	// this slice directly also stops the old cache retaining invalidated values.
+	nextCache := i.cache
 	var output Value
 	hasOutput, outputIndex := false, -1
 	record := func(node string, state Status, reason string) {
@@ -899,6 +1011,7 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 				nextCache[index] = instanceNode{}
 				i.versions[node.Name] = tick
 				record(node.Name, Skipped, reason)
+				lifetime.finish(index, node, values)
 				continue
 			}
 
@@ -910,6 +1023,7 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 			} else if !node.State && nodeEffect(node, i.host) == EffectPure && reusableNode(cached, node, values, i.versions) {
 				result, reused = Ready(cached.value), true
 			} else {
+				nextCache[index] = instanceNode{}
 				status[index] = Running
 				record(node.Name, Running, "")
 				if node.State && hasOverride {
@@ -930,7 +1044,12 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 			if !reused {
 				i.versions[node.Name] = tick
 			}
-			nextCache[index] = snapshotNode(result.Value, node, values, i.versions)
+			if !node.State && nodeEffect(node, i.host) == EffectPure {
+				nextCache[index] = snapshotNode(result.Value, node, values, i.versions)
+			} else {
+				// State has its own store; effectful nodes cannot reuse a result.
+				nextCache[index] = instanceNode{}
+			}
 			if node.State {
 				i.states[node.Name] = result.Value
 				delete(i.stateOverrides, node.Name)
@@ -943,6 +1062,7 @@ func (i *Instance) Tick(ctx context.Context, inputs map[string]Value) (Value, []
 				reason = "reused"
 			}
 			record(node.Name, Completed, reason)
+			lifetime.finish(index, node, values)
 		}
 		if !progress {
 			i.cache = nextCache
@@ -1053,12 +1173,14 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 	defer g.mu.Unlock()
 	g.trace = nil
 	g.output = nil
+	defer func() { g.output = nil }()
 	g.hasOut = false
 	g.outputIndex = -1
 	values := make(map[string]Value, len(inputs))
 	for k, v := range inputs {
 		values[k] = v
 	}
+	lifetime := g.newValueLifetime(values)
 	status := make([]Status, len(g.nodes))
 	for i := range status {
 		status[i] = Pending
@@ -1079,6 +1201,7 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 			if blocked {
 				status[i] = Skipped
 				g.record(node.Name, Skipped, reason)
+				lifetime.finish(i, node, values)
 				completed++
 				progress = true
 				continue
@@ -1094,6 +1217,7 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 				if !ok {
 					status[i] = Skipped
 					g.record(node.Name, Skipped, "gate is false")
+					lifetime.finish(i, node, values)
 					completed++
 					progress = true
 					continue
@@ -1116,6 +1240,7 @@ func (g *Graph) Run(ctx context.Context, inputs map[string]Value) (Value, []Trac
 				g.hasOut = true
 				g.outputIndex = i
 			}
+			lifetime.finish(i, node, values)
 			completed++
 			progress = true
 		}
@@ -1152,12 +1277,14 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 	defer cancel()
 	g.trace = nil
 	g.output = nil
+	defer func() { g.output = nil }()
 	g.hasOut = false
 	g.outputIndex = -1
 	values := make(map[string]Value, len(inputs))
 	for k, v := range inputs {
 		values[k] = v
 	}
+	lifetime := g.newValueLifetime(values)
 	status := make([]Status, len(g.nodes))
 	for i := range status {
 		status[i] = Pending
@@ -1167,7 +1294,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 		result Result
 		err    error
 	}
-	results := make(chan resultEvent, len(g.nodes))
+	results := make(chan resultEvent)
 	active := make(map[int]bool)
 	completed := 0
 	for completed < len(g.nodes) {
@@ -1184,6 +1311,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			if blocked {
 				status[i] = Skipped
 				g.record(node.Name, Skipped, reason)
+				lifetime.finish(i, node, values)
 				completed++
 				progress = true
 				continue
@@ -1199,6 +1327,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 				if !ok {
 					status[i] = Skipped
 					g.record(node.Name, Skipped, "gate is false")
+					lifetime.finish(i, node, values)
 					completed++
 					progress = true
 					continue
@@ -1230,11 +1359,14 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 			status[i] = Running
 			active[i] = true
 			g.record(node.Name, Running, "")
-			snapshot := cloneValues(values)
-			go func(index int, spec NodeSpec) {
+			snapshot := nodeValues(node, values, g.options.ReleaseIntermediates)
+			go func(index int, spec NodeSpec, snapshot map[string]Value) {
 				result, err := awaitNodeResult(ctx, spec, evaluateNode(ctx, spec, snapshot, limit))
-				results <- resultEvent{index: index, result: result, err: err}
-			}(i, node)
+				select {
+				case results <- resultEvent{index: index, result: result, err: err}:
+				case <-ctx.Done():
+				}
+			}(i, node, snapshot)
 			progress = true
 		}
 
@@ -1260,6 +1392,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 				g.hasOut = true
 				g.outputIndex = event.index
 			}
+			lifetime.finish(event.index, g.nodes[event.index], values)
 			completed++
 			continue
 		}
@@ -1288,6 +1421,7 @@ func (g *Graph) RunParallel(ctx context.Context, host Host, inputs map[string]Va
 				g.hasOut = true
 				g.outputIndex = i
 			}
+			lifetime.finish(i, node, values)
 			completed++
 			progress = true
 			break
@@ -1416,17 +1550,7 @@ func nodeEffect(node NodeSpec, host Host) Effect {
 	if len(ops) == 0 {
 		return EffectUnknown
 	}
-	effect := EffectPure
-	for _, op := range ops {
-		switch host.EffectOf(op) {
-		case EffectPure:
-		case EffectReadOnly:
-			effect = EffectReadOnly
-		default:
-			return EffectExternalWrite
-		}
-	}
-	return effect
+	return host.EffectsOf(ops)
 }
 
 func nodeCanRunParallel(node NodeSpec, host Host) bool {

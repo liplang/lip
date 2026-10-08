@@ -350,7 +350,31 @@ func completionRune(r rune) bool {
 
 func (s *replSession) completions(prefix string) []string {
 	names := map[string]bool{}
-	for _, word := range strings.Fields("flow fn return when for in if else import as true false null any number bool string list object void str len range fold fail print state retry feedback :help :vars :history :reset :cancel :quit :exit") {
+	externalLibraryName := func(name string) bool {
+		root, _, _ := strings.Cut(name, ".")
+		for _, dependency := range s.dependencies {
+			if dependency.Alias == root && (dependency.Kind != "host" || strings.HasSuffix(dependency.Spec, ".*")) {
+				return true
+			}
+			if dependency.Alias != "" {
+				continue
+			}
+			parts := strings.FieldsFunc(dependency.Spec, func(r rune) bool { return strings.ContainsRune("<>=!~ ", r) })
+			if len(parts) == 0 {
+				continue
+			}
+			target := parts[0]
+			if strings.HasSuffix(target, ".*") {
+				if strings.HasPrefix(name, strings.TrimSuffix(target, "*")) {
+					return true
+				}
+			} else if name == target || dependency.Kind != "host" && strings.HasPrefix(name, target+".") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, word := range strings.Fields("flow fn return match for in break continue if else import as true false null any number bool string list object void str len range fold fail print state retry feedback :help :vars :history :reset :cancel :quit :exit") {
 		names[word] = true
 	}
 	for name := range s.values {
@@ -360,20 +384,40 @@ func (s *replSession) completions(prefix string) []string {
 		names[fn.Name] = true
 	}
 	for _, dependency := range s.dependencies {
-		if dependency.Kind != "python" {
+		parts := strings.FieldsFunc(dependency.Spec, func(r rune) bool { return strings.ContainsRune("<>=!~ ", r) })
+		if len(parts) == 0 {
 			continue
 		}
-		name := dependency.Alias
-		if name == "" {
-			name = strings.FieldsFunc(dependency.Spec, func(r rune) bool { return strings.ContainsRune("<>=!~ ", r) })[0]
+		module := parts[0]
+		suffix := "."
+		if dependency.Kind == "host" {
+			if strings.HasSuffix(module, ".*") {
+				module = strings.TrimSuffix(module, ".*")
+			} else {
+				suffix = ""
+			}
 		}
-		names[name+"."] = true
+		// Package paths containing / are registration names, not LIP names;
+		// their aliases provide the callable spelling.
+		_, shadowed := s.values[strings.SplitN(module, ".", 2)[0]]
+		if !strings.Contains(module, "/") && !shadowed {
+			names[module+suffix] = true
+		}
+		if dependency.Alias != "" {
+			if _, shadowed := s.values[dependency.Alias]; !shadowed {
+				names[dependency.Alias+suffix] = true
+			}
+		}
 	}
 	for _, operation := range listops.All() {
-		names[operation.Name] = true
+		if !externalLibraryName(operation.Name) {
+			names[operation.Name] = true
+		}
 	}
 	for _, operation := range stringops.All() {
-		names[operation.Name] = true
+		if !externalLibraryName(operation.Name) {
+			names[operation.Name] = true
+		}
 	}
 	var matches []string
 	for name := range names {

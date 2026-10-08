@@ -1,7 +1,74 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — Dependency lifetimes and release consistency
 
+Validated local implementation and source/tool packages; Git tags and remote publication remain separate release steps.
+
+- released generated execution-table references after the last declared consumer
+  completes or is skipped, including asynchronous results, gates and loop captures;
+  Go GC still owns reclamation, and outputs, State and valid pure caches retain
+  their semantics;
+- restricted parallel worker snapshots to declared dependencies and discarded
+  late results after errors/cancellation without retaining abandoned channel buffers;
+- removed redundant effectful/State caches, cleared invalidated pure caches before
+  recomputation, and stopped one-shot Graphs retaining returned outputs;
+- kept NewGraph's full values-map contract for existing Go callers; generated
+  graphs opt in through GraphOptions.ReleaseIntermediates;
+- added indexed reusable lifetime plans, weak-pointer reachability tests, generated
+  integration/race checks and scalar/large-buffer benchmarks; synchronized the
+  0.6 specification, tutorials, examples and all tracked generated sources;
+- unified Go-defined scalar types across boundaries, operations and display;
+  prevented unhashable Host map indices from panicking and fixed Unicode fields;
+- accepted empty semicolon statements consistently in files, blocks and REPL;
+  allowed namespace aliases to share builtin/local function names, resolving bare
+  and member calls independently; explicit single-operation aliases retain priority;
+- required adapters only for used external operations, keeping unused imports as
+  metadata without blocking standalone/REPL execution or starting Python;
+- embedded the Runtime/CLI version in generated sources and added reproducible
+  local source/tool packages with SHA-256 verification and offline smoke checks.
+- added native Neovim Lua, Vim9script and Emacs Elisp editor packages, generated
+  language catalogs, Unicode-aware compiler diagnostics and integration tests;
+  included the packages and installation guide in source/tool archives.
+
+## 0.6.2 — Composable language, interactive tools and consistent contracts
+
+Local implementation snapshot; tags and release artifacts are separate publication steps.
+
+- normalized disposable standalone build paths to reuse bundled-runtime cache
+  entries and produce identical binaries from identical sources in different
+  temporary modules; execution diagnostics retain the original LIP locations;
+- audited all documentation LIP blocks and checked diagnostic examples, version references,
+  lesson indexes, standard-library catalogs and tracked generated sources automatically;
+  synchronized the 0.6 specification, capability tables and release checks;
+- unified Python/Host/Go import completion, respected shadowed names, and corrected
+  interactive reference return types and policy placement;
+- audited import scopes and backend resolution: parameters, bindings and iteration
+  variables can shadow imports lexically; conflicting backend namespaces require
+  explicit aliases; Host imports preserve their identity with or without `as`;
+  local function registration is isolated from same-named Host operations;
+- allowed external composition in all Flow expressions, with whole-expression
+  effects for scheduling and Tick caching, including Map sources, state initialization
+  and retry/feedback;
+  pure functions and collection callbacks still reject external operations;
+- extended nullable `T?` to parameters, named/inline functions and CLI inputs,
+  with match-arm narrowing after null handling; loop errors locate the innermost
+  failing statement, and feedback accepts dotted core operations without imports;
+- aligned heterogeneous if and match results: branch types infer any when needed,
+  while declared function and Flow boundaries still validate every returned result;
+- extended `as` to Host operations, Host wildcard namespaces and Go packages;
+  aliases preserve canonical operation names, dependency identity and metadata,
+  including nested loop calls, retry/feedback and Host registration checks;
+- added sequential statement `for` over finite lists in Flows, top-level programs
+  and REPL cells, with immutable iteration scopes, nested loops, bindings, match,
+  awaited external calls and nearest-loop `break` / `continue`; sources evaluate
+  once, errors/cancellation stop iteration, and loops rerun on each Tick;
+- added floor division `//`, divisor-signed modulo `%`, right-associative power
+  `**` and base logarithm `*/`, with numeric/domain/finite-result checks;
+  moved LIP line comments to `#` so `//` has one unambiguous operator meaning;
+- replaced gated syntax with Rust-style `match`: literal patterns, `_` defaults,
+  optional `if` guards, lazy value expressions and mutually exclusive Flow arms;
+  arms may return different types, checked at the enclosing fn or Flow boundary;
+  migrated examples, generated code, diagnostics and interactive lessons;
 - unified collection callbacks across map/filter/fold/scan/grouping/sorting with
   inline pure `fn(x) { expression }` callbacks, optional type annotations and
   immutable captures tracked as dependencies;
@@ -29,7 +96,7 @@
   statements now need `;`, with a repair hint in files and the REPL;
 - improved source errors with caret markers and specific repair examples; runtime
   failures identify the source statement and suggest fixes instead of dumping graph internals;
-- consolidated line comments to `//` and conditionals to block-style `if`;
+- consolidated line comments and conditionals to block-style `if`;
   removed legacy syntax parsing, migration, source-generation shorthand and short options;
 - consolidated Python adapter names to PythonWorker/PythonWorkerConfig and Python/Script;
   replaced legacy NodeSpec/MapSpec purity flags with NodeSpec.Effect;
@@ -212,7 +279,7 @@ This is the first publishable Alpha release of LIP.
 Included:
 
 - handwritten lexer/parser and dependency-graph compiler;
-- `flow`, expression `fn`, single-assignment bindings, `when`, `return`;
+- `flow`, expression `fn`, single-assignment bindings, gated execution, `return`;
 - strict built-in operators with optional explicit parameter annotations;
 - Go 1.27 code generation and the `runtime.Host` adapter boundary;
 - deterministic sequential scheduling and bounded pure-node parallelism;

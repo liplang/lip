@@ -622,7 +622,7 @@ func listSort(ctx context.Context, name string, items []Value, callback Op) (Val
 		}
 		entry := keyed{item: item, key: key}
 		kind := "number"
-		if text, ok := key.(string); ok {
+		if text, ok := scalarString(key); ok {
 			kind = "string"
 			entry.text = text
 		} else {

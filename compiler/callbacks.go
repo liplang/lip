@@ -38,11 +38,11 @@ func validateLambda(fn *ast.LambdaExpr) error {
 			return repairError("LIP_NAME_ERROR", fmt.Sprintf("duplicate callback parameter %q", param), "Use a distinct name for each callback parameter; for a reducer, use fn(total, x) { ... }.")
 		}
 		seen[param] = true
-		if !validTypeName(paramType(fn.ParamTypes, param)) {
+		if !validValueType(paramType(fn.ParamTypes, param)) {
 			return fmt.Errorf("unknown callback parameter type %q", fn.ParamTypes[param])
 		}
 	}
-	if fn.ReturnType != "" && !validTypeName(fn.ReturnType) {
+	if fn.ReturnType != "" && !validValueType(fn.ReturnType) {
 		return fmt.Errorf("unknown callback return type %q", fn.ReturnType)
 	}
 	return validateSimpleExpr(fn.Return)
@@ -105,7 +105,7 @@ func inferCallback(operation string, arg ast.Expr, arity int, env, fnTypes map[s
 				if err := validateDeclaredResult(fn.Return, fn.ReturnType, scope, fnTypes, fnParams); err != nil {
 					return nil, "any", callbackTypeError(fmt.Sprintf("%s callback: %v", operation, err))
 				}
-				result = fn.ReturnType
+				result = normalizeValueType(fn.ReturnType)
 			}
 		}
 	default:

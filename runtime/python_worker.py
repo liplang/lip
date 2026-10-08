@@ -8,6 +8,7 @@ dependency-free numerical operations used by smoke tests and examples.
 
 import importlib
 import importlib.util
+import difflib
 import json
 import hashlib
 import math
@@ -18,6 +19,7 @@ import platform
 import stat
 import sys
 import time
+import types
 import uuid
 
 PROTOCOL = 1
@@ -262,6 +264,8 @@ def handle_object(value, session):
 
 def resolve_value(value, session):
     if isinstance(value, dict):
+        if "$python_ref" in value:
+            return resolve_python_name(value["$python_ref"])
         if "$lip_blob" in value:
             return open_blob(value, session)
         if "$python_handle" in value:
@@ -344,6 +348,22 @@ def encode_result(value, session, force=False):
 
 
 def builtin(name, args, session):
+    if name == "python.getattr":
+        if len(args) != 1 or not isinstance(args[0], str):
+            raise ValueError("python.getattr expects one module or attribute path")
+        path = args[0]
+        target = resolve_python_name(path)
+        if isinstance(target, types.ModuleType):
+            kind = "module"
+        elif isinstance(target, type):
+            kind = "class"
+        elif callable(target):
+            kind = "function"
+        else:
+            return target
+        # Named references can be inspected and saved between REPL cells.
+        # They resolve in the receiving worker, without retaining a handle.
+        return {"$python_ref": path, "kind": kind}
     if name in ("module_available", "python.module_available"):
         if len(args) != 1 or not isinstance(args[0], str):
             raise ValueError("module_available expects one module name")
@@ -400,7 +420,7 @@ def call_operation(name, args, session):
     # imported Python packages, not handle/session bookkeeping.  Keeping this
     # distinction matters when a restricted worker still needs to call
     # python.call or inspect a value with python.to_json.
-    if name in ("python.call", "python.module_available"):
+    if name in ("python.call", "python.getattr", "python.module_available"):
         value = builtin(name, args, session)
         if value is not NOT_BUILTIN:
             return value
@@ -411,11 +431,22 @@ def call_operation(name, args, session):
         value = builtin(name, args, session)
         if value is not NOT_BUILTIN:
             return value
+    target = resolve_python_name(name)
+    if not callable(target):
+        raise TypeError("operation %s is not callable" % name)
+    return target(*args)
+
+
+def resolve_python_name(name):
+    if not isinstance(name, str) or not name or any(not part.isidentifier() for part in name.split(".")):
+        raise ValueError("expected a Python module or attribute path")
+    if not module_allowed(name):
+        raise PermissionError("module %s is not enabled by this worker" % name)
     # Import the longest module prefix, then traverse real attributes. This
     # also handles class/static methods such as datetime.datetime.fromisoformat.
     parts = name.split(".")
     target = None
-    for split in range(len(parts) - 1, 0, -1):
+    for split in range(len(parts), 0, -1):
         prefix = ".".join(parts[:split])
         try:
             target = importlib.import_module(prefix)
@@ -424,13 +455,17 @@ def call_operation(name, args, session):
                 raise
             continue
         for part in parts[split:]:
-            target = getattr(target, part)
+            try:
+                target = getattr(target, part)
+            except AttributeError as error:
+                suggestions = difflib.get_close_matches(part, dir(target), n=1, cutoff=0.75)
+                hint = "; did you mean %r?" % suggestions[0] if suggestions else ""
+                raise AttributeError("%s has no attribute %r%s" % (prefix, part, hint)) from error
+            prefix += "." + part
         break
     if target is None:
         raise ModuleNotFoundError("no module prefix found for operation %s" % name)
-    if not callable(target):
-        raise TypeError("operation %s is not callable" % name)
-    return target(*args)
+    return target
 
 
 def respond(payload):
@@ -440,7 +475,7 @@ def respond(payload):
 
 capabilities = [
     "echo", "sum", "mean", "dot", "matrix_multiply", "sleep", "fail",
-    "module_available", "dotted-call", "dynamic-import", "python.call",
+    "module_available", "dotted-call", "dynamic-import", "python.call", "python.getattr",
     "python.to_json", "python.release", "python.open_blob", "python.release_blob",
     "blob-v1", "math.*", "statistics.*",
 ]

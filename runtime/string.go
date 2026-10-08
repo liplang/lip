@@ -17,7 +17,7 @@ import (
 const MaxStringBytes = 16 * 1024 * 1024
 
 func stringInput(value Value) (string, error) {
-	text, ok := value.(string)
+	text, ok := scalarString(value)
 	if !ok {
 		return "", fmt.Errorf("expects string, got %s", TypeName(value))
 	}
@@ -60,9 +60,19 @@ func StringCall(ctx context.Context, name string, args []Value) (result Value, e
 	if len(args) < spec.MinArgs || len(args) > spec.MaxArgs {
 		return nil, argumentCountError(spec.MinArgs, spec.MaxArgs, len(args))
 	}
+	copied := false
 	for index, arg := range args {
 		if err := CheckType(arg, spec.Types[index]); err != nil {
 			return nil, fmt.Errorf("argument %d: %w", index+1, err)
+		}
+		if spec.Types[index] == "string" {
+			if _, plain := arg.(string); !plain {
+				if !copied {
+					args = append([]Value(nil), args...)
+					copied = true
+				}
+				args[index], _ = scalarString(arg)
+			}
 		}
 	}
 	if name == "string.join" {

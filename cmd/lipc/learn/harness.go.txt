@@ -1,0 +1,156 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"lipalpha/runtime"
+)
+
+type exerciseCase struct {
+	Inputs map[string]runtime.Value
+	State  map[string]runtime.Value
+}
+
+type exerciseResult struct {
+	Value  runtime.Value        `json:"value"`
+	Error  string               `json:"error"`
+	Stdout string               `json:"stdout"`
+	Trace  []runtime.TraceEvent `json:"trace"`
+}
+
+func exerciseHost(output *bytes.Buffer, worker *runtime.PythonWorker) runtime.Host {
+	host := runtime.DefaultHost()
+	if worker != nil {
+		host = runtime.NewPythonHost(worker)
+	}
+	host.Register("print", func(ctx context.Context, args []runtime.Value) runtime.Result {
+		if err := ctx.Err(); err != nil {
+			return runtime.Failed(err)
+		}
+		parts := make([]string, len(args))
+		for i, arg := range args {
+			text, err := runtime.FormatValue(arg)
+			if err != nil {
+				return runtime.Failed(err)
+			}
+			parts[i] = text
+		}
+		fmt.Fprintln(output, strings.Join(parts, " "))
+		return runtime.Ready(nil)
+	})
+	host.RegisterPure("lesson_double", func(ctx context.Context, args []runtime.Value) runtime.Result {
+		if err := ctx.Err(); err != nil {
+			return runtime.Failed(err)
+		}
+		if len(args) != 1 {
+			return runtime.Failed(fmt.Errorf("lesson_double expects one number"))
+		}
+		value, ok := args[0].(float64)
+		if !ok {
+			return runtime.Failed(fmt.Errorf("lesson_double expects one number"))
+		}
+		return runtime.Ready(value * 2)
+	})
+	attempts := 0
+	host.RegisterReadOnly("lesson_fetch", func(ctx context.Context, args []runtime.Value) runtime.Result {
+		if err := ctx.Err(); err != nil {
+			return runtime.Failed(err)
+		}
+		if len(args) != 1 {
+			return runtime.Failed(fmt.Errorf("lesson_fetch expects one argument"))
+		}
+		attempts++
+		if attempts < 3 {
+			return runtime.Failed(fmt.Errorf("temporary read failure"))
+		}
+		ready := make(chan runtime.Result, 1)
+		ready <- runtime.Ready(args[0])
+		close(ready)
+		return runtime.Await(ready)
+	})
+	return host
+}
+
+func exerciseMain() error {
+	if len(os.Args) != 3 {
+		return fmt.Errorf("expected request and result paths")
+	}
+	data, err := os.ReadFile(os.Args[1])
+	if err != nil {
+		return err
+	}
+	var request struct {
+		Mode   string
+		Python bool
+		Cases  []exerciseCase
+	}
+	if err := json.Unmarshal(data, &request); err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var worker *runtime.PythonWorker
+	if request.Python {
+		worker, err = runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{})
+		if err != nil {
+			return fmt.Errorf("Python 课程需要 python3 或 python：%w", err)
+		}
+		defer worker.Close()
+	}
+	var persistent *Instance
+	var persistentHost runtime.Host
+	var output bytes.Buffer
+	results := make([]exerciseResult, 0, len(request.Cases))
+	for _, tc := range request.Cases {
+		output.Reset()
+		host := exerciseHost(&output, worker)
+		caseCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		var value runtime.Value
+		var trace []runtime.TraceEvent
+		var runErr error
+		if request.Mode == "state" {
+			if persistent == nil {
+				persistentHost = host
+				persistent, runErr = NewInstance(persistentHost, tc.Inputs)
+			}
+			if runErr == nil {
+				for name, state := range tc.State {
+					if runErr = persistent.SetState(name, state); runErr != nil {
+						break
+					}
+				}
+			}
+			if runErr == nil {
+				value, trace, runErr = persistent.Tick(caseCtx, tc.Inputs)
+			}
+		} else {
+			value, trace, runErr = Run(caseCtx, host, tc.Inputs)
+		}
+		cancel()
+		result := exerciseResult{Value: value, Trace: trace, Stdout: output.String()}
+		if runErr != nil {
+			result.Error = executionError(runErr, trace).Error()
+		}
+		results = append(results, result)
+	}
+	data, err = json.Marshal(results)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(os.Args[2], data, 0600)
+}
+
+func main() {
+	if err := exerciseMain(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

@@ -42,7 +42,7 @@ func TypeName(value Value) string {
 	case reflect.String:
 		return "string"
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64:
 		return "number"
 	case reflect.Slice, reflect.Array:
 		return "list"
@@ -110,9 +110,23 @@ func ParseCLIInputs(args []string, params []Input) (map[string]Value, error) {
 		raw := args[i]
 		var value Value
 		var err error
-		switch param.Type {
+		base := strings.TrimSuffix(param.Type, "?")
+		nullable := strings.HasSuffix(param.Type, "?")
+		if nullable && raw == "null" {
+			if err := CheckType(nil, param.Type); err != nil {
+				return nil, fmt.Errorf("argument %d (%s): %w", i+1, param.Name, err)
+			}
+			inputs[param.Name] = nil
+			continue
+		}
+		switch base {
 		case "string":
 			value = raw
+			if nullable && strings.HasPrefix(raw, "\"") {
+				var text string
+				err = json.Unmarshal([]byte(raw), &text)
+				value = text
+			}
 		case "number":
 			var n float64
 			n, err = strconv.ParseFloat(raw, 64)
@@ -146,8 +160,20 @@ func ParseCLIInputs(args []string, params []Input) (map[string]Value, error) {
 
 // FormatValue keeps strings human-readable and other results valid JSON.
 func FormatValue(value Value) (string, error) {
-	if text, ok := value.(string); ok {
+	if text, ok := scalarString(value); ok {
 		return text, nil
+	}
+	if reference, ok := value.(map[string]any); ok {
+		path, named := reference["$python_ref"].(string)
+		kind, described := reference["kind"].(string)
+		if named && described && path != "" {
+			switch kind {
+			case "function", "class":
+				return fmt.Sprintf("<Python %s %s; call with (...)>", kind, path), nil
+			case "module":
+				return fmt.Sprintf("<Python module %s>", path), nil
+			}
+		}
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -172,10 +198,18 @@ func ExecutionHint(err error) string {
 		return "Python object handles belong to one Worker session. In the REPL, convert values with python.to_json while still in the same cell, or use a host program with a persistent Worker."
 	case strings.Contains(message, "ModuleNotFoundError") || strings.Contains(message, "No module named"):
 		return "Check the actual Python module name and install its distribution in the interpreter environment used by the Worker; import does not install packages."
+	case strings.Contains(message, "AttributeError") && strings.Contains(message, "has no attribute"):
+		return "Check the Python attribute spelling and module version. Read attributes with module.name; use module.name(...) to call a function."
 	case strings.Contains(message, "division by zero"):
 		return "Check the divisor before dividing, e.g. if divisor == 0 { null } else { value / divisor }."
 	case strings.Contains(message, "index") && strings.Contains(message, "out of range"):
 		return "Indices are integers starting at 0; require index >= 0 && index < len(value) before reading an element."
+	case strings.Contains(message, "modulo by zero"):
+		return "Use a nonzero divisor for %, e.g. if divisor == 0 { null } else { value % divisor }."
+	case strings.Contains(message, "logarithm argument must be positive"):
+		return "Use a positive left operand for x */ base; zero and negative values have no real logarithm."
+	case strings.Contains(message, "logarithm base must be positive"):
+		return "Use a positive right operand different from 1 for x */ base."
 	case strings.Contains(message, "index") && (strings.Contains(message, "integer") || strings.Contains(message, "nonnegative")):
 		return "Use a nonnegative integer index; negative and fractional indices are not supported."
 	case strings.Contains(message, "missing field") || strings.Contains(message, "missing map key"):

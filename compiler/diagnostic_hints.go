@@ -33,8 +33,6 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 	}
 	if stage == "LIP_LEX_ERROR" {
 		switch {
-		case has("unexpected character '#'"):
-			return advice(stage, "Use // for line comments.")
 		case has("unterminated string"):
 			return advice(stage, `Close the string with a double quote. To include a newline in text, use \n.`)
 		case has("newline in string"):
@@ -50,6 +48,18 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		}
 	}
 	switch {
+	case has("shadows an import"):
+		return advice("LIP_NAME_ERROR", "Use another import alias for the external operation; the current name denotes a local value in this scope.")
+	case has("multiple backends"):
+		return advice("LIP_DEPENDENCY_ERROR", "Give imports from different backends distinct as aliases and call the intended alias explicitly.")
+	case has("only allowed inside a for body"):
+		return advice("LIP_LOOP_ERROR", "Use break or continue in a statement for body or one of its match arms; they target the nearest enclosing loop.")
+	case has("return is not allowed in a for body"):
+		return advice("LIP_LOOP_ERROR", "Return after the loop. Use fold to aggregate values, break to stop iteration, or continue to skip the remaining body.")
+	case has("state is not allowed in a for body"):
+		return advice("LIP_LOOP_ERROR", "Declare persistent state at Flow scope. Iteration-local bindings are immutable and recreated for every item.")
+	case has("for source must be a list"):
+		return advice("LIP_LOOP_ERROR", "Iterate a finite list, such as range(100). Strings, objects and null are not loop sources.")
 	case has("REPL cells"):
 		return advice(stage, "Enter expressions, bindings or fn declarations directly. Run a complete Flow program with lipc run file.lip.")
 	case has("only the final expression in a REPL cell"):
@@ -62,16 +72,14 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice(stage, "Place import declarations first, fn declarations next, then the executable statements.")
 	case has("has been replaced"):
 		return advice("LIP_DEPENDENCY_ERROR", `Use import python "numpy" as np, import host "fetch" or import go "example.com/adapter".`)
-	case has("aliases are supported by import python") || has("aliases are only supported by import python"):
-		return advice("LIP_DEPENDENCY_ERROR", "Use as with Python modules only. Host/Go operations use their registered Host names.")
-	case has("module alias") || has("Python module") && has("not a function"):
+	case has("module alias") || (has("Python module") || has("Host namespace")) && has("not a function"):
 		switch {
 		case has("not a function"):
 			return advice("LIP_NAME_ERROR", "Call an operation inside the imported module; a module name cannot be called as a function.")
 		case has("conflicts") || has("duplicate"):
 			return advice("LIP_NAME_ERROR", "Choose a distinct alias or rename the conflicting declaration; one local name must have one meaning.")
 		case has("reserved"):
-			return advice("LIP_NAME_ERROR", "Choose an alias that is not a built-in, a type name or a generated-name prefix, e.g. np or ml.")
+			return advice("LIP_NAME_ERROR", "Choose an alias outside the python control namespace and generated-name prefixes, e.g. np or ml.")
 		default:
 			return advice("LIP_NAME_ERROR", `Choose one identifier after as, e.g. import python "numpy" as np.`)
 		}
@@ -83,11 +91,11 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 	case has("invalid host dependency"):
 		return advice("LIP_DEPENDENCY_ERROR", `Use a registered operation name or namespace wildcard, e.g. import host "fetch" or import host "service.*".`)
 	case has("invalid go dependency"):
-		return advice("LIP_DEPENDENCY_ERROR", `Use a Go module path without spaces or a version constraint, e.g. import go "example.com/adapter".`)
+		return advice("LIP_DEPENDENCY_ERROR", `Use a Go package path without spaces or a version constraint, e.g. import go "fmt" as f or import go "example.com/adapter" as a; register its operations in the Go host.`)
 	case has("unknown dependency kind"):
 		return advice("LIP_DEPENDENCY_ERROR", "Choose python, host or go after import.")
 	case has("dependency spec cannot be empty"):
-		return advice("LIP_DEPENDENCY_ERROR", "Put the Python module, Host operation or Go module path inside the quotes.")
+		return advice("LIP_DEPENDENCY_ERROR", "Put the Python module, Host operation or Go package path inside the quotes.")
 	case has("duplicate") && has("dependency"):
 		return advice("LIP_DEPENDENCY_ERROR", "Remove the repeated import declaration.")
 	case has("duplicate object key"):
@@ -102,12 +110,16 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice("LIP_NAME_ERROR", "Choose a name that is not reserved for built-ins or generated graph nodes.")
 	case has("expression alone"):
 		return advice(stage, "Print the value with print(expression), save it with name = expression, or use lipc repl to display expressions automatically.")
-	case has("empty statement"):
-		return advice(stage, "Use a single semicolon between statements; the final semicolon is optional.")
+	case has("non-exhaustive match"):
+		return advice("LIP_MATCH_ERROR", "Cover true and false for a bool, or add a final _ => arm. A guarded arm does not guarantee coverage.")
+	case has("unreachable match arm"):
+		return advice("LIP_MATCH_ERROR", "Remove the duplicate pattern or move the unguarded _ arm last. The first matching arm is selected.")
+	case has("match guard must be bool") || has("match pattern has type"):
+		return advice("LIP_TYPE_ERROR", "Match patterns against the input type and use a bool guard, e.g. _ if value > 0 => result.")
 	case has("expected ,"):
 		return advice(stage, "Separate parameters, call arguments, list elements and object fields with commas; a trailing comma is allowed. Semicolons separate statements only.")
 	case has("expected else"):
-		return advice(stage, "An if expression needs both values: if condition { value } else { other_value }. For conditional effects, use when condition { print(value) }.")
+		return advice(stage, "An if expression needs both values: if condition { value } else { other_value }. For conditional effects, use match condition { true => { print(value) }, false => {} }.")
 	case has("object key must be"):
 		return advice(stage, `Use a name or a quoted key followed by a colon, e.g. {name: "Ada", "two words": 2}.`)
 	case has("expected :"):
@@ -134,16 +146,16 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice("LIP_TYPE_ERROR", "Match the fn output annotation to its returned expression; a pure fn produces a value.")
 	case has("return has type"):
 		return advice("LIP_TYPE_ERROR", "Make the returned value and the declared output type agree. For a Flow with effects only, omit the output declaration and return.")
-	case has("gated return"):
-		return advice("LIP_RETURN_ERROR", "A return inside when can be skipped. Declare an optional output such as -> number?, or return an if expression outside when.")
+	case has("match return may produce no value"):
+		return advice("LIP_RETURN_ERROR", "A match arm without return can produce no value. Declare an optional output such as -> number?, or return a value in every arm.")
 	case has("statements after return"):
-		return advice("LIP_RETURN_ERROR", "Move executable statements before the final return. return finishes this block; it does not cancel earlier graph nodes.")
+		return advice("LIP_RETURN_ERROR", "Move executable statements before the control transfer. return finishes this block; break ends the nearest loop and continue skips the remaining iteration.")
 	case has("exactly one return"):
-		return advice("LIP_RETURN_ERROR", "Use one final return; select a conditional value with if condition { value } else { other_value }.")
+		return advice("LIP_RETURN_ERROR", "Use one final return with match, or return from mutually exclusive match arms.")
 	case has("at most one bare return"):
-		return advice("LIP_RETURN_ERROR", "A Flow without a result needs no return. Remove repeated bare returns; when gates are not early-exit control flow.")
-	case has("scoped to a when block"):
-		return advice("LIP_NAME_ERROR", "A when-local binding is available only inside that block. Move the use into the block, or define the needed value outside it.")
+		return advice("LIP_RETURN_ERROR", "A Flow without a result needs no return. Remove repeated bare returns; match arms select mutually exclusive graph work.")
+	case has("scoped to a match arm"):
+		return advice("LIP_NAME_ERROR", "Bindings inside a match arm or for iteration are available only in that scope. Move the use into the block, or define the needed value outside it.")
 	case has("undefined or forward reference"):
 		return advice("LIP_NAME_ERROR", "Check the spelling and define the binding before use. A forward reference is not a saved value.")
 	case has("unknown function parameter"):
@@ -154,12 +166,6 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice("LIP_EFFECT_ERROR", "Run external operations in the Flow first, then use their saved values in the callback. Inline callbacks may capture immutable Flow bindings; keep IO and print outside the callback.")
 	case has("must be pure"):
 		return advice("LIP_EFFECT_ERROR", "Keep external calls and print in the Flow. Pass their results into a pure fn as parameters.")
-	case has("nested external call") && has("comprehension source"):
-		return advice("LIP_EFFECT_ERROR", "Bind the external source in the Flow first, e.g. values = fetch(); mapped = [x * 2 for x in values]. A comprehension source may directly combine pure expressions such as range(1, 19).")
-	case has("nested external call") && has("comprehension element"):
-		return advice("LIP_EFFECT_ERROR", "Keep external calls as standalone Flow or Map operations. For an effectful comprehension, bind it first (mapped = [fetch(x) for x in values]) and pass mapped to the surrounding call.")
-	case has("nested external call"):
-		return advice("LIP_EFFECT_ERROR", "Bind the external call first, then pass its saved value to the surrounding call. Pure expressions may be nested; external operations are separate Flow nodes.")
 	case has("state") && (has("Flow binding") || has("initial value")):
 		return advice("LIP_EFFECT_ERROR", "Declare state as a binding with one initial value, e.g. counter = state(0). State updates use the host's Instance API.")
 	case has("control operations") || has("only supported as a Flow node"):
@@ -193,8 +199,6 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice("LIP_ARGUMENT_ERROR", "Use retry(operation_call(), positive_integer); the first argument is an ordinary call, not a value or another control operation.")
 	case has("condition must be bool") || has("operator ! expects bool") || has("expects booleans"):
 		return advice("LIP_TYPE_ERROR", "Use a bool expression, e.g. value != 0. Numbers and strings are not implicitly treated as true or false.")
-	case has("if branches have incompatible types"):
-		return advice("LIP_TYPE_ERROR", "Return compatible types from both if branches. null is allowed with a value for an optional result.")
 	case has("operator + cannot combine"):
 		if has("string") {
 			return advice("LIP_TYPE_ERROR", `For text, explicitly convert the other value: "count=" + str(count). For arithmetic, use numbers on both sides.`)

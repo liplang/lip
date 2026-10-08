@@ -4,9 +4,37 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestOptionalCLIInputs(t *testing.T) {
+	for _, tc := range []struct {
+		typ, raw string
+		want     Value
+	}{
+		{"number?", "null", nil}, {"number?", "2.5", 2.5},
+		{"bool?", "null", nil}, {"bool?", "false", false},
+		{"list?", "null", nil}, {"list?", "[1]", []any{float64(1)}},
+		{"object?", "null", nil}, {"object?", "{}", map[string]any{}},
+		{"string?", "null", nil}, {"string?", "hello", "hello"},
+		{"string?", `"null"`, "null"}, {"string", "null", "null"},
+	} {
+		values, err := ParseCLIInputs([]string{tc.raw}, []Input{{Name: "x", Type: tc.typ}})
+		if err != nil || !reflect.DeepEqual(values["x"], tc.want) {
+			t.Fatalf("%s %s: %v %v", tc.typ, tc.raw, values, err)
+		}
+	}
+	for _, tc := range []Input{{"x", "number?"}, {"x", "bool?"}, {"x", "list?"}, {"x", "object?"}} {
+		if _, err := ParseCLIInputs([]string{"oops"}, []Input{tc}); err == nil {
+			t.Fatal(tc)
+		}
+	}
+	if _, err := ParseCLIInputs([]string{"null"}, []Input{{"x", "typo?"}}); err == nil {
+		t.Fatal("unknown nullable type accepted")
+	}
+}
 
 type brokenPrintWriter struct{ err error }
 
@@ -19,6 +47,9 @@ func TestUnifiedValueDisplay(t *testing.T) {
 	}{
 		{nil, "null", "null"}, {true, "true", "bool"}, {float64(0.4), "0.4", "number"}, {"你好", "你好", "string"},
 		{[]any{float64(2), nil, "a"}, `[2,null,"a"]`, "list"}, {map[string]any{"b": nil, "a": float64(1)}, `{"a":1,"b":null}`, "object"},
+		{map[string]any{"$python_ref": "numpy.mean", "kind": "function"}, "<Python function numpy.mean; call with (...)>", "object"},
+		{map[string]any{"$python_ref": "numpy", "kind": "module"}, "<Python module numpy>", "object"},
+		{map[string]any{"$python_ref": "datetime.datetime", "kind": "class"}, "<Python class datetime.datetime; call with (...)>", "object"},
 	} {
 		var output bytes.Buffer
 		if err := PrintValues(&output, []Value{tc.value}); err != nil {
@@ -43,6 +74,9 @@ func TestUnifiedValueDisplay(t *testing.T) {
 func TestExecutionHintsAvoidMisleadingConversions(t *testing.T) {
 	for _, tc := range []struct{ message, want, avoid string }{
 		{"expected number, got string (3)", "parse_number", "print"},
+		{"modulo by zero", "nonzero divisor", "parse_number"},
+		{"logarithm argument must be positive", "positive left operand", "parse_number"},
+		{"logarithm base must be positive and different from 1", "different from 1", "parse_number"},
 		{"expected number, got null (null)", "handle the missing", "parse_number"},
 		{"expected bool, got number (1)", "comparison", "print"},
 		{"index 3 out of range", "index >= 0", "index < len" + " only"},
@@ -51,6 +85,7 @@ func TestExecutionHintsAvoidMisleadingConversions(t *testing.T) {
 		{"list.first: needs a nonempty list", "len(values) == 0", "callback"},
 		{"unknown Python handle abc", "same cell", "import host"},
 		{"ModuleNotFoundError: No module named x", "interpreter environment", "scikit-learn"},
+		{"AttributeError: numpy has no attribute '__versin__'", "attribute spelling", "install"},
 	} {
 		hint := ExecutionHint(errors.New(tc.message))
 		if !strings.Contains(hint, tc.want) || strings.Contains(hint, tc.avoid) {

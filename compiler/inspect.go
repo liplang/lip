@@ -52,7 +52,11 @@ func InspectJSON(g *Graph) ([]byte, error) {
 	}
 	for _, item := range g.Nodes {
 		kind := "value"
-		if item.State {
+		if item.For != nil {
+			kind = "for"
+		} else if item.LoopControl != "" {
+			kind = item.LoopControl
+		} else if item.State {
 			kind = "state"
 		} else if item.RetryAttempts > 0 {
 			kind = "retry"
@@ -61,11 +65,8 @@ func InspectJSON(g *Graph) ([]byte, error) {
 		} else if _, ok := item.Expr.(*ast.ComprehensionExpr); ok {
 			kind = "map"
 		}
-		calls := callNames(item.Expr)
-		if item.FeedbackAttempts > 0 {
-			calls = unique(append(calls, item.FeedbackStep, item.FeedbackVerify))
-		}
-		pure := pureExpression(item.Expr, g.Functions) && kind != "state" && kind != "retry" && kind != "feedback"
+		calls := nodeCalls(item)
+		pure := pureExpression(item.Expr, g.Functions) && kind != "state" && kind != "retry" && kind != "feedback" && kind != "for" && item.LoopControl == ""
 		document.Nodes = append(document.Nodes, node{item.Name, append([]string{}, item.Deps...), append([]string{}, item.Gates...), item.Type, kind, item.Output, pure, append([]string{}, calls...), location{item.Pos.Line, item.Pos.Column}})
 	}
 	return json.MarshalIndent(document, "", "  ")

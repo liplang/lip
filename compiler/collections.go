@@ -89,7 +89,7 @@ func inferStringCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParam
 }
 
 func callbackIndex(call *ast.CallExpr) int {
-	if call.Python {
+	if externalCall(call) {
 		return -1
 	}
 	if call.Name == "fold" && len(call.Args) == 3 {
@@ -154,7 +154,7 @@ func inferListCall(call *ast.CallExpr, env, fnTypes map[string]string, fnParams 
 // Check collection signatures before visiting their arguments so an extra or
 // missing argument does not produce a misleading callback/dependency error.
 func validateCollectionCallShape(call *ast.CallExpr) error {
-	if call.Python {
+	if externalCall(call) {
 		return nil
 	}
 	minimum, maximum := -1, -1

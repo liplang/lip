@@ -194,8 +194,13 @@ func reserveBindings(statements []ast.Stmt, used map[string]bool) {
 		switch value := statement.(type) {
 		case *ast.BindStmt:
 			used[value.Name] = true
-		case *ast.WhenStmt:
+		case *ast.ForStmt:
+			used[value.Variable] = true
 			reserveBindings(value.Body, used)
+		case *ast.MatchStmt:
+			for _, arm := range value.Arms {
+				reserveBindings(arm.Body, used)
+			}
 		}
 	}
 }
@@ -242,17 +247,18 @@ func (s *replSession) evaluate(source string, output, errors io.Writer, quiet bo
 	}}, Pos: cell.ResultPos})
 	functions := append(append([]*ast.Function(nil), s.functions...), cell.Functions...)
 	dependencies := append(append([]ast.Dependency(nil), s.dependencies...), cell.Dependencies...)
-	graph, err := compiler.Build(&ast.Program{Functions: functions, Dependencies: dependencies, Flow: &ast.Flow{
+	// Re-entering a declaration is harmless in a session. Keep distinct aliases
+	// for the same module, and let the compiler reject conflicting aliases.
+	dependencies = uniqueREPLDependencies(dependencies)
+	graph, err := compiler.BuildWithOptions(&ast.Program{Functions: functions, Dependencies: dependencies, Flow: &ast.Flow{
 		Name: "REPL", Params: params, ParamTypes: types, ReturnType: "object", Body: cell.Body, Pos: token.Pos{Line: 1, Column: 1},
-	}})
+	}}, compiler.BuildOptions{AllowNestedExternalCalls: true})
 	if err != nil {
 		return compiler.SourceError(path, source, "LIP_CHECK_ERROR", err)
 	}
 	graph.SourceName, graph.Source = path, source
-	for _, dependency := range dependencies {
-		if dependency.Kind != "python" {
-			return fmt.Errorf("REPL Host/Go adapters require a Go host program; use lipc build --no-main for such programs (print needs no import)")
-		}
+	if graph.RequiresHost() {
+		return fmt.Errorf("REPL Host/Go adapters require a Go host program; use lipc build --no-main for such programs (print needs no import)")
 	}
 	code, err := compiler.GenerateGoWithOptions(graph, compiler.GenerateOptions{PackageName: "main", IncludeDiagnostics: true})
 	if err != nil {
@@ -276,7 +282,7 @@ func (s *replSession) evaluate(source string, output, errors io.Writer, quiet bo
 		return err
 	}
 	harness := fmt.Sprintf(replHarness, inputsPath, resultPath)
-	if len(dependencies) > 0 {
+	if graph.RequiresPython() {
 		harness = strings.Replace(harness, "// PYTHON", "worker, err := runtime.NewPythonWorker(ctx, runtime.PythonWorkerConfig{}); if err != nil { return nil, err }; defer worker.Close(); host = runtime.NewPythonHost(worker)", 1)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "repl_main.go"), []byte(harness), 0o600); err != nil {
@@ -326,6 +332,19 @@ func (s *replSession) evaluate(source string, output, errors io.Writer, quiet bo
 		fmt.Fprintln(output, value)
 	}
 	return nil
+}
+
+func uniqueREPLDependencies(dependencies []ast.Dependency) []ast.Dependency {
+	seen := map[string]bool{}
+	result := make([]ast.Dependency, 0, len(dependencies))
+	for _, dependency := range dependencies {
+		key := dependency.Kind + "\x00" + dependency.Spec + "\x00" + dependency.Alias
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, dependency)
+		}
+	}
+	return result
 }
 
 // Results use a private JSON file so explicit print output is never parsed as

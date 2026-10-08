@@ -17,7 +17,11 @@ type Cell struct {
 
 func (p *Parser) ParseCell() (*Cell, error) {
 	cell := &Cell{}
-	for p.peek().Kind != token.EOF {
+	for {
+		p.skipSemicolons()
+		if p.peek().Kind == token.EOF {
+			break
+		}
 		if err := p.checkDirective(); err != nil {
 			return nil, err
 		}
@@ -28,18 +32,18 @@ func (p *Parser) ParseCell() (*Cell, error) {
 				return nil, err
 			}
 			cell.Dependencies = append(cell.Dependencies, dependency)
-			p.match(token.Semicolon)
+			p.skipSemicolons()
 		case token.Fn:
 			fn, err := p.parseFunction()
 			if err != nil {
 				return nil, err
 			}
 			cell.Functions = append(cell.Functions, fn)
-			p.match(token.Semicolon)
+			p.skipSemicolons()
 		case token.Flow, token.Return:
 			return nil, p.errorf(p.peek(), "REPL cells use bindings, fn declarations and expressions directly; no flow wrapper or return is needed")
 		default:
-			if p.peek().Kind == token.When || p.peek().Kind == token.Ident && p.tokens[p.i+1].Kind == token.Assign {
+			if p.peek().Kind == token.For || p.peek().Kind == token.Break || p.peek().Kind == token.Continue || p.peek().Kind == token.Ident && p.tokens[p.i+1].Kind == token.Assign {
 				stmt, err := p.parseStatement()
 				if err != nil {
 					return nil, err
@@ -51,7 +55,20 @@ func (p *Parser) ParseCell() (*Cell, error) {
 				continue
 			}
 			pos := p.peek().Pos
+			start := p.i
 			expr, err := p.parseExpr(0)
+			if err != nil && !IsIncomplete(err) && p.tokens[start].Kind == token.Match {
+				p.i = start
+				stmt, stmtErr := p.parseStatement()
+				if stmtErr != nil {
+					return nil, stmtErr
+				}
+				cell.Body = append(cell.Body, stmt)
+				if err := p.statementEnd(token.EOF); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}

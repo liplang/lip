@@ -1,0 +1,2382 @@
+[
+  {
+    "id": "expressions",
+    "title": "第一个表达式",
+    "stage": "基础",
+    "topics": [
+      "number",
+      "+ - * / // % ** */",
+      "print",
+      "# 注释"
+    ],
+    "explanation": [
+      "LIP 使用普通中缀表达式，乘除优先于加减，括号可以改变顺序。number 是有限浮点数；例如 5 / 2 是 2.5。",
+      "示例只写顶层语句，编译器会组织为无参数、无返回值的 main Flow。# 后面是行注释。练习改用有返回值的 Flow，让验证器检查结果。",
+      "整数除法写 //，对商向下取整，例如 7 // 2 得 3，-7 // 2 得 -4。乘方写 **，右结合，优先级高于负号：2 ** 3 ** 2 得 512，-2 ** 2 得 -4。",
+      "八种数学运算：+ 加、- 减、* 乘、/ 除、// 整除、% 取余、** 乘方、*/ 对数。余数符号跟随除数；8 */ 2 得 3，真数和底数为正且底数不等于 1。*/ 与乘除同级、左结合。"
+    ],
+    "example": "# 先乘除，再加减\nprice = 12\nprint(price / 2 + 1)\n# 整除、余数、幂和对数\nprint(-7 // 2, -7 % 2, 2 ** 3 ** 2, 8 */ 2)",
+    "demo": [
+      {
+        "name": "运行顶层程序",
+        "inputs": {},
+        "want": null,
+        "error": "",
+        "stdout": "7\n-4 1 512 3\n"
+      }
+    ],
+    "task": "填写一个同时使用加号和乘号的表达式，计算 2 加上 3 与 4 的乘积。",
+    "template": "flow Arithmetic() -> number { return __ANSWER__ }",
+    "solution": "2 + 3 * 4",
+    "cases": [
+      {
+        "name": "运算优先级",
+        "inputs": {},
+        "want": 14,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "先写乘法 3 * 4。",
+      "把乘法放在加法右侧，无需额外括号。"
+    ],
+    "why": "3 * 4 先得到 12，再加 2。表达式给出值，print 产生显示输出，return 给出 Flow 的结果。",
+    "required": [
+      "+",
+      "*"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "bindings",
+    "title": "不可变绑定与依赖",
+    "stage": "基础",
+    "topics": [
+      "=",
+      "不可变绑定",
+      "换行 / 分号"
+    ],
+    "explanation": [
+      "name = expression 是不可变绑定，同一作用域不能再给同名变量赋值。新结果应使用新名字。",
+      "变量引用形成依赖，必须先声明再使用。换行分隔语句；同一行的多条语句必须使用分号。连续或独立分号作为空语句接受，文件、Flow、fn、分支和循环一致。"
+    ],
+    "example": "flow Discount(price: number) -> number {\n    discount = price * 0.1\n    final_price = price - discount\n    return final_price\n}",
+    "demo": [
+      {
+        "name": "九折",
+        "inputs": {
+          "price": 100
+        },
+        "want": 90,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "补一行绑定 discounted = ...，计算 price 的八折价格。不要重新绑定 price。",
+    "template": "flow Discount(price: number) -> number {\n    __ANSWER__\n    return discounted\n}",
+    "solution": "discounted = price * 0.8",
+    "cases": [
+      {
+        "name": "价格 100",
+        "inputs": {
+          "price": 100
+        },
+        "want": 80,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "价格 25",
+        "inputs": {
+          "price": 25
+        },
+        "want": 20,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "零价格",
+        "inputs": {
+          "price": 0
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "新变量必须叫 discounted，后面的 return 会读取它。",
+      "八折就是 price 乘以 0.8。"
+    ],
+    "why": "discounted 依赖 price。不可变绑定让 Runtime 能判断哪些计算可复用，并允许独立节点并行。",
+    "required": [
+      "discounted",
+      "*"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "data",
+    "title": "值、列表与对象",
+    "stage": "基础",
+    "topics": [
+      "number",
+      "string",
+      "bool",
+      "list",
+      "object",
+      "any",
+      "true",
+      "null"
+    ],
+    "explanation": [
+      "核心值有 null、bool、number、string、list、object。any 允许任意核心值；list/object 类型只检查外层形状。",
+      "用对象的 .field 或 [\"field\"] 读取字段，用列表的 [0] 读取首项。索引从 0 开始，缺失字段和越界会失败。对象和列表可嵌套；字符串键须唯一。"
+    ],
+    "example": "flow Profile(person: object) -> object {\n    return {name: person.name, scores: person.scores, enabled: true, note: null}\n}",
+    "demo": [
+      {
+        "name": "嵌套数据",
+        "inputs": {
+          "person": {
+            "name": "小林",
+            "scores": [
+              90,
+              80
+            ]
+          }
+        },
+        "want": {
+          "name": "小林",
+          "scores": [
+            90,
+            80
+          ],
+          "enabled": true,
+          "note": null
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "返回对象，字段 name 取 person.name，first 取 person.scores 的首项，active 为 true，missing 为 null。",
+    "template": "flow Profile(person: object) -> object { return __ANSWER__ }",
+    "solution": "{name: person.name, first: person.scores[0], active: true, missing: null}",
+    "cases": [
+      {
+        "name": "中文名字",
+        "inputs": {
+          "person": {
+            "name": "小林",
+            "scores": [
+              90,
+              80
+            ]
+          }
+        },
+        "want": {
+          "name": "小林",
+          "first": 90,
+          "active": true,
+          "missing": null
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "不同首项",
+        "inputs": {
+          "person": {
+            "name": "Ada",
+            "scores": [
+              0,
+              100
+            ]
+          }
+        },
+        "want": {
+          "name": "Ada",
+          "first": 0,
+          "active": true,
+          "missing": null
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "对象写成 {name: 表达式, first: 表达式, ...}。",
+      "首项写 person.scores[0]；布尔值和空值无需引号。"
+    ],
+    "why": "对象字段的顺序不影响相等比较，列表元素的顺序影响结果。动态集合元素会在实际运算时校验。",
+    "required": [
+      "true",
+      "null"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "conditions",
+    "title": "条件、布尔逻辑与空值",
+    "stage": "基础",
+    "topics": [
+      "if",
+      "else",
+      "true",
+      "false",
+      "null",
+      "&& || !",
+      "短路"
+    ],
+    "explanation": [
+      "if condition { value } else { other } 是选值表达式：条件必须是 bool，每个分支只写一个值表达式。",
+      "&&、|| 和 if 短路，只求值需要的分支。使用 ! 取反；true/false 是布尔字面值，null 表示空值。"
+    ],
+    "example": "flow Status(enabled: bool, values: list) -> object {\n    return {\n        disabled: !enabled,\n        available: if enabled && len(values) > 0 { true } else { false },\n        first: if len(values) == 0 { null } else { values[0] }\n    }\n}",
+    "demo": [
+      {
+        "name": "空列表也安全",
+        "inputs": {
+          "enabled": false,
+          "values": []
+        },
+        "want": {
+          "disabled": true,
+          "available": false,
+          "first": null
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "仅当 enabled 为 true 且 values 非空时返回首项，否则返回 null。",
+    "template": "flow First(enabled: bool, values: list) -> any { return __ANSWER__ }",
+    "solution": "if enabled && len(values) > 0 { values[0] } else { null }",
+    "cases": [
+      {
+        "name": "开启且有值",
+        "inputs": {
+          "enabled": true,
+          "values": [
+            7,
+            8
+          ]
+        },
+        "want": 7,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "关闭",
+        "inputs": {
+          "enabled": false,
+          "values": [
+            7
+          ]
+        },
+        "want": null,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "开启但为空",
+        "inputs": {
+          "enabled": true,
+          "values": []
+        },
+        "want": null,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "把两个条件用 && 连接。",
+      "把 values[0] 放在 true 分支，null 放在 else 分支。"
+    ],
+    "why": "空列表时不会求值 values[0]。外部独立节点的执行资格需要用 match 控制，后面会专门练习。",
+    "required": [
+      "if",
+      "else",
+      "&&",
+      "null"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "functions",
+    "title": "纯函数 fn 与 return",
+    "stage": "基础",
+    "topics": [
+      "fn",
+      "参数类型",
+      "返回类型",
+      "return",
+      "纯性"
+    ],
+    "explanation": [
+      "fn 封装纯计算。具名参数必须写类型；单表达式函数可以省略 return 和可推导的返回类型。",
+      "fn 不能隐藏 print、Host/Python 调用或 state/retry/feedback；它可以调用其他纯函数。fn 内部表达式不展开为 Flow 图节点。",
+      "参数与结果均可写 T?（T 或 null）；参数仍须提供。可用 match value { null => null, _ => value * 2 } 显式处理可空数值。"
+    ],
+    "example": "fn twice(x: number) -> number { return x * 2 }\nflow Twice(value: number) -> number { return twice(value) }",
+    "demo": [
+      {
+        "name": "调用纯函数",
+        "inputs": {
+          "value": 6
+        },
+        "want": 12,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "声明纯函数 square(x: number) -> number，显式使用 return 返回 x 的平方。",
+    "template": "__ANSWER__\nflow Squares(value: number) -> number { return square(value) }",
+    "solution": "fn square(x: number) -> number { return x * x }",
+    "cases": [
+      {
+        "name": "正数",
+        "inputs": {
+          "value": 4
+        },
+        "want": 16,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "负数",
+        "inputs": {
+          "value": -3
+        },
+        "want": 9,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "零",
+        "inputs": {
+          "value": 0
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "函数声明放在 Flow 前：fn square(x: number) -> number { ... }。",
+      "函数体写 return x * x。"
+    ],
+    "why": "square 是纯计算，Flow 负责组织输入和结果。纯函数不能偷偷执行外部工作。",
+    "required": [
+      "fn",
+      "return",
+      "square"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "organization",
+    "title": "组织一个完整程序",
+    "stage": "基础",
+    "topics": [
+      "fn",
+      "flow",
+      "入口",
+      "边界类型",
+      "void",
+      "程序布局"
+    ],
+    "explanation": [
+      "一个文件包含依赖头、若干纯 fn，以及一个显式 flow 或一组顶层执行语句。显式 Flow 与顶层语句不能混写。",
+      "有返回值的 Flow 声明 -> 类型，用一个 return 或 match 的互斥分支给出结果；同一块的 return 后没有其他语句。无返回值的 Flow 可省略输出或写 -> void。Flow/具名 fn 的参数必须写类型。"
+    ],
+    "example": "fn add_one(x: number) { x + 1 }\nflow Greeting(value: number) -> object {\n    next = add_one(value)\n    return {before: value, after: next}\n}",
+    "demo": [
+      {
+        "name": "函数与入口协作",
+        "inputs": {
+          "value": 2
+        },
+        "want": {
+          "before": 2,
+          "after": 3
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "输入完整程序：先声明 square 纯函数，再声明接收 value: number 的 Flow，返回 {original: value, squared: square(value)}。用 :edit 和 :submit 输入多行。",
+    "template": "__ANSWER__",
+    "solution": "fn square(x: number) -> number { return x * x }\nflow Workshop(value: number) -> object {\n    return {original: value, squared: square(value)}\n}",
+    "cases": [
+      {
+        "name": "输入 3",
+        "inputs": {
+          "value": 3
+        },
+        "want": {
+          "original": 3,
+          "squared": 9
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "输入 -2",
+        "inputs": {
+          "value": -2
+        },
+        "want": {
+          "original": -2,
+          "squared": 4
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "使用 :edit，然后分别写 fn 和 flow；最后输入 :submit。",
+      "Flow 的参数名是 value，输出类型为 object，return 对象中的两个键是 original 与 squared。"
+    ],
+    "why": "函数定义描述可复用计算，Flow 声明数据边界并组织依赖。每个入口文件只有一个 Flow。",
+    "required": [
+      "fn",
+      "flow",
+      "return"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "range-map",
+    "title": "range 与 Map 推导式",
+    "stage": "集合",
+    "topics": [
+      "range",
+      "for",
+      "in",
+      "半开区间",
+      "Map"
+    ],
+    "explanation": [
+      "range(end) 生成 0 到 end 之前的整数；range(start, end[, step]) 可以指定起点与正负步长，终点不包含。",
+      "[expression for item in source] 逐项变换，保持结果顺序。独立 Map 节点可以有界并行；嵌套推导式顺序求值。空输入返回 []，最多 1,000,000 项。"
+    ],
+    "example": "flow Doubles(limit: number) -> list {\n    doubled = [x * 2 for x in range(limit)]\n    return doubled\n}",
+    "demo": [
+      {
+        "name": "0 到 3",
+        "inputs": {
+          "limit": 4
+        },
+        "want": [
+          0,
+          2,
+          4,
+          6
+        ],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "用推导式返回从 1 到 limit 之前的每个整数的平方。",
+    "template": "flow Squares(limit: number) -> list { return __ANSWER__ }",
+    "solution": "[x * x for x in range(1, limit)]",
+    "cases": [
+      {
+        "name": "终点不包含",
+        "inputs": {
+          "limit": 5
+        },
+        "want": [
+          1,
+          4,
+          9,
+          16
+        ],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "只有 1",
+        "inputs": {
+          "limit": 2
+        },
+        "want": [
+          1
+        ],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空区间",
+        "inputs": {
+          "limit": 1
+        },
+        "want": [],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "source 用 range(1, limit)。",
+      "元素表达式用 x * x，后接 for x in source。"
+    ],
+    "why": "推导式 for/in 生成转换后的列表；语句式 for 执行顺序操作。集合转换用推导式，聚合用 fold。",
+    "required": [
+      "range",
+      "for",
+      "in"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "fold",
+    "title": "带初值的顺序归约",
+    "stage": "集合",
+    "topics": [
+      "fold",
+      "fn(acc, item)",
+      "初值",
+      "空输入"
+    ],
+    "explanation": [
+      "fold(source, seed, reducer) 从左到右调用二参数纯函数 reducer(accumulator, item)。空列表直接返回 seed。",
+      "回调可以用本地函数名（不加括号），或内联 fn。内联参数可省略类型；回调不允许外部工作。"
+    ],
+    "example": "fn multiply(total: number, x: number) -> number { return total * x }\nflow Product(values: list) -> number {\n    return fold(values, 1, multiply)\n}",
+    "demo": [
+      {
+        "name": "相乘",
+        "inputs": {
+          "values": [
+            2,
+            3,
+            4
+          ]
+        },
+        "want": 24,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "乘法初值",
+        "inputs": {
+          "values": []
+        },
+        "want": 1,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "用 fold 和内联二参数 fn 求 values 的和，初值为 0。",
+    "template": "flow Sum(values: list) -> number { return __ANSWER__ }",
+    "solution": "fold(values, 0, fn(total, x) { total + x })",
+    "cases": [
+      {
+        "name": "正数求和",
+        "inputs": {
+          "values": [
+            1,
+            2,
+            3
+          ]
+        },
+        "want": 6,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "正负混合",
+        "inputs": {
+          "values": [
+            5,
+            -2,
+            0
+          ]
+        },
+        "want": 3,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空输入初值",
+        "inputs": {
+          "values": []
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "fold 的三个参数依次是 values、0、回调。",
+      "回调是 fn(total, x) { total + x }，每次接收累计值和当前元素。"
+    ],
+    "why": "初值决定空输入的结果。fold 只给最终值，后面的 list.scan 可以给出全部累计过程。",
+    "required": [
+      "fold",
+      "fn"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "strings",
+    "title": "字符串清理与大小写",
+    "stage": "标准库",
+    "topics": [
+      "string.trim",
+      "string.lower",
+      "string.upper",
+      "纯标准库"
+    ],
+    "explanation": [
+      "string.* 是内置纯标准库，不需要 import。可用于 fn、if、Map 和回调。",
+      "trim 去两端 Unicode 空白，lower/upper 转换大小写；它们返回新字符串，不修改输入。:reference string 可以查看全部 19 个操作。"
+    ],
+    "example": "flow Shout(raw: string) -> string {\n    cleaned = string.trim(raw)\n    return string.upper(cleaned)\n}",
+    "demo": [
+      {
+        "name": "清理再大写",
+        "inputs": {
+          "raw": "  hello LIP  "
+        },
+        "want": "HELLO LIP",
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "去掉 raw 两端空白，再转换为小写。",
+    "template": "flow Clean(raw: string) -> string { return __ANSWER__ }",
+    "solution": "string.lower(string.trim(raw))",
+    "cases": [
+      {
+        "name": "空白和大小写",
+        "inputs": {
+          "raw": "  Go, LIP  "
+        },
+        "want": "go, lip",
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "Unicode 空白",
+        "inputs": {
+          "raw": "\t你好　"
+        },
+        "want": "你好",
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空字符串",
+        "inputs": {
+          "raw": ""
+        },
+        "want": "",
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "先调用 string.trim(raw)。",
+      "把 trim 的结果作为 string.lower 的参数。"
+    ],
+    "why": "纯库可以直接嵌套组合；字符串与数值不会隐式互相转换。",
+    "required": [
+      "string.trim",
+      "string.lower"
+    ],
+    "mode": "",
+    "references": [
+      "docs/STRING-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "unicode",
+    "title": "字符索引与显式转换",
+    "stage": "标准库",
+    "topics": [
+      "len",
+      "str",
+      "string.slice",
+      "Unicode"
+    ],
+    "explanation": [
+      "len(string) 和字符串索引按 Unicode 码点计数，中文和单码点 emoji 都算一个；组合字符可能包含多个码点。",
+      "string.slice(text, start, end) 是半开区间，允许从末尾算的负索引，越界截断。text[i] 越界则失败。str(value) 显式产生显示文本。"
+    ],
+    "example": "flow Characters(text: string) -> object {\n    return {characters: string.chars(text), first_two: string.slice(text, 0, 2), size: len(text)}\n}",
+    "demo": [
+      {
+        "name": "中文和 emoji",
+        "inputs": {
+          "text": "你好🌱"
+        },
+        "want": {
+          "characters": [
+            "你",
+            "好",
+            "🌱"
+          ],
+          "first_two": "你好",
+          "size": 3
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "返回 {length: 字符数, tail: 最后两个字符, label: \"长度=\" 加上字符数的文本}。短字符串与空字符串也要正确。",
+    "template": "flow TextInfo(text: string) -> object { return __ANSWER__ }",
+    "solution": "{length: len(text), tail: string.slice(text, -2, len(text)), label: \"长度=\" + str(len(text))}",
+    "cases": [
+      {
+        "name": "Unicode",
+        "inputs": {
+          "text": "你好🌱"
+        },
+        "want": {
+          "length": 3,
+          "tail": "好🌱",
+          "label": "长度=3"
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "单字符",
+        "inputs": {
+          "text": "a"
+        },
+        "want": {
+          "length": 1,
+          "tail": "a",
+          "label": "长度=1"
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空文本",
+        "inputs": {
+          "text": ""
+        },
+        "want": {
+          "length": 0,
+          "tail": "",
+          "label": "长度=0"
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "组合字符",
+        "inputs": {
+          "text": "é"
+        },
+        "want": {
+          "length": 2,
+          "tail": "é",
+          "label": "长度=2"
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "tail 可以用 string.slice(text, -2, len(text))。",
+      "label 写 \"长度=\" + str(len(text))，必须显式转换数值。"
+    ],
+    "why": "码点计数与字节数、屏幕显示宽度不同。slice 适合安全截取，直接索引要求下标有效。",
+    "required": [
+      "len",
+      "str",
+      "string.slice"
+    ],
+    "mode": "",
+    "references": [
+      "docs/STRING-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "text-numbers",
+    "title": "切词、数值解析与组合",
+    "stage": "标准库",
+    "topics": [
+      "string.split_whitespace",
+      "string.parse_number",
+      "Map",
+      "fold"
+    ],
+    "explanation": [
+      "split_whitespace 按连续 Unicode 空白切词并忽略空项；split(text, separator) 按字面分隔符切分并保留空项。",
+      "parse_number 解析有限十进制数，不隐式去空白，非法文本会失败。切词得到字符串列表，Map 解析，再用 fold 聚合。CSV/JSON 等结构化格式应交给明确的 parser。"
+    ],
+    "example": "flow Words(raw: string) -> string {\n    words = string.split_whitespace(raw)\n    return string.join(words, \" / \")\n}",
+    "demo": [
+      {
+        "name": "空白规范化",
+        "inputs": {
+          "raw": "  go\tLIP\n你好 "
+        },
+        "want": "go / LIP / 你好",
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "把 raw 中以空白分隔的数值解析并求和，空文本返回 0，非法数值保留解析错误。",
+    "template": "flow NumericText(raw: string) -> number {\n    parts = string.split_whitespace(raw)\n    return __ANSWER__\n}",
+    "solution": "fold([string.parse_number(x) for x in parts], 0, fn(total, x) { total + x })",
+    "cases": [
+      {
+        "name": "多个数",
+        "inputs": {
+          "raw": " 1  2\t3 "
+        },
+        "want": 6,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "负数和指数",
+        "inputs": {
+          "raw": "-2 5 1e1"
+        },
+        "want": 13,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空输入",
+        "inputs": {
+          "raw": "  "
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "拒绝非法数",
+        "inputs": {
+          "raw": "2 nope"
+        },
+        "want": null,
+        "error": "string.parse_number",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "先用 [string.parse_number(x) for x in parts] 构造数值列表。",
+      "把数值列表传给 fold，初值 0，回调把两个参数相加。"
+    ],
+    "why": "库调用、推导式和内联回调使用相同的值组合方式；解析错误自然传播，不会变成假结果。",
+    "required": [
+      "string.parse_number",
+      "for",
+      "in",
+      "fold"
+    ],
+    "mode": "",
+    "references": [
+      "docs/STRING-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "filter-sort",
+    "title": "过滤、去重与排序",
+    "stage": "标准库",
+    "topics": [
+      "list.filter",
+      "list.unique",
+      "list.sort",
+      "纯回调"
+    ],
+    "explanation": [
+      "list.filter(xs, predicate) 保留回调返回 true 的原元素。unique 保留第一次出现的顺序，sort 对同类数字或字符串稳定升序排序。",
+      "list.* 内置，无需 import。list.map 是顺序纯表达式，可嵌套组合；独立 Map 推导式则允许 Runtime 动态并行展开。:reference list 查看全部 34 个操作。"
+    ],
+    "example": "flow Accepted(values: list) -> list {\n    return list.map(list.filter(values, fn(x) { x >= 0 }), fn(x) { x * 10 })\n}",
+    "demo": [
+      {
+        "name": "保留再变换",
+        "inputs": {
+          "values": [
+            -1,
+            0,
+            2
+          ]
+        },
+        "want": [
+          0,
+          20
+        ],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "从 values 中保留严格大于 0 的数，去重后升序排序。",
+    "template": "flow PositiveUnique(values: list) -> list { return __ANSWER__ }",
+    "solution": "list.sort(list.unique(list.filter(values, fn(x) { x > 0 })))",
+    "cases": [
+      {
+        "name": "混合与重复",
+        "inputs": {
+          "values": [
+            3,
+            -1,
+            2,
+            3,
+            0,
+            1
+          ]
+        },
+        "want": [
+          1,
+          2,
+          3
+        ],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "全部不合格",
+        "inputs": {
+          "values": [
+            0,
+            -2
+          ]
+        },
+        "want": [],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空列表",
+        "inputs": {
+          "values": []
+        },
+        "want": [],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "最内层写 list.filter(values, fn(x) { x > 0 })。",
+      "依次套 list.unique 和 list.sort。"
+    ],
+    "why": "每一步返回新列表。filter 的回调必须返回 bool，排序不进行跨类型隐式转换。",
+    "required": [
+      "list.filter",
+      "list.unique",
+      "list.sort"
+    ],
+    "mode": "",
+    "references": [
+      "docs/LIST-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "shapes",
+    "title": "窗口与列表形状",
+    "stage": "标准库",
+    "topics": [
+      "list.partition",
+      "list.zip",
+      "list.transpose",
+      "list.cartesian"
+    ],
+    "explanation": [
+      "partition(xs, size[, step]) 切窗口，保留末尾短窗口；step=1 产生滑动窗口。zip 按位置配对，截到最短输入。",
+      "transpose 要求严格矩形二维列表。cartesian 构造笛卡尔积，最右输入变化最快。flatten、slice、take/drop 等形状工具见速查和库文档。"
+    ],
+    "example": "flow Shapes() -> object {\n    return {columns: list.transpose([[1, 2], [3, 4]]), pairs: list.cartesian([1, 2], [\"a\", \"b\"])}\n}",
+    "demo": [
+      {
+        "name": "转置与笛卡尔积",
+        "inputs": {},
+        "want": {
+          "columns": [
+            [
+              1,
+              3
+            ],
+            [
+              2,
+              4
+            ]
+          ],
+          "pairs": [
+            [
+              1,
+              "a"
+            ],
+            [
+              1,
+              "b"
+            ],
+            [
+              2,
+              "a"
+            ],
+            [
+              2,
+              "b"
+            ]
+          ]
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "返回对象：windows 是 values 的长度 2、步长 1 窗口；pairs 是 values 与 [\"a\", \"b\"] 的 zip 配对。",
+    "template": "flow Windows(values: list) -> object { return __ANSWER__ }",
+    "solution": "{windows: list.partition(values, 2, 1), pairs: list.zip(values, [\"a\", \"b\"])}",
+    "cases": [
+      {
+        "name": "尾部短窗口",
+        "inputs": {
+          "values": [
+            1,
+            2,
+            3
+          ]
+        },
+        "want": {
+          "windows": [
+            [
+              1,
+              2
+            ],
+            [
+              2,
+              3
+            ],
+            [
+              3
+            ]
+          ],
+          "pairs": [
+            [
+              1,
+              "a"
+            ],
+            [
+              2,
+              "b"
+            ]
+          ]
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "一项",
+        "inputs": {
+          "values": [
+            9
+          ]
+        },
+        "want": {
+          "windows": [
+            [
+              9
+            ]
+          ],
+          "pairs": [
+            [
+              9,
+              "a"
+            ]
+          ]
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空形状",
+        "inputs": {
+          "values": []
+        },
+        "want": {
+          "windows": [],
+          "pairs": []
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "partition 的三个参数为 values、2、1。",
+      "zip 的第二个参数是字符串列表 [\"a\", \"b\"]。"
+    ],
+    "why": "窗口保留末尾短段，zip 则以最短列表为边界；两种操作的边界契约不同。",
+    "required": [
+      "list.partition",
+      "list.zip"
+    ],
+    "mode": "",
+    "references": [
+      "docs/LIST-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "groups",
+    "title": "记录分组与键函数",
+    "stage": "标准库",
+    "topics": [
+      "list.group_by",
+      "list.split_by",
+      "list.sort_by",
+      "对象字段"
+    ],
+    "explanation": [
+      "group_by(xs, key_fn) 合并所有相同键；split_by 只合并相邻的相同键。它们返回 [{key: 原键, values: 原元素列表}, ...]，保持首次组顺序。",
+      "键可以是有限 JSON 数据，不强制转为字符串。sort_by 按同类数值或字符串键稳定排序，每个键恰好计算一次。"
+    ],
+    "example": "flow Runs(records: list) -> object {\n    return {\n        runs: list.split_by(records, fn(row) { row.department }),\n        sorted: list.sort_by(records, fn(row) { row.amount })\n    }\n}",
+    "demo": [
+      {
+        "name": "相邻组与排序",
+        "inputs": {
+          "records": [
+            {
+              "department": "A",
+              "amount": 3
+            },
+            {
+              "department": "B",
+              "amount": 2
+            },
+            {
+              "department": "A",
+              "amount": 4
+            }
+          ]
+        },
+        "want": {
+          "runs": [
+            {
+              "key": "A",
+              "values": [
+                {
+                  "department": "A",
+                  "amount": 3
+                }
+              ]
+            },
+            {
+              "key": "B",
+              "values": [
+                {
+                  "department": "B",
+                  "amount": 2
+                }
+              ]
+            },
+            {
+              "key": "A",
+              "values": [
+                {
+                  "department": "A",
+                  "amount": 4
+                }
+              ]
+            }
+          ],
+          "sorted": [
+            {
+              "department": "B",
+              "amount": 2
+            },
+            {
+              "department": "A",
+              "amount": 3
+            },
+            {
+              "department": "A",
+              "amount": 4
+            }
+          ]
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "按 records 中每条记录的 department 字段合并分组，相隔的同部门记录也要合并。",
+    "template": "flow Departments(records: list) -> list { return __ANSWER__ }",
+    "solution": "list.group_by(records, fn(row) { row.department })",
+    "cases": [
+      {
+        "name": "合并非相邻记录",
+        "inputs": {
+          "records": [
+            {
+              "department": "A",
+              "amount": 3
+            },
+            {
+              "department": "B",
+              "amount": 2
+            },
+            {
+              "department": "A",
+              "amount": 4
+            }
+          ]
+        },
+        "want": [
+          {
+            "key": "A",
+            "values": [
+              {
+                "department": "A",
+                "amount": 3
+              },
+              {
+                "department": "A",
+                "amount": 4
+              }
+            ]
+          },
+          {
+            "key": "B",
+            "values": [
+              {
+                "department": "B",
+                "amount": 2
+              }
+            ]
+          }
+        ],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "单组",
+        "inputs": {
+          "records": [
+            {
+              "department": "B",
+              "amount": 2
+            }
+          ]
+        },
+        "want": [
+          {
+            "key": "B",
+            "values": [
+              {
+                "department": "B",
+                "amount": 2
+              }
+            ]
+          }
+        ],
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空分组",
+        "inputs": {
+          "records": []
+        },
+        "want": [],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "需要合并非相邻同键元素，选择 group_by。",
+      "键回调用 fn(row) { row.department }。"
+    ],
+    "why": "group_by 是按键全局归组，split_by 是按相邻键分段；它们不互相替代。",
+    "required": [
+      "list.group_by",
+      "fn"
+    ],
+    "mode": "",
+    "references": [
+      "docs/LIST-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "scan-query",
+    "title": "累计过程与短路查询",
+    "stage": "标准库",
+    "topics": [
+      "list.scan",
+      "list.any",
+      "list.all",
+      "空输入契约"
+    ],
+    "explanation": [
+      "scan(xs, seed, reducer) 返回初值和每一步累计值，所以长度比输入多一项。",
+      "any 在首个 true 停止；all 在首个 false 停止。空列表 any=false，all=true。查询回调必须是纯布尔函数。"
+    ],
+    "example": "flow Checks(values: list) -> object {\n    return {some: list.any(values, fn(x) { x == 0 }), all: list.all(values, fn(x) { x >= 0 })}\n}",
+    "demo": [
+      {
+        "name": "短路查询",
+        "inputs": {
+          "values": [
+            0,
+            2
+          ]
+        },
+        "want": {
+          "some": true,
+          "all": true
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空输入",
+        "inputs": {
+          "values": []
+        },
+        "want": {
+          "some": false,
+          "all": true
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "返回 {history: 以 0 开始的累计和, some: 是否有正数, all: 是否全部是正数}。正数指严格大于 0。",
+    "template": "flow Scan(values: list) -> object { return __ANSWER__ }",
+    "solution": "{\n    history: list.scan(values, 0, fn(total, x) { total + x }),\n    some: list.any(values, fn(x) { x > 0 }),\n    all: list.all(values, fn(x) { x > 0 })\n}",
+    "cases": [
+      {
+        "name": "全部为正",
+        "inputs": {
+          "values": [
+            2,
+            3
+          ]
+        },
+        "want": {
+          "history": [
+            0,
+            2,
+            5
+          ],
+          "some": true,
+          "all": true
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "含非正数",
+        "inputs": {
+          "values": [
+            -1,
+            0,
+            3
+          ]
+        },
+        "want": {
+          "history": [
+            0,
+            -1,
+            -1,
+            2
+          ],
+          "some": true,
+          "all": false
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空输入",
+        "inputs": {
+          "values": []
+        },
+        "want": {
+          "history": [
+            0
+          ],
+          "some": false,
+          "all": true
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "history 用 list.scan，参数与 fold 类似。",
+      "some/all 分别用 any/all，条件同为 x > 0。"
+    ],
+    "why": "空列表仍有明确含义：没有正数，但也没有违反“全部为正”的反例；scan 保留初值。",
+    "required": [
+      "list.scan",
+      "list.any",
+      "list.all"
+    ],
+    "mode": "",
+    "references": [
+      "docs/LIST-LIBRARY.md"
+    ]
+  },
+  {
+    "id": "recursion",
+    "title": "纯递归与终止条件",
+    "stage": "执行",
+    "topics": [
+      "递归",
+      "显式返回类型",
+      "if / else",
+      "深度限制"
+    ],
+    "explanation": [
+      "fn 支持直接与间接纯递归。递归环中每个函数都必须显式声明返回类型，编译器不推导循环类型。",
+      "递归要有终止分支；运行时最大调用深度为 256，取消与超限产生普通错误。集合遍历通常优先 Map/fold，递归更适合树和分治。"
+    ],
+    "example": "fn sum_to(n: number) -> number {\n    return if n <= 0 { 0 } else { n + sum_to(n - 1) }\n}\nflow Recursive(value: number) -> number { return sum_to(value) }",
+    "demo": [
+      {
+        "name": "递归累加",
+        "inputs": {
+          "value": 4
+        },
+        "want": 10,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "补 factorial 的返回表达式：n <= 1 时为 1，否则为 n 乘 factorial(n - 1)。本课输入为非负整数。",
+    "template": "fn factorial(n: number) -> number { return __ANSWER__ }\nflow Factorial(value: number) -> number { return factorial(value) }",
+    "solution": "if n <= 1 { 1 } else { n * factorial(n - 1) }",
+    "cases": [
+      {
+        "name": "0 的阶乘",
+        "inputs": {
+          "value": 0
+        },
+        "want": 1,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "1 的阶乘",
+        "inputs": {
+          "value": 1
+        },
+        "want": 1,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "5 的阶乘",
+        "inputs": {
+          "value": 5
+        },
+        "want": 120,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "先写 if n <= 1 { 1 } else { ... }。",
+      "else 分支调用 factorial(n - 1)，再乘 n。"
+    ],
+    "why": "递归定义必须保证问题逐渐缩小；显式返回类型为递归环建立可检查的边界。",
+    "required": [
+      "if",
+      "else",
+      "factorial"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "failures",
+    "title": "显式失败与诊断",
+    "stage": "执行",
+    "topics": [
+      "fail",
+      "错误传播",
+      "输入校验",
+      "check --json"
+    ],
+    "explanation": [
+      "fail(message) 是纯失败表达式，没有正常结果；消息必须是 string。if 未选择的 fail 分支不会执行。",
+      "错误传播到 Runtime，阻止下游。没有隐式 try/catch 或错误值。源码诊断带位置与修复提示，CLI 的 check --json 适合自动工具。"
+    ],
+    "example": "flow Nonnegative(value: number) -> number {\n    return if value < 0 { fail(\"negative input\") } else { value * 2 }\n}",
+    "demo": [
+      {
+        "name": "正常分支",
+        "inputs": {
+          "value": 3
+        },
+        "want": 6,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "显式拒绝",
+        "inputs": {
+          "value": -1
+        },
+        "want": null,
+        "error": "negative input",
+        "stdout": ""
+      }
+    ],
+    "task": "denominator 为 0 时 fail(\"zero denominator\")，否则返回 numerator / denominator。",
+    "template": "flow Divide(numerator: number, denominator: number) -> number { return __ANSWER__ }",
+    "solution": "if denominator == 0 { fail(\"zero denominator\") } else { numerator / denominator }",
+    "cases": [
+      {
+        "name": "普通除法",
+        "inputs": {
+          "numerator": 8,
+          "denominator": 2
+        },
+        "want": 4,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "负分母",
+        "inputs": {
+          "numerator": 6,
+          "denominator": -3
+        },
+        "want": -2,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "明确失败",
+        "inputs": {
+          "numerator": 1,
+          "denominator": 0
+        },
+        "want": null,
+        "error": "zero denominator",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "用 if 检查 denominator == 0。",
+      "fail 分支消息须精确写成 \"zero denominator\"；另一个分支是除法。"
+    ],
+    "why": "失败样例也属于验证契约，返回 null 或假数字不能代替明确失败。",
+    "required": [
+      "fail",
+      "if"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "gates",
+    "title": "match 模式分支与可选输出",
+    "stage": "执行",
+    "topics": [
+      "match",
+      "字面量与 _",
+      "if 守卫",
+      "Type?",
+      "Skipped",
+      "效果控制"
+    ],
+    "explanation": [
+      "match value { pattern => result, _ => fallback } 按顺序选中第一个匹配分支。模式支持数字、字符串、bool、null 和 _；可用 pattern if condition 添加守卫。bool 的 true/false 或无守卫的 _ 要覆盖所有值。",
+      "match 也可写 pattern => { statements }，仅执行所选分支的绑定、print、外部调用或 return，其他分支为 Skipped。绑定只在该分支内可用。",
+      "分支结果可以是不同类型，match 不要求它们一致；函数与 Flow 的返回边界负责检查声明类型。某些分支没有返回值时，Flow 输出写 Type?。",
+      "match 可处理可空输入：先写无守卫的 null 分支，再在 _ 分支使用非空的值。有守卫的 null 分支不能排除 null。"
+    ],
+    "example": "flow Gated(enabled: bool) -> number? {\n    match enabled {\n        true => {\n            print(\"运行\")\n            return 7\n        },\n        false => {}\n    }\n}",
+    "demo": [
+      {
+        "name": "门打开",
+        "inputs": {
+          "enabled": true
+        },
+        "want": 7,
+        "error": "",
+        "stdout": "运行\n"
+      },
+      {
+        "name": "门关闭不打印",
+        "inputs": {
+          "enabled": false
+        },
+        "want": null,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "用 match enabled 的 true 分支返回 value * 2，false 分支留空，完成可选输出。",
+    "template": "flow Gated(enabled: bool, value: number) -> number? {\n    __ANSWER__\n}",
+    "solution": "match enabled { true => { return value * 2 }, false => {} }",
+    "cases": [
+      {
+        "name": "门打开",
+        "inputs": {
+          "enabled": true,
+          "value": 5
+        },
+        "want": 10,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "门关闭",
+        "inputs": {
+          "enabled": false,
+          "value": 5
+        },
+        "want": null,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "打开且输入为零",
+        "inputs": {
+          "enabled": true,
+          "value": 0
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "写 match enabled { true => { ... }, false => {} }。",
+      "true 分支内写 return value * 2；分支内绑定不能带到外层。"
+    ],
+    "why": "number? 同时允许 number、null 与无值完成；:demo 后用 :trace 可以看到关闭门时的 Skipped。",
+    "required": [
+      "match"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md"
+    ]
+  },
+  {
+    "id": "for-loop",
+    "title": "顺序 for、break 与 continue",
+    "stage": "控制流",
+    "topics": [
+      "for",
+      "in",
+      "break",
+      "continue",
+      "迭代作用域",
+      "match"
+    ],
+    "explanation": [
+      "for item in source { statements } 逐项顺序执行操作，不收集结果列表；source 求值一次，最多 1,000,000 项，支持 Flow、顶层和 REPL。",
+      "循环体支持不可变绑定、match 和嵌套循环，每次迭代有独立作用域。break 结束最近一层循环，continue 跳过本项剩余语句；可写在 match 分支中。",
+      "等待异步操作，取消或首次错误停止后续工作。每 Tick 重新执行循环。循环体不使用 return/state，转换用推导式，聚合用 fold。"
+    ],
+    "example": "flow Visit(limit: number) {\n    for i in range(limit) {\n        match i {\n            2 => { continue },\n            5 => { break },\n            _ => {}\n        }\n        squared = i ** 2\n        print(i, squared)\n    }\n    print(\"done\")\n}",
+    "demo": [
+      {
+        "name": "跳过 2，在 5 停止",
+        "inputs": {
+          "limit": 8
+        },
+        "want": null,
+        "error": "",
+        "stdout": "0 0\n1 1\n3 9\n4 16\ndone\n"
+      }
+    ],
+    "task": "逐项打印 range(limit) 中的数字：遇到 1 用 continue 跳过，遇到 4 用 break 结束，其他项正常打印。循环之后始终打印 done。",
+    "template": "flow Visit(limit: number) {\n    __ANSWER__\n}",
+    "solution": "for i in range(limit) {\n    match i {\n        1 => { continue },\n        4 => { break },\n        _ => { print(i) }\n    }\n}\nprint(\"done\")",
+    "cases": [
+      {
+        "name": "跳过与结束",
+        "inputs": {
+          "limit": 8
+        },
+        "want": null,
+        "error": "",
+        "stdout": "0\n2\n3\ndone\n"
+      },
+      {
+        "name": "不到停止项",
+        "inputs": {
+          "limit": 3
+        },
+        "want": null,
+        "error": "",
+        "stdout": "0\n2\ndone\n"
+      },
+      {
+        "name": "空区间",
+        "inputs": {
+          "limit": 0
+        },
+        "want": null,
+        "error": "",
+        "stdout": "done\n"
+      }
+    ],
+    "hints": [
+      "使用 for i in range(limit)，在 match i 的 1 和 4 分支分别写 continue 与 break。",
+      "默认分支写 print(i)，循环之后单独写 print(\"done\")。"
+    ],
+    "why": "for 执行操作，break/continue 只控制最近一层循环；退出后继续循环后面的语句。",
+    "required": [
+      "for",
+      "in",
+      "match",
+      "break",
+      "continue"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md",
+      "examples/for.lip"
+    ]
+  },
+  {
+    "id": "dependency-graph",
+    "title": "观察依赖图和执行轨迹",
+    "stage": "执行",
+    "topics": [
+      "依赖图",
+      "自动调度",
+      ":graph",
+      ":trace",
+      "inspect / run --trace / build"
+    ],
+    "explanation": [
+      "Flow 的绑定形成图节点，引用形成数据边。独立节点允许并行，消费者等待依赖；写效果形成顺序屏障。声明顺序不等于全部执行顺序。",
+      "本课可用 :graph 看结构、:demo 后用 :trace 看生命周期。文件工作流是 lipc check file.lip → lipc inspect file.lip → lipc run --trace trace.json file.lip 输入 → lipc build file.lip。"
+    ],
+    "example": "flow Graph(value: number) -> object {\n    left = value * 2\n    right = value + 10\n    total = left + right\n    return {left: left, right: right, total: total}\n}",
+    "demo": [
+      {
+        "name": "独立节点汇合",
+        "inputs": {
+          "value": 3
+        },
+        "want": {
+          "left": 6,
+          "right": 13,
+          "total": 19
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "补一个名为 report 的绑定，字段 left 取 doubled，right 取 shifted，total 为两者之和。之后用 :graph 观察依赖。",
+    "template": "flow Graph(value: number) -> object {\n    doubled = value * 2\n    shifted = value + 1\n    __ANSWER__\n    return report\n}",
+    "solution": "report = {left: doubled, right: shifted, total: doubled + shifted}",
+    "cases": [
+      {
+        "name": "输入 3",
+        "inputs": {
+          "value": 3
+        },
+        "want": {
+          "left": 6,
+          "right": 4,
+          "total": 10
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "输入 -1",
+        "inputs": {
+          "value": -1
+        },
+        "want": {
+          "left": -2,
+          "right": 0,
+          "total": -2
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "report 的对象值中分别引用 doubled 与 shifted。",
+      "total 直接把两者相加，无需再次计算输入。"
+    ],
+    "why": "report 等待两个独立依赖，return 再等待 report；fn 内部的表达式不单独展开为图节点。",
+    "required": [
+      "report",
+      "doubled",
+      "shifted"
+    ],
+    "mode": "",
+    "references": [
+      "docs/COMPILER.md",
+      "docs/ALPHA-0.6-SPEC.md"
+    ]
+  },
+  {
+    "id": "host",
+    "title": "import 与 Go Host 适配器",
+    "stage": "集成",
+    "topics": [
+      "import host",
+      "import go",
+      "RegisterPure",
+      "RegisterReadOnly",
+      "Register",
+      "as"
+    ],
+    "explanation": [
+      "import 声明外部能力，不安装包，也不自动注册 Go 适配器。宿主决定具体实现与效果：Pure 可复用，ReadOnly 可并行但每 Tick 重读，外部写按顺序执行。",
+      "教程运行器自带 lesson_double 纯适配器，接受数值并返回两倍。示例的 import go 仅展示 Go 依赖元数据；真正的 Go 导入与注册发生在宿主中。",
+      "自己的项目用 lipc build --no-main --package flowpkg 生成库，由 Go 宿主注册同名操作。以下例子依赖教程 Host，导出的文件不能直接靠 lipc run 注册它。",
+      "Host/Go 也可用 as：import host \"lesson_double\" as double 后调用 double(value)；import host \"service.*\" as s 后调用 s.fetch(...)；import go \"fmt\" as f 后调用 f.Println(...)。运行时使用真实注册名，Go 适配器仍由宿主提供。",
+      "参数、绑定、回调与循环变量按词法作用域遮蔽导入名；分支和循环的局部名字不会泄漏。Flow 可组合外部调用，整个表达式的效果决定屏障和缓存。",
+      "三种导入都支持 as。命名空间别名可与内置操作或 fn 同名，裸调用和成员调用分别解析；单操作别名按显式声明解析。未使用的导入仅保留元数据，运行时只要求实际使用的适配器。例子用 twice 调用真实注册名 lesson_double；Go 包别名保留完整包路径，原生操作仍由宿主注册。"
+    ],
+    "example": "import go \"example.com/tutorial/adapter\"\nimport host \"lesson_double\" as twice\nflow HostCall(value: number) -> number {\n    doubled = twice(value)\n    return doubled\n}",
+    "demo": [
+      {
+        "name": "真实注册的教程适配器",
+        "inputs": {
+          "value": 4
+        },
+        "want": 8,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "填写一条 import host 声明，让下面的 lesson_double 调用成为已声明的外部能力。",
+    "template": "__ANSWER__\nflow HostCall(value: number) -> number {\n    doubled = lesson_double(value)\n    return doubled + 1\n}",
+    "solution": "import host \"lesson_double\"",
+    "cases": [
+      {
+        "name": "数值 3",
+        "inputs": {
+          "value": 3
+        },
+        "want": 7,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "负数",
+        "inputs": {
+          "value": -2
+        },
+        "want": -3,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "Host 导入语法是 import host \"操作名\"。",
+      "操作名须与调用和注册名一致：lesson_double。"
+    ],
+    "why": "声明、调用、注册三者必须一致。教程 Host 注册 lesson_double；真实项目由自己的 Go 程序提供适配器。",
+    "required": [
+      "import",
+      "host"
+    ],
+    "mode": "host",
+    "references": [
+      "docs/COMPILER.md",
+      "examples/host_adapter"
+    ]
+  },
+  {
+    "id": "state-tick",
+    "title": "State 与持久 Tick",
+    "stage": "集成",
+    "topics": [
+      "state",
+      "NewInstance",
+      "SetState",
+      "Tick",
+      "缓存复用"
+    ],
+    "explanation": [
+      "state(initial) 首次成功计算后保存状态。持久实例由 Go 宿主创建，用 SetState 改状态，用 Tick 推进一次计算；状态不会自行递增。",
+      "本课验证器保留同一个 Instance，依次应用 :tests 显示的输入更新和 SetState。纯依赖未变化可复用，外部读写每个 Tick 重执行。单次 lipc run 不保留实例。",
+      "生成图在最后一个消费者完成后解除临时值引用，实际回收由 Go GC 决定。Instance 的输入、State 和有效纯缓存仍为后续 Tick 保留；外部读写结果不缓存，也不自动关闭外部资源。"
+    ],
+    "example": "flow Counter(delta: number) -> number {\n    count = state(5)\n    return count + delta\n}",
+    "demo": [
+      {
+        "name": "第一个 Tick",
+        "inputs": {
+          "delta": 2
+        },
+        "want": 7,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "修改状态后再 Tick",
+        "inputs": {
+          "delta": 3
+        },
+        "want": 11,
+        "error": "",
+        "stdout": "",
+        "state": {
+          "count": 8
+        }
+      }
+    ],
+    "task": "把 count 初始化为持久状态 0。验证器随后会更新 count 和 delta，结果始终为 count + delta。",
+    "template": "flow Counter(delta: number) -> number {\n    count = __ANSWER__\n    return count + delta\n}",
+    "solution": "state(0)",
+    "cases": [
+      {
+        "name": "首次初始化",
+        "inputs": {
+          "delta": 1
+        },
+        "want": 1,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "宿主修改状态",
+        "inputs": {},
+        "want": 11,
+        "error": "",
+        "stdout": "",
+        "state": {
+          "count": 10
+        }
+      },
+      {
+        "name": "仅更新输入，状态保留",
+        "inputs": {
+          "delta": 3
+        },
+        "want": 13,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "再次更新状态",
+        "inputs": {},
+        "want": 5,
+        "error": "",
+        "stdout": "",
+        "state": {
+          "count": 2
+        }
+      }
+    ],
+    "hints": [
+      "不是普通常量 0，要使用 state(initial)。",
+      "初始化表达式是 state(0)，之后的 SetState 由验证器模拟宿主调用。"
+    ],
+    "why": "Tick 接受部分输入更新，SetState 显式改变状态；持久状态由宿主管理，没有隐式图循环。",
+    "required": [
+      "state"
+    ],
+    "mode": "state",
+    "references": [
+      "docs/TUTORIAL.md",
+      "docs/VALUE-LIFETIMES.md",
+      "examples/tutorial/host_demo"
+    ]
+  },
+  {
+    "id": "retry",
+    "title": "有界重试与 Await",
+    "stage": "集成",
+    "topics": [
+      "retry",
+      "attempts",
+      "Host",
+      "Await",
+      "取消"
+    ],
+    "explanation": [
+      "retry(operation(...), attempts) 对一次操作有界重试；attempts 包括第一次调用。它不自动提供退避或幂等性。 上限是正整数字面量；取消立即停止，普通失败才重试。retry 必须直接作为绑定、return 或调用语句，不能嵌入纯 fn 或其他表达式。",
+      "本课 lesson_fetch 适配器每组输入的前两次调用失败，第三次以已就绪的 Await 返回输入值。Runtime 负责等待与取消。只有达到第三次才成功。"
+    ],
+    "example": "import host \"lesson_fetch\"\nflow Fetch(input: any) -> any {\n    return retry(lesson_fetch(input), 3)\n}",
+    "demo": [
+      {
+        "name": "第三次成功",
+        "inputs": {
+          "input": "hello"
+        },
+        "want": "hello",
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "调用 lesson_fetch(input)，最多尝试 3 次，使两次暂时失败后仍能返回原输入。",
+    "template": "import host \"lesson_fetch\"\nflow Fetch(input: any) -> any { return __ANSWER__ }",
+    "solution": "retry(lesson_fetch(input), 3)",
+    "cases": [
+      {
+        "name": "文本输入",
+        "inputs": {
+          "input": "LIP"
+        },
+        "want": "LIP",
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "结构化输入",
+        "inputs": {
+          "input": {
+            "value": 7
+          }
+        },
+        "want": {
+          "value": 7
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "retry 的第一个参数必须是操作调用，不是操作名。",
+      "尝试次数写整数 3，包含第一次，不是额外重试三次。"
+    ],
+    "why": "有界策略能处理暂时失败；外部写入的幂等性与取消仍由适配器负责。Await 是 Runtime 结果形式，不是新关键字。",
+    "required": [
+      "retry"
+    ],
+    "mode": "host",
+    "references": [
+      "docs/TUTORIAL.md",
+      "examples/retry"
+    ]
+  },
+  {
+    "id": "feedback",
+    "title": "有界反馈与验证",
+    "stage": "集成",
+    "topics": [
+      "feedback",
+      "initial / step / verify",
+      "纯策略",
+      "上限"
+    ],
+    "explanation": [
+      "feedback(initial_call, step, verify, attempts) 验证候选，不合格就修订，次数有上限。step/verify 传操作或纯函数名称，不写调用括号。",
+      "attempts 计数验证轮次；初始候选也占一轮。达到上限仍不合格就失败。它属于 Runtime 的有界策略，不是无限循环。",
+      "Feedback 直接作为绑定、return 或调用语句；上限是正整数字面量，包含首次验证。initial 只执行一次，验证 false 才修订；错误或取消立即停止。"
+    ],
+    "example": "fn start(x: number) -> number { return x }\nfn revise(x: number) -> number { return x + 2 }\nfn verify(x: number) -> bool { return x >= 4 }\nflow Improve(value: number) -> number {\n    return feedback(start(value), revise, verify, 3)\n}",
+    "demo": [
+      {
+        "name": "三轮验证",
+        "inputs": {
+          "value": 0
+        },
+        "want": 4,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "已合格",
+        "inputs": {
+          "value": 8
+        },
+        "want": 8,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "使用 start(value)、revise、verify 做最多 4 轮反馈。函数已定义：每次加 1，达到 3 合格。",
+    "template": "fn start(x: number) -> number { return x }\nfn revise(x: number) -> number { return x + 1 }\nfn verify(x: number) -> bool { return x >= 3 }\nflow Improve(value: number) -> number { return __ANSWER__ }",
+    "solution": "feedback(start(value), revise, verify, 4)",
+    "cases": [
+      {
+        "name": "从零修订到三",
+        "inputs": {
+          "value": 0
+        },
+        "want": 3,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "只修订一次",
+        "inputs": {
+          "value": 2
+        },
+        "want": 3,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "原值已合格",
+        "inputs": {
+          "value": 5
+        },
+        "want": 5,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "次数不足明确失败",
+        "inputs": {
+          "value": -2
+        },
+        "want": null,
+        "error": "feedback",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "第一个参数是 start(value)，后面是两个函数名。",
+      "从 0 到 3 需要验证 0、1、2、3，共 4 轮。"
+    ],
+    "why": "初始候选也要验证；有界失败和成功一样是程序契约的一部分。",
+    "required": [
+      "feedback"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md",
+      "examples/feedback"
+    ]
+  },
+  {
+    "id": "python",
+    "title": "Python 标准库与 as 别名",
+    "stage": "集成",
+    "topics": [
+      "import python",
+      "as",
+      "Worker",
+      "外部调用",
+      "标准库"
+    ],
+    "explanation": [
+      "import python \"真实模块名\" as alias 声明 Python 模块并绑定本地别名。Host/Go 导入也支持 as；导入不安装包，未使用的 Python 导入不启动 Worker。",
+      "本课使用 Python 自带的 math 和 statistics，无需第三方包，但需要 python3 或 python。没有 Python 可 :next 跳过，进度不会被标为通过。",
+      "Python 调用可在 Flow 表达式中直接组合，参数按顺序等待、分支保持惰性；不能藏在纯 fn 或集合回调。安装 NumPy 后也可用 import python \"numpy\" as np；模块真实名字与安装包名可能不同。"
+    ],
+    "example": "import python \"statistics\" as stats\nflow Mean(values: list) -> number {\n    return if len(values) == 0 { 0 } else { stats.mean(values) }\n}",
+    "demo": [
+      {
+        "name": "Python 标准库",
+        "inputs": {
+          "values": [
+            2,
+            4,
+            9
+          ]
+        },
+        "want": 5,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空列表跳过外部调用",
+        "inputs": {
+          "values": []
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "声明 Python 的 math 模块，别名为 m，让现有 m.sqrt(value) 返回平方根。",
+    "template": "__ANSWER__\nflow Root(value: number) -> number {\n    result = m.sqrt(value)\n    return result\n}",
+    "solution": "import python \"math\" as m",
+    "cases": [
+      {
+        "name": "9 的平方根",
+        "inputs": {
+          "value": 9
+        },
+        "want": 3,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "零",
+        "inputs": {
+          "value": 0
+        },
+        "want": 0,
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "负值传播 Python 异常",
+        "inputs": {
+          "value": -1
+        },
+        "want": null,
+        "error": "math domain error",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "声明写 import python \"math\" as ...。",
+      "本地别名必须是 m，与下面的调用一致。"
+    ],
+    "why": "别名只改变本地调用名。普通有限标量/list/object 返回值进入 LIP 值域，Python 异常仍会传播。",
+    "required": [
+      "import",
+      "python",
+      "as"
+    ],
+    "mode": "python",
+    "references": [
+      "docs/PYTHON-INTEGRATION.md",
+      "examples/tutorial/mixed.lip"
+    ]
+  },
+  {
+    "id": "report",
+    "title": "综合练习：标签清洗报告",
+    "stage": "实战",
+    "topics": [
+      "程序组织",
+      "纯 fn",
+      "string.*",
+      "list.*",
+      "空输入",
+      "组合"
+    ],
+    "explanation": [
+      "把前面的能力组合成一个完整数据程序：拆分 → 规范化 → 过滤 → 去重 → 报告。",
+      "保留首次出现的标签顺序，空标签不参与结果。整个核心程序无需 import；用 :save 导出后可 lipc check、inspect、run、build。"
+    ],
+    "example": "fn clean(x: string) -> string { return string.lower(string.trim(x)) }\nflow Words(raw: string) -> list {\n    pieces = string.split_whitespace(raw)\n    return list.map(pieces, clean)\n}",
+    "demo": [
+      {
+        "name": "纯函数作为回调",
+        "inputs": {
+          "raw": " Go  LIP "
+        },
+        "want": [
+          "go",
+          "lip"
+        ],
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "task": "输入完整程序，参数 raw: string，输出 object。按逗号拆分，逐项 trim + lower，过滤空标签，去重（保留首次顺序）。返回 {tags: 标签列表, count: 标签数, label: 用 \" / \" 连接的标签}。至少声明一个纯 fn。用 :edit / :submit 或 :save / :load 完成。",
+    "template": "__ANSWER__",
+    "solution": "fn clean(x: string) -> string { return string.lower(string.trim(x)) }\nflow Report(raw: string) -> object {\n    parts = string.split(raw, \",\")\n    cleaned = list.map(parts, clean)\n    nonempty = list.filter(cleaned, fn(x) { x != \"\" })\n    tags = list.unique(nonempty)\n    return {tags: tags, count: len(tags), label: string.join(tags, \" / \")}\n}",
+    "cases": [
+      {
+        "name": "重复、空项与中文",
+        "inputs": {
+          "raw": " go, LIP, Go, ,你好 "
+        },
+        "want": {
+          "tags": [
+            "go",
+            "lip",
+            "你好"
+          ],
+          "count": 3,
+          "label": "go / lip / 你好"
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "保持首次顺序",
+        "inputs": {
+          "raw": " B,a,b,A "
+        },
+        "want": {
+          "tags": [
+            "b",
+            "a"
+          ],
+          "count": 2,
+          "label": "b / a"
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "空输入",
+        "inputs": {
+          "raw": ""
+        },
+        "want": {
+          "tags": [],
+          "count": 0,
+          "label": ""
+        },
+        "error": "",
+        "stdout": ""
+      },
+      {
+        "name": "只有分隔符与空白",
+        "inputs": {
+          "raw": " , , "
+        },
+        "want": {
+          "tags": [],
+          "count": 0,
+          "label": ""
+        },
+        "error": "",
+        "stdout": ""
+      }
+    ],
+    "hints": [
+      "先声明 clean 纯函数，对一个字符串做 lower(trim(x))。",
+      "Flow 内用 split(raw, \",\")，再 list.map(parts, clean)、list.filter(..., fn(x) { x != \"\" })、list.unique。",
+      "最后 return 对象，count 用 len(tags)，label 用 string.join(tags, \" / \")。"
+    ],
+    "why": "你已把数据、函数、Flow 和两个标准库组合成可独立运行的程序。继续学习可从 Host 适配器、Python 库与自己的数据任务开始。",
+    "required": [
+      "fn",
+      "flow",
+      "string.split",
+      "string.trim",
+      "string.lower",
+      "list.filter",
+      "list.unique",
+      "string.join"
+    ],
+    "mode": "",
+    "references": [
+      "docs/TUTORIAL.md",
+      "docs/LIST-LIBRARY.md",
+      "docs/STRING-LIBRARY.md"
+    ]
+  }
+]

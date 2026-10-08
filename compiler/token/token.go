@@ -13,7 +13,7 @@ const (
 	Flow
 	Fn
 	Return
-	When
+	Match
 	For
 	In
 	If
@@ -46,6 +46,13 @@ const (
 	Not
 	Semicolon
 	As
+	FatArrow
+	FloorDiv
+	Power
+	Modulo
+	Log
+	Break
+	Continue
 )
 
 type Pos struct {
@@ -63,13 +70,20 @@ type Token struct {
 func (k Kind) String() string {
 	names := map[Kind]string{
 		EOF: "EOF", Ident: "identifier", Number: "number", String: "string",
-		True: "true", False: "false", Null: "null", Flow: "flow", Fn: "fn", Return: "return", When: "when",
+		True: "true", False: "false", Null: "null", Flow: "flow", Fn: "fn", Return: "return", Match: "match",
 		If: "if", Else: "else", Import: "import", For: "for", In: "in", Assign: "=", LParen: "(", RParen: ")",
 		LBrace: "{", RBrace: "}", LBracket: "[", RBracket: "]", Comma: ",", Colon: ":", Dot: ".", Plus: "+", Minus: "-", Star: "*", Slash: "/",
 		Equal: "==", NotEqual: "!=", Greater: ">", GreaterEqual: ">=", Less: "<", LessEqual: "<=",
 		And: "&&", Or: "||", Not: "!", Arrow: "->", Question: "?",
 		Semicolon: ";",
 		As:        "as",
+		FatArrow:  "=>",
+		FloorDiv:  "//",
+		Power:     "**",
+		Modulo:    "%",
+		Log:       "*/",
+		Break:     "break",
+		Continue:  "continue",
 	}
 	if s, ok := names[k]; ok {
 		return s

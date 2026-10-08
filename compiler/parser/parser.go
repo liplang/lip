@@ -17,6 +17,7 @@ type Parser struct {
 func New(tokens []token.Token) *Parser { return &Parser{tokens: tokens} }
 
 func (p *Parser) Parse() (*ast.Program, error) {
+	p.skipSemicolons()
 	if err := p.checkDirective(); err != nil {
 		return nil, err
 	}
@@ -27,7 +28,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 			return nil, err
 		}
 		dependencies = append(dependencies, dependency)
-		p.match(token.Semicolon)
+		p.skipSemicolons()
 		if err := p.checkDirective(); err != nil {
 			return nil, err
 		}
@@ -39,7 +40,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 			return nil, err
 		}
 		functions = append(functions, fn)
-		p.match(token.Semicolon)
+		p.skipSemicolons()
 		if err := p.checkDirective(); err != nil {
 			return nil, err
 		}
@@ -57,7 +58,7 @@ func (p *Parser) Parse() (*ast.Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.match(token.Semicolon)
+	p.skipSemicolons()
 	if err := p.checkDirective(); err != nil {
 		return nil, err
 	}
@@ -78,16 +79,16 @@ func (p *Parser) checkDirective() error {
 	return nil
 }
 
-func (p *Parser) parseType(optional bool) (string, error) {
+func (p *Parser) parseType(allowVoid bool) (string, error) {
 	typ, err := p.expect(token.Ident)
 	if err != nil {
 		return "", err
 	}
-	if !validTypeName(typ.Text) && !(optional && typ.Text == "void") {
+	if !validTypeName(typ.Text) && !(allowVoid && typ.Text == "void") {
 		return "", p.errorf(typ, "unknown type %q; use any, number, bool, string, list or object (void is only for Flow output)", typ.Text)
 	}
 	name := typ.Text
-	if optional && p.match(token.Question) {
+	if p.match(token.Question) {
 		if name == "void" {
 			return "", p.errorf(typ, "void cannot be optional; omit the output declaration for a Flow without a result")
 		}
@@ -119,9 +120,6 @@ func (p *Parser) parseDependency() (ast.Dependency, error) {
 	}
 	dependency := ast.Dependency{Kind: kind.Text, Spec: spec.Text, Pos: kw.Pos}
 	if p.match(token.As) {
-		if kind.Text != "python" {
-			return ast.Dependency{}, p.errorf(kind, "module aliases are supported by import python; Host/Go operations keep their registered names")
-		}
 		alias, err := p.expect(token.Ident)
 		if err != nil {
 			return ast.Dependency{}, p.errorf(p.peek(), "expected a module alias after as; choose one identifier, e.g. np")
@@ -162,12 +160,19 @@ func (p *Parser) parseFunctionBody() (ast.Expr, error) {
 	if _, err := p.expect(token.LBrace); err != nil {
 		return nil, err
 	}
+	p.skipSemicolons()
 	p.match(token.Return)
+	if p.peek().Kind == token.For {
+		return nil, p.errorf(p.peek(), "statement for is only allowed in Flow, top-level statements or REPL cells; use a comprehension or fold in a pure fn")
+	}
+	if p.peek().Kind == token.Break || p.peek().Kind == token.Continue {
+		return nil, p.errorf(p.peek(), "%s is only allowed inside a for body", p.peek().Text)
+	}
 	result, err := p.parseExpr(0)
 	if err != nil {
 		return nil, err
 	}
-	p.match(token.Semicolon)
+	p.skipSemicolons()
 	if _, err := p.expect(token.RBrace); err != nil {
 		return nil, p.errorf(p.peek(), "fn body needs one expression, optionally preceded by return; compose pure functions for more complex calculations")
 	}
@@ -266,7 +271,11 @@ func (p *Parser) parseStatements() ([]ast.Stmt, error) {
 
 func (p *Parser) parseStatementList(end token.Kind) ([]ast.Stmt, error) {
 	var out []ast.Stmt
-	for p.peek().Kind != end && p.peek().Kind != token.EOF {
+	for {
+		p.skipSemicolons()
+		if p.peek().Kind == end || p.peek().Kind == token.EOF {
+			break
+		}
 		if end == token.EOF {
 			if err := p.checkDirective(); err != nil {
 				return nil, err
@@ -298,7 +307,11 @@ func (p *Parser) parseStatementList(end token.Kind) ([]ast.Stmt, error) {
 // A statement may end at a newline, an explicit semicolon, or the end of its
 // block/file. Whitespace alone cannot separate statements on the same line.
 func (p *Parser) statementEnd(end token.Kind) error {
-	if p.match(token.Semicolon) || p.peek().Kind == end || p.peek().Kind == token.EOF {
+	if p.match(token.Semicolon) {
+		p.skipSemicolons()
+		return nil
+	}
+	if p.peek().Kind == end || p.peek().Kind == token.EOF {
 		return nil
 	}
 	if p.peek().Pos.Line > p.tokens[p.i-1].Pos.Line {
@@ -309,20 +322,37 @@ func (p *Parser) statementEnd(end token.Kind) error {
 
 func (p *Parser) parseStatement() (ast.Stmt, error) {
 	switch p.peek().Kind {
-	case token.When:
+	case token.Break, token.Continue:
+		kw := p.next()
+		return &ast.LoopControlStmt{Kind: kw.Text, Pos: kw.Pos}, nil
+	case token.For:
 		pos := p.next().Pos
-		cond, err := p.parseExpr(0)
+		variable, err := p.expect(token.Ident)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = p.expect(token.LBrace); err != nil {
+		if _, err := p.expect(token.In); err != nil {
+			return nil, err
+		}
+		source, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(token.LBrace); err != nil {
 			return nil, err
 		}
 		body, err := p.parseStatements()
 		if err != nil {
 			return nil, err
 		}
-		return &ast.WhenStmt{Cond: cond, Body: body, Pos: pos}, nil
+		return &ast.ForStmt{Variable: variable.Text, Source: source, Body: body, Pos: pos}, nil
+	case token.Match:
+		pos := p.next().Pos
+		value, arms, err := p.parseMatch(false)
+		if err != nil {
+			return nil, err
+		}
+		return &ast.MatchStmt{Value: value, Arms: arms, Pos: pos}, nil
 	case token.Return:
 		pos := p.next().Pos
 		if p.peek().Kind == token.RBrace || p.peek().Kind == token.EOF || p.peek().Kind == token.Semicolon {
@@ -348,9 +378,6 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 		fallthrough
 	default:
 		start := p.peek()
-		if start.Kind == token.Semicolon {
-			return nil, p.errorf(start, "empty statement; remove the extra ';'")
-		}
 		expr, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
@@ -365,7 +392,8 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 var precedence = map[token.Kind]int{
 	token.Or: 1, token.And: 2, token.Equal: 3, token.NotEqual: 3,
 	token.Greater: 4, token.GreaterEqual: 4, token.Less: 4, token.LessEqual: 4,
-	token.Plus: 5, token.Minus: 5, token.Star: 6, token.Slash: 6,
+	token.Plus: 5, token.Minus: 5, token.Star: 6, token.Slash: 6, token.FloorDiv: 6, token.Modulo: 6, token.Log: 6,
+	token.Power: 8,
 }
 
 func (p *Parser) parseExpr(minPrec int) (ast.Expr, error) {
@@ -379,7 +407,11 @@ func (p *Parser) parseExpr(minPrec int) (ast.Expr, error) {
 			break
 		}
 		op := p.next()
-		right, err := p.parseExpr(prec + 1)
+		rightPrec := prec + 1
+		if op.Kind == token.Power {
+			rightPrec = prec
+		}
+		right, err := p.parseExpr(rightPrec)
 		if err != nil {
 			return nil, err
 		}
@@ -499,6 +531,12 @@ func (p *Parser) parsePrimary() (ast.Expr, error) {
 			return nil, err
 		}
 		expr = &ast.IfExpr{Cond: cond, Then: thenExpr, Else: elseExpr, Pos: t.Pos}
+	case token.Match:
+		value, arms, err := p.parseMatch(true)
+		if err != nil {
+			return nil, err
+		}
+		expr = &ast.MatchExpr{Value: value, Arms: arms, Pos: t.Pos}
 	case token.LBracket:
 		if p.match(token.RBracket) {
 			expr = &ast.ListExpr{Items: []ast.Expr{}, Pos: t.Pos}
@@ -649,6 +687,8 @@ func tPos(expr ast.Expr) token.Pos {
 		return e.Pos
 	case *ast.IfExpr:
 		return e.Pos
+	case *ast.MatchExpr:
+		return e.Pos
 	case *ast.ListExpr:
 		return e.Pos
 	case *ast.ComprehensionExpr:
@@ -664,6 +704,10 @@ func tPos(expr ast.Expr) token.Pos {
 
 func (p *Parser) peek() token.Token { return p.tokens[p.i] }
 func (p *Parser) next() token.Token { t := p.tokens[p.i]; p.i++; return t }
+func (p *Parser) skipSemicolons() {
+	for p.match(token.Semicolon) {
+	}
+}
 func (p *Parser) match(kind token.Kind) bool {
 	if p.peek().Kind != kind {
 		return false

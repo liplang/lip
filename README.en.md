@@ -1,6 +1,6 @@
-# LIP Alpha 0.6
+# LIP Alpha 0.6.3
 
-[中文版 README](README.md) · Reference implementation `0.6.1` ([VERSION](VERSION))
+[中文版 README](README.md) · Reference implementation `0.6.3` ([VERSION](VERSION))
 
 LIP (Logical / Incremental / Parallel) is a small dependency-oriented language:
 **Describe dependencies; let the Runtime decide execution.** Compose data,
@@ -48,6 +48,17 @@ With uncustomized Go settings, the usual path is `~/go/bin/lipc`, so
 `~/go/bin/lipc help` also works. On Windows it is usually `go\bin\lipc.exe` under
 your user directory. See [quickstart](docs/QUICKSTART.md#安装) for direct invocation.
 
+Native Neovim (Lua), Vim 9 (Vim9script) and Emacs (Elisp) packages provide `.lip`
+highlighting, indentation, completion and compiler diagnostics. See the
+[editor installation guide](docs/EDITORS.md).
+
+Use `lipc learn` (or `go run ./cmd/lipc learn` in this checkout) for 26 guided
+lessons in Chinese, with runnable examples, code exercises, incremental hints
+and verification against multiple inputs. The course covers syntax, program
+organization, list/string libraries, graphs, State/Tick, Host and Python.
+Progress is saved automatically; `:next` advances after a lesson and
+`lipc learn --list` lists the course. See [interactive learning](docs/INTERACTIVE-LEARNING.md).
+
 Use `lipc repl` to try expressions, bindings and `fn` declarations interactively:
 
 ```text
@@ -83,11 +94,12 @@ Place tool options before the file and program inputs directly after it.
 
 ## Language and runtime
 
-| Capability | 0.6 contract |
+| Capability | 0.6.3 contract |
 | --- | --- |
-| Complete program | Requirements, pure fn, explicit flow or top-level statements; declared output and one return for results |
+| Complete program | Requirements with Python/Host/Go aliases, pure fn, explicit flow or top-level statements; typed output via return or mutually exclusive match arms |
 | Data | null, bool, number, string, list, object; nested construction |
-| Composition | Immutable bindings, operators, Rust-style if, when gates, Map |
+| Composition | Immutable bindings, operators, Rust-style if/match, literal patterns, wildcards, guards, Map, sequential for, break/continue |
+| Arithmetic | + - * /, floor division //, modulo %, power **, logarithm */; [example](examples/math.lip) |
 | Pure operations | str, len, half-open range, ordered fold with an explicit seed, explicit fail |
 | List library | 34 pure functions for grouping, merging, transpose, windows, filtering, sorting, uniqueness, scans and Cartesian products |
 | String library | 19 pure operations for cleanup, splitting, joining, searching, slicing, replacement and decimal parsing |
@@ -100,6 +112,11 @@ Place tool options before the file and program inputs directly after it.
 accept pure list expressions as sources and compose in arguments, e.g.
 `np.mean([x for x in range(1, 19)])` after `import python "numpy" as np`.
 Standalone Maps retain bounded parallelism; composed comprehensions run in source order.
+Use `for i in range(100) { print(i) }` for sequential operations without collecting
+results. Bodies support bindings, match, nested loops and nearest-loop break/continue;
+each iteration has its own scope, awaits external calls and stops on cancellation or
+failure. Sources evaluate once; loops rerun on every Tick. Transform with comprehensions
+and aggregate with fold. See the [loop example](examples/for.lip).
 The [list library](docs/LIST-LIBRARY.md) provides composable collection operations.
 Callbacks accept a local function name or an inline pure `fn(x) { x * x }`, e.g.
 `list.map(range(5), fn(x) { x * x })`. Fold accepts a two-parameter callback;
@@ -109,15 +126,21 @@ trees or divide-and-conquer.
 
 list/object annotations validate outer shape; dynamic element types are checked
 when used. CLI strings are literal, numbers finite decimal, booleans true/false,
-and any/list/object inputs JSON. A Flow output `T?` accepts null or no value from a
+and any/list/object inputs JSON. Parameters and fn/callback results also accept nullable `T?`. Nullable CLI inputs
+use `null`; a `string?` can use a JSON-quoted string such as `'"null"'` for literal text.
+Flow expressions can compose external calls such as `print(np.mean(values))`, with
+ordered argument evaluation and effects aggregated across the whole expression.
+Pure fn and collection callbacks remain pure. A Flow output `T?` accepts null or no value from a
 closed gate.
 
 ## Dependencies determine execution
 
 Flow bindings become graph nodes; variable references become dependencies. Pure
 expressions inside fn do not become graph nodes. Independent nodes may run in
-parallel; consumers wait for their dependencies. if selects a value, when gates
-execution. Short-circuit expressions do not cancel separately bound external work.
+parallel; consumers wait for their dependencies. if selects a value; match can
+select a value or execute a matching statement arm. Arms may produce different
+types; the enclosing fn or Flow checks its declared return type. Short-circuit
+expressions do not cancel separately bound external work.
 
 Host adapters provide real capabilities:
 
@@ -137,9 +160,14 @@ Persistent instances expose `NewInstance`, `SetState` and `Tick`; the host advan
 each computation. One-shot `Run`, `RunSequential` and `RunParallel` share the same input
 and result contracts.
 
+Generated graphs drop execution references after the last declared consumer
+completes or is skipped; parallel workers carry only their own dependencies.
+LIP tracks computational lifetimes while Go GC handles memory reclamation.
+Outputs, State and valid pure caches remain available. See [value lifetimes and measurements](docs/VALUE-LIFETIMES.md).
+
 ## Check, run and inspect
 
-0.6.1 adds 19 pure `string.*` operations, explicit `fail(message)`, and structured
+The core includes 19 pure `string.*` operations, explicit `fail(message)`, and structured
 `lipc check --json` diagnostics (`lip.diagnostics.v1`). The expanded [tutorial](docs/TUTORIAL.md)
 has progressive, runnable examples with tested outputs and failures. String
 boundaries/operators share a 16 MiB UTF-8 limit; Map/fold sources are capped at
@@ -172,18 +200,21 @@ inspect does not execute Host work and emits `lip.graph.v1`. Trace writes
 `lip.trace.v1` states, Ticks and reasons to a separate file on success or execution
 failure, preserving ordinary result output.
 
-Declare external work with `import`. Python modules support explicit aliases such as
-`import python "numpy" as np`. Without `as`, the actual Python module name is
+Declare external work with `import`. Python, Host and Go all support aliases such as
+`import python "numpy" as np`, `import host "service.*" as s`, and `import go "fmt" as f`.
+Without `as`, the actual Python module name is
 preserved; the compiler does not map installation names to module names.
 Generate libraries with `--no-main
---package name` for Host/Go adapters. Python requirements enable a resident
-Worker using installed packages. See the [Host example](examples/host_adapter)
+--package name` when using Host/Go adapters. Actual Python operations enable a resident
+Worker using installed packages; unused imports remain metadata. Namespace aliases
+can share builtin/local function names: bare and member calls resolve separately.
+Single-operation aliases resolve according to their explicit declaration. See the [Host example](examples/host_adapter)
 and [Python integration](docs/PYTHON-INTEGRATION.md).
 
 ## Specification and verification
 
 The [language specification](docs/ALPHA-0.6-SPEC.md) defines the current rules.
-Use `//` for line comments, block-style `if` to select values, and `when` to gate
+Use `#` for line comments, block-style `if` to select values, and `match` to gate
 execution. See the [roadmap](docs/ROADMAP.md) for future directions.
 
 ```bash
@@ -195,6 +226,9 @@ core execution acceptance. Python tests run when their environment is available;
 independent core examples need no Python.
 
 - [Quickstart](docs/QUICKSTART.md) · [Tutorial](docs/TUTORIAL.md)
+- [Editor support](docs/EDITORS.md) (Neovim / Vim 9 / Emacs)
 - [Compiler and Host API](docs/COMPILER.md) · [Specifications](docs/SPECS.md)
 - [Roadmap](docs/ROADMAP.md) · [Consistency audit](docs/CONSISTENCY-AUDIT.md)
 - [Prototype coverage](examples/PROTOTYPES.md) · [Changelog](CHANGELOG.md) · [Release checklist](RELEASE.md)
+
+Local source/tool archives, SHA-256 verification and offline installation checks are described in [RELEASE.md](RELEASE.md#本地发行包).
