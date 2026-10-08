@@ -10,8 +10,9 @@ import (
 )
 
 type Dependency struct {
-	Kind string
-	Spec string
+	Kind  string
+	Spec  string
+	Alias string
 }
 
 func RequiredDependencies() []Dependency { return []Dependency{{Kind: "host", Spec: "fetch"}} }
@@ -137,6 +138,28 @@ func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runti
 		return nil, nil, err
 	}
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
+}
+
+func executionError(err error, trace []runtime.TraceEvent) error {
+	message, context := err.Error(), ""
+	for _, event := range trace {
+		if event.Status != runtime.Error {
+			continue
+		}
+		switch event.Node {
+		case "result":
+			message = "examples/retry.lip:4:5: " + event.Reason
+			context = "\n  4 |     result = retry(fetch(input), 3)\n    |     ^"
+		case "__return_0":
+			message = "examples/retry.lip:5:5: " + event.Reason
+			context = "\n  5 |     return result\n    |     ^"
+		}
+		break
+	}
+	if hint := runtime.ExecutionHint(err); hint != "" {
+		context += "\n  hint: " + hint
+	}
+	return fmt.Errorf("%s%s", message, context)
 }
 
 func main() { os.Exit(runMain()) }

@@ -1,0 +1,10 @@
+flow Aggregation(n: number) -> object {
+    return {
+        squares: list.map(range(n), fn(x) { x * x }),
+        selected: list.filter(range(n), fn(x) { x > 2 }),
+        total: fold(range(n), 0, fn(total, x) { total + x }),
+        prefixes: list.scan(range(n), 0, fn(total, x) { total + x }),
+        descending: list.sort_by(range(n), fn(x) { -x }),
+        groups: list.group_by(range(n), fn(x) { x > 2 })
+    }
+}

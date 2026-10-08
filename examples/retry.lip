@@ -1,4 +1,4 @@
-require host "fetch"
+import host "fetch"
 
 flow RetryFetch(input: string) -> any {
     result = retry(fetch(input), 3)

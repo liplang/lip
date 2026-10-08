@@ -1,4 +1,4 @@
-require host "load_profile"
+import host "load_profile"
 
 flow ParallelProfiles(path: string) -> any {
     left = load_profile(path)

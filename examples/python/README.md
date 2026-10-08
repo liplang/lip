@@ -15,7 +15,7 @@ GOCACHE=/tmp/lip-gocache go run ./examples/python
 The bundled worker needs Python 3. NumPy and Pandas enable the operations used by
 the example; the worker also has dependency-free `sum`, `mean`, `dot`, and
 `matrix_multiply` operations for smoke tests. `flow.lip` declares
-`require python "numpy"` and `require python "pandas"`; this is metadata and
+`import python "numpy"` and `import python "pandas"`; this is metadata and
 does not install packages. Standalone generated programs start the default Worker
 for a declared Python dependency; the Go example keeps explicit Worker ownership
 so it can use the blob data plane.

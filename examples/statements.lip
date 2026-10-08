@@ -1,0 +1,4 @@
+// A single group of statements needs no Flow wrapper or return declaration.
+a = 2
+b = 3
+print(a / (a + b))

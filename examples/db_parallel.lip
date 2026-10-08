@@ -1,8 +1,8 @@
 // Prototype 20: independent database reads joined into one response.
-require host "query_user"
-require host "query_orders"
-require host "query_recommendations"
-require host "make_response"
+import host "query_user"
+import host "query_orders"
+import host "query_recommendations"
+import host "make_response"
 flow DatabaseRequest(request: any) -> any {
     user = query_user(request)
     orders = query_orders(request)

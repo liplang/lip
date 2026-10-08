@@ -1,5 +1,5 @@
-require host "load_text"
-require python "math"
+import host "load_text"
+import python "math"
 
 fn parse(text: string) -> number { return string.parse_number(text) }
 fn render(value: number) -> string { return str(value) }

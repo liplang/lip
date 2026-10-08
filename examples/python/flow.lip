@@ -1,6 +1,6 @@
 // Dotted Python operations are resolved by the generic Python Host.
-require python "numpy"
-require python "pandas"
+import python "numpy"
+import python "pandas"
 flow Scientific(values: any) -> any {
     total = numpy.sum(values)
     average = numpy.mean(values)

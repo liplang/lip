@@ -1,9 +1,9 @@
 // Prototypes 27 and 28: plan once, call independent tools, then synthesize.
-require host "plan_tools"
-require host "call_weather"
-require host "call_search"
-require host "call_database"
-require host "synthesize"
+import host "plan_tools"
+import host "call_weather"
+import host "call_search"
+import host "call_database"
+import host "synthesize"
 flow ToolAgent(request: string) -> any {
     plan = plan_tools(request)
     weather = call_weather(plan)

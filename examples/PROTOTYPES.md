@@ -34,7 +34,7 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 29 Agent verification | `feedback.lip` | Host 提供 revise/verify |
 
 这些文件可以全部运行 `lipc check`。其中带有 `fetch_*`、`query_*`、
-`model_*` 等名字的示例现在都用 `require host "..."` 写出所需 adapter；执行
+`model_*` 等名字的示例现在都用 `import host "..."` 写出所需 adapter；执行
 仍需要 Go 宿主注册对应 Host。这不是伪代码，而是 Alpha 的正式互操作边界。
 
 ## 部分可表达，但依赖 Host 或显式限制

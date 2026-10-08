@@ -1,0 +1,11 @@
+fn square(x: number) -> number { return x * x }
+
+flow Comprehensions(n: number) -> object {
+    squares = [square(x) for x in range(1, n)]
+    return {
+        values: squares,
+        total: list.sum([square(x) for x in range(1, n)]),
+        count: len([x for x in range(1, n)]),
+        rows: [[x + y for y in range(0, x)] for x in range(1, 4)]
+    }
+}

@@ -1,11 +1,11 @@
 // Prototype 24: a scientific DAG with two independent preprocessing/model
 // branches. The actual numerical work belongs in Go Host adapters.
-require host "load_data"
-require host "preprocess_left"
-require host "preprocess_right"
-require host "model_one"
-require host "model_two"
-require host "combine"
+import host "load_data"
+import host "preprocess_left"
+import host "preprocess_right"
+import host "model_one"
+import host "model_two"
+import host "combine"
 flow ScienceDAG(path: string) -> any {
     data = load_data(path)
     left = preprocess_left(data)

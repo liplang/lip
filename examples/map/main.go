@@ -12,8 +12,9 @@ import (
 )
 
 type Dependency struct {
-	Kind string
-	Spec string
+	Kind  string
+	Spec  string
+	Alias string
 }
 
 func RequiredDependencies() []Dependency { return []Dependency{} }
@@ -158,6 +159,31 @@ func RunParallel(ctx context.Context, host runtime.Host, inputs map[string]runti
 	return buildGraph(host).RunParallel(ctx, host, inputs, limit)
 }
 
+func executionError(err error, trace []runtime.TraceEvent) error {
+	message, context := err.Error(), ""
+	for _, event := range trace {
+		if event.Status != runtime.Error {
+			continue
+		}
+		switch event.Node {
+		case "values":
+			message = "examples/map.lip:4:5: " + event.Reason
+			context = "\n  4 |     values = [1, 2, 3, 4]\n    |     ^"
+		case "doubled":
+			message = "examples/map.lip:5:5: " + event.Reason
+			context = "\n  5 |     doubled = [twice(x) for x in values]\n    |     ^"
+		case "__return_0":
+			message = "examples/map.lip:6:5: " + event.Reason
+			context = "\n  6 |     return doubled\n    |     ^"
+		}
+		break
+	}
+	if hint := runtime.ExecutionHint(err); hint != "" {
+		context += "\n  hint: " + hint
+	}
+	return fmt.Errorf("%s%s", message, context)
+}
+
 func main() { os.Exit(runMain()) }
 
 func runMain() int {
@@ -172,10 +198,7 @@ func runMain() int {
 	host := runtime.DefaultHost()
 	value, trace, err := Run(ctx, host, inputs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		for _, event := range trace {
-			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Node, event.Status, event.Reason)
-		}
+		fmt.Fprintln(os.Stderr, "error:", executionError(err, trace))
 		return 1
 	}
 	output, err := runtime.FormatValue(value)

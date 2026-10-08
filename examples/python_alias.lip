@@ -1,0 +1,4 @@
+import python "math" as m
+
+value = m.sqrt(9)
+print(value)

@@ -1,5 +1,5 @@
-require host "fetch"
-require host "write_report"
+import host "fetch"
+import host "write_report"
 
 fn start(input: number) -> number { return input }
 fn revise(candidate: number) -> number { return candidate + 1 }

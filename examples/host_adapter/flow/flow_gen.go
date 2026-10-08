@@ -9,8 +9,9 @@ import (
 )
 
 type Dependency struct {
-	Kind string
-	Spec string
+	Kind  string
+	Spec  string
+	Alias string
 }
 
 func RequiredDependencies() []Dependency { return []Dependency{{Kind: "host", Spec: "load_profile"}} }
