@@ -121,7 +121,7 @@
       "{\"value\":0,\"children\":[]}"
     ],
     "exit": 1,
-    "error": "call depth exceeds"
+    "error": "numeric result is not finite"
   },
   {
     "source": "10_gate.lip",

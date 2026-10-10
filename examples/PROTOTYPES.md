@@ -1,6 +1,6 @@
-# 原型覆盖表（Alpha 0.6.3）
+# 原型覆盖表（Alpha 0.6.4）
 
-下面把早期 30 个原型按 Alpha 0.6.3 的真实能力分为三类：可直接表达、需要
+下面把早期 30 个原型按 Alpha 0.6.4 的真实能力分为三类：可直接表达、需要
 Go Host Adapter、以及必须等后续语言能力。示例统一使用当前语法：Flow、
 单赋值绑定、显式输入/输出类型、运算符，以及 `match` 分支选值和执行。
 
@@ -45,7 +45,7 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 10 动态数量 Flow | Map 节点在运行时按输入数量动态展开 |
 | 13 超时 | 作为 Host Adapter 的 `context.Context` / 参数实现，不是语言关键字 |
 | 21 Cache | 可由 Host 封装；ReadOnly/ExternalWrite 效果由 Runtime 调度 |
-| 23 Monte Carlo | range + Map/fold 可遍历样本位置；随机数仍由显式 Host 提供 |
+| 23 Monte Carlo | `random_list`/`random` + Map/fold 可生成和聚合样本；分布、种子与高性能生成器仍由显式 Host 提供 |
 | 26 最简单 Agent | 可用 `llm(request)` Host 调用表达 |
 
 ## 明确留到后续版本
@@ -53,7 +53,7 @@ Go Host Adapter、以及必须等后续语言能力。示例统一使用当前�
 | 原型 | 缺少的核心能力 |
 | --- | --- |
 | 15 外部状态变化 | Host 驱动 Tick/SetState 已支持；仍缺事件/流语法 |
-| 18 Agent retry loop | 有界 Retry/Feedback、有限 for 和 State 已支持；while、可变状态与无界循环尚未设计 |
+| 18 Agent retry loop | 有界 Retry/Feedback、有限 for、`for { ... }` 和 State 已支持；事件/流、可变状态与动态调度组合尚待设计 |
 | 30 完整 Agent Workflow | Map、Feedback、State、Retry 已支持；事件/流及动态控制组合待设计 |
 
 ## 当前 Runtime 能力
@@ -76,5 +76,5 @@ for f in examples/*.lip tests/conformance/*.lip; do
 done
 ```
 
-这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.6.3 已落实 Map、State/Tick、Retry、Feedback
-和 Runtime Effect/Ordering，以及有限 for/break/continue；事件、流、while 和可变循环变量由后续版本处理。
+这组原型用于让每个表达能力和缺口都能由具体例子定位。Alpha 0.6.4 已落实 Map、State/Tick、Retry、Feedback
+和 Runtime Effect/Ordering，以及有限/无限 `for`、break/continue；事件、流、while 和可变循环变量由后续版本处理。
