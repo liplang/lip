@@ -15,14 +15,26 @@ func (e *valueEmitter) matchValue(expr *ast.MatchExpr) (string, error) {
 	for _, arm := range expr.Arms {
 		e.line("if !%s {", matched)
 		branch := e.child(e.indent + "\t")
-		if arm.Pattern != nil {
-			comparison := branch.temp()
-			branch.line("%s, err := runtime.Binary(\"==\", %s, %s)", comparison, scrutinee, literal(arm.Pattern.Value))
-			branch.line("if err != nil { return runtime.Failed(err) }")
-			condition := branch.temp()
-			branch.line("%s, err := runtime.Bool(%s)", condition, comparison)
-			branch.line("if err != nil { return runtime.Failed(err) }")
-			branch.line("if %s {", condition)
+		patterns := matchPatterns(arm)
+		typePatterns := matchTypePatterns(arm)
+		if len(patterns) > 0 || len(typePatterns) > 0 {
+			patternMatched := branch.temp()
+			branch.line("%s := false", patternMatched)
+			for _, pattern := range patterns {
+				comparison := branch.temp()
+				branch.line("%s, err := runtime.Binary(\"==\", %s, %s)", comparison, scrutinee, literal(pattern.Value))
+				branch.line("if err != nil { return runtime.Failed(err) }")
+				condition := branch.temp()
+				branch.line("%s, err := runtime.Bool(%s)", condition, comparison)
+				branch.line("if err != nil { return runtime.Failed(err) }")
+				branch.line("if %s { %s = true }", condition, patternMatched)
+			}
+			for _, patternType := range typePatterns {
+				condition := branch.temp()
+				branch.line("%s := runtime.IsType(%s, %s)", condition, scrutinee, quote(patternType))
+				branch.line("if %s { %s = true }", condition, patternMatched)
+			}
+			branch.line("if %s {", patternMatched)
 			branch = branch.child(branch.indent + "\t")
 		}
 		if arm.Guard != nil {
@@ -45,7 +57,7 @@ func (e *valueEmitter) matchValue(expr *ast.MatchExpr) (string, error) {
 		if arm.Guard != nil {
 			e.line("}")
 		}
-		if arm.Pattern != nil {
+		if len(patterns) > 0 || len(typePatterns) > 0 {
 			e.line("}")
 		}
 		e.line("}")

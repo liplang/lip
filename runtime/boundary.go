@@ -54,6 +54,16 @@ func TypeName(value Value) string {
 	return fmt.Sprintf("host value %T", value)
 }
 
+// IsType reports whether a runtime value belongs to one of LIP's declared
+// boundary types. It is used by match type alternatives; unlike CheckType it
+// returns false for a nonmatching value and never produces a diagnostic.
+func IsType(value Value, typ string) bool {
+	if typ == "any" {
+		return true
+	}
+	return TypeName(value) == typ
+}
+
 func PrintValues(writer io.Writer, values []Value) error {
 	parts := make([]string, len(values))
 	for i, value := range values {
@@ -238,8 +248,10 @@ func ExecutionHint(err error) string {
 		return "Check why the input is null and handle the missing value before arithmetic."
 	case strings.Contains(message, "expects two strings"):
 		return "Use two numbers for arithmetic or two strings for concatenation; use str(value) when text conversion is intended."
+	case strings.Contains(message, "numeric result is not finite"):
+		return "The calculation overflowed or produced an invalid floating-point result; reduce the magnitude or check logarithm, division and power inputs."
 	case strings.Contains(message, "call depth exceeds"):
-		return "Add a terminating base case to the recursive function; use Map or fold for list traversal."
+		return "This call reached the 1024-frame fallback for recursion that was not lowered to a loop. A terminating case alone does not remove this limit; branching recursion may need an explicit loop or state formulation. Tail and simple accumulative forms are lowered automatically."
 	case strings.Contains(message, "host operation") && strings.Contains(message, "not registered"):
 		return "Register the operation in the Go host; an import declaration does not provide its implementation."
 	default:

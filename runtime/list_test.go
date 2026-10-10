@@ -47,11 +47,17 @@ func TestListCatalogSemanticsAndImmutability(t *testing.T) {
 		{"contains", `[[1,2],2]`, `true`, nil}, {"count", `[[1,2,1],1]`, `2`, nil},
 		{"sort", `[[3,1,2]]`, `[1,2,3]`, nil}, {"sort", `[["b","a"]]`, `["a","b"]`, nil},
 		{"sort_by", `[[3,1,2]]`, `[3,2,1]`, negative},
+		{"sort_with", `[[3,1,2]]`, `[1,2,3]`, func(_ context.Context, args []Value) Result {
+			left, _ := Number(args[0])
+			right, _ := Number(args[1])
+			return Ready(left < right)
+		}},
 		{"group", `[[1,2,1]]`, `[{"key":1,"values":[1,1]},{"key":2,"values":[2]}]`, nil},
 		{"group_by", `[[1,0,2,-1]]`, `[{"key":true,"values":[1,2]},{"key":false,"values":[0,-1]}]`, positive},
 		{"split_by", `[[1,2,0,3]]`, `[{"key":true,"values":[1,2]},{"key":false,"values":[0]},{"key":true,"values":[3]}]`, positive},
 		{"map", `[[1,2,3]]`, `[2,4,6]`, double}, {"filter", `[[1,0,2,-1]]`, `[1,2]`, positive},
 		{"any", `[[0,1,-1]]`, `true`, positive}, {"all", `[[1,2,3]]`, `true`, positive},
+		{"fold", `[[1,2,3],0]`, `6`, add},
 		{"scan", `[[1,2,3],0]`, `[0,1,3,6]`, add},
 		{"sum", `[[1,2,3]]`, `6`, nil}, {"product", `[[1,2,3]]`, `6`, nil},
 		{"min", `[[3,1,2]]`, `1`, nil}, {"max", `[["a","b"]]`, `"b"`, nil},
@@ -127,6 +133,35 @@ func TestListAlgebraAndStableSort(t *testing.T) {
 	unique, err := ListCall(ctx, "list.unique", []Value{[]Value{1, float64(1), json.Number("1.0"), "1"}}, nil)
 	if err != nil || !reflect.DeepEqual(unique, []Value{1, "1"}) {
 		t.Fatalf("numeric equality: %v %v", unique, err)
+	}
+}
+
+func TestShortListAliasesUseCanonicalSemantics(t *testing.T) {
+	ctx := context.Background()
+	key := func(_ context.Context, args []Value) Result { return Ready(args[0]) }
+	less := func(_ context.Context, args []Value) Result {
+		left, _ := Number(args[0])
+		right, _ := Number(args[1])
+		return Ready(left < right)
+	}
+	if got, err := ListCall(ctx, "sort", []Value{[]Value{3, 1, 2}}, nil); err != nil || !reflect.DeepEqual(got, []Value{1, 2, 3}) {
+		t.Fatalf("sort alias: %v %v", got, err)
+	}
+	if got, err := ListCall(ctx, "sort_by", []Value{[]Value{3, 1, 2}}, key); err != nil || !reflect.DeepEqual(got, []Value{1, 2, 3}) {
+		t.Fatalf("sort_by alias: %v %v", got, err)
+	}
+	if got, err := ListCall(ctx, "sort_with", []Value{[]Value{3, 1, 2}}, less); err != nil || !reflect.DeepEqual(got, []Value{1, 2, 3}) {
+		t.Fatalf("sort_with alias: %v %v", got, err)
+	}
+	if got, err := ListCall(ctx, "sort_by", []Value{[]Value{3, 1, 2}, true}, key); err != nil || !reflect.DeepEqual(got, []Value{3, 2, 1}) {
+		t.Fatalf("sort_by reverse alias: %v %v", got, err)
+	}
+	if got, err := ListCall(ctx, "fold", []Value{[]Value{1, 2, 3}, 0}, func(_ context.Context, args []Value) Result {
+		left, _ := Number(args[0])
+		right, _ := Number(args[1])
+		return Ready(left + right)
+	}); err != nil || got != float64(6) {
+		t.Fatalf("fold alias: %v %v", got, err)
 	}
 }
 

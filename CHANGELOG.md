@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.4 — Consistent collection APIs and bounded infinite loops
+
+Local implementation snapshot; tags and release artifacts are separate publication steps.
+
+- added `isEmpty`/`isNotEmpty`, uniform random scalar/list generation, Python-style list and
+  string slicing, named `reverse` options, stable `sort_by`/`sort_with` comparator APIs and
+  short aliases that preserve the canonical `list.*` names;
+- aligned `fold` with `list.fold` while keeping `scan` distinct: fold returns the final
+  accumulator, scan returns the seed and every intermediate accumulator;
+- added explicit `for { ... }` loops with `break`, cooperative Context cancellation and no
+  materialized sentinel range; finite `range` remains eager and bounded;
+- documented why `range(...)` remains the sequence constructor while `start:end:step` is
+  reserved for bounded slicing, and clarified State, Retry and Feedback with beginner flows;
+- retained dependency-based intermediate release for Go GC, documenting why recursive size
+  estimates and a 1 MiB threshold would cost more than they save;
+- lowered tail-recursive and mutually tail-recursive local calls through a bounded-context
+  trampoline, lowered safe linear accumulative recurrences such as factorial and sum to
+  cancellation-aware loops, and lowered safe two-branch integer recurrences to bounded
+  state loops without relying on function names. Raised the fallback local call-depth
+  bound to 1024 while keeping data-walker nesting limits independent;
+- match arms accept comma-separated literal alternatives such as `0, 1 => value`; the
+  alternatives share one guard and result, with unified duplicate and exhaustiveness checks;
+- match also accepts runtime type alternatives (`number`, `string`, `bool`, `list`, `object`)
+  for `any`/nullable dispatch and narrows an identifier inside the selected arm; `_` remains
+  the fallback for null and other Host values;
+- synchronized the 0.6.4 specification, tutorials, examples, editor catalogs and generated
+  sources; versioned the reference implementation as 0.6.4.
+
 ## 0.6.3 — Dependency lifetimes and release consistency
 
 Validated local implementation and source/tool packages; Git tags and remote publication remain separate release steps.

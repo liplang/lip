@@ -913,11 +913,13 @@
       "list.filter",
       "list.unique",
       "list.sort",
+      "list.sort_by",
+      "list.sort_with",
       "纯回调"
     ],
     "explanation": [
-      "list.filter(xs, predicate) 保留回调返回 true 的原元素。unique 保留第一次出现的顺序，sort 对同类数字或字符串稳定升序排序。",
-      "list.* 内置，无需 import。list.map 是顺序纯表达式，可嵌套组合；独立 Map 推导式则允许 Runtime 动态并行展开。:reference list 查看全部 34 个操作。"
+      "list.filter(xs, predicate) 保留回调返回 true 的原元素。unique 保留第一次出现的顺序，sort 按元素本身稳定排序；sort_by 先取一元 key，sort_with 接收二元 comparator。三者都保持相同 key 的原顺序。",
+      "list.* 内置，无需 import。list.map 是顺序纯表达式，可嵌套组合；独立 Map 推导式则允许 Runtime 动态并行展开。:reference list 查看全部 36 个操作。"
     ],
     "example": "flow Accepted(values: list) -> list {\n    return list.map(list.filter(values, fn(x) { x >= 0 }), fn(x) { x * 10 })\n}",
     "demo": [
@@ -1334,7 +1336,7 @@
       "空输入契约"
     ],
     "explanation": [
-      "scan(xs, seed, reducer) 返回初值和每一步累计值，所以长度比输入多一项。",
+      "scan(xs, seed, reducer) 返回初值和每一步累计值，所以长度比输入多一项；只要最后答案时用 fold（或 list.fold），要看全过程时用 scan。",
       "any 在首个 true 停止；all 在首个 false 停止。空列表 any=false，all=true。查询回调必须是纯布尔函数。"
     ],
     "example": "flow Checks(values: list) -> object {\n    return {some: list.any(values, fn(x) { x == 0 }), all: list.all(values, fn(x) { x >= 0 })}\n}",
@@ -1456,7 +1458,7 @@
     ],
     "explanation": [
       "fn 支持直接与间接纯递归。递归环中每个函数都必须显式声明返回类型，编译器不推导循环类型。",
-      "递归要有终止分支；运行时最大调用深度为 256，取消与超限产生普通错误。集合遍历通常优先 Map/fold，递归更适合树和分治。"
+      "递归要有终止分支；返回位置的尾递归会自动使用循环跳转，简单的累积递归和部分整数分支递推会使用状态循环。未转换递归最多嵌套 1024 个本地调用；CLI 收到 Ctrl-C/超时，或 Go 宿主取消 context 时会返回取消错误，超过 1024 层会返回递归深度错误。集合遍历通常优先 Map/fold，递归更适合树和分治。"
     ],
     "example": "fn sum_to(n: number) -> number {\n    return if n <= 0 { 0 } else { n + sum_to(n - 1) }\n}\nflow Recursive(value: number) -> number { return sum_to(value) }",
     "demo": [
@@ -1603,18 +1605,18 @@
   },
   {
     "id": "gates",
-    "title": "match 模式分支与可选输出",
+    "title": "match 字面量分支与可选输出",
     "stage": "执行",
     "topics": [
       "match",
-      "字面量与 _",
+      "字面量、类型与 _",
       "if 守卫",
       "Type?",
       "Skipped",
       "效果控制"
     ],
     "explanation": [
-      "match value { pattern => result, _ => fallback } 按顺序选中第一个匹配分支。模式支持数字、字符串、bool、null 和 _；可用 pattern if condition 添加守卫。bool 的 true/false 或无守卫的 _ 要覆盖所有值。",
+      "match value { pattern => result, _ => fallback } 按顺序选中第一个字面量或类型分支。当前不做列表、对象解构或字符串内容匹配；字符串模式比较整个字符串。模式支持数字、字符串、bool、null、number/string/bool/list/object 类型和 _；同一分支可写多个字面量或类型，如 0, 1 => result、number, string => result，它们共享守卫和结果。可用 pattern if condition 添加守卫。bool 的 true/false 或无守卫的 _ 要覆盖所有值。",
       "match 也可写 pattern => { statements }，仅执行所选分支的绑定、print、外部调用或 return，其他分支为 Skipped。绑定只在该分支内可用。",
       "分支结果可以是不同类型，match 不要求它们一致；函数与 Flow 的返回边界负责检查声明类型。某些分支没有返回值时，Flow 输出写 Type?。",
       "match 可处理可空输入：先写无守卫的 null 分支，再在 _ 分支使用非空的值。有守卫的 null 分支不能排除 null。"
@@ -1703,7 +1705,7 @@
     "explanation": [
       "for item in source { statements } 逐项顺序执行操作，不收集结果列表；source 求值一次，最多 1,000,000 项，支持 Flow、顶层和 REPL。",
       "循环体支持不可变绑定、match 和嵌套循环，每次迭代有独立作用域。break 结束最近一层循环，continue 跳过本项剩余语句；可写在 match 分支中。",
-      "等待异步操作，取消或首次错误停止后续工作。每 Tick 重新执行循环。循环体不使用 return/state，转换用推导式，聚合用 fold。"
+      "等待异步操作。CLI 收到 Ctrl-C/超时，或 Go 宿主取消 context 时，当前循环停止并返回取消错误；循环体首次出现普通错误时也停止后续迭代。每 Tick 重新执行循环。循环体不使用 return/state，转换用推导式，聚合用 fold。"
     ],
     "example": "flow Visit(limit: number) {\n    for i in range(limit) {\n        match i {\n            2 => { continue },\n            5 => { break },\n            _ => {}\n        }\n        squared = i ** 2\n        print(i, squared)\n    }\n    print(\"done\")\n}",
     "demo": [
@@ -1927,7 +1929,7 @@
       "缓存复用"
     ],
     "explanation": [
-      "state(initial) 首次成功计算后保存状态。持久实例由 Go 宿主创建，用 SetState 改状态，用 Tick 推进一次计算；状态不会自行递增。",
+      "state(initial) 首次成功计算后保存状态。可以把它想成 Flow 的记事本：持久实例由 Go 宿主创建，SetState 预约下一次 Tick 的值，Tick 才推进一次计算；状态不会自行递增，也不会因为写了 state 就形成隐式循环。",
       "本课验证器保留同一个 Instance，依次应用 :tests 显示的输入更新和 SetState。纯依赖未变化可复用，外部读写每个 Tick 重执行。单次 lipc run 不保留实例。",
       "生成图在最后一个消费者完成后解除临时值引用，实际回收由 Go GC 决定。Instance 的输入、State 和有效纯缓存仍为后续 Tick 保留；外部读写结果不缓存，也不自动关闭外部资源。"
     ],
@@ -2025,7 +2027,7 @@
       "取消"
     ],
     "explanation": [
-      "retry(operation(...), attempts) 对一次操作有界重试；attempts 包括第一次调用。它不自动提供退避或幂等性。 上限是正整数字面量；取消立即停止，普通失败才重试。retry 必须直接作为绑定、return 或调用语句，不能嵌入纯 fn 或其他表达式。",
+      "retry(operation(...), attempts) 只对同一个操作调用做有界重试；attempts 包括第一次调用，普通失败才重试，取消立即停止。它不自动提供退避、错误分类或幂等性，写操作必须先确认可以重复。上限是正整数字面量；retry 必须直接作为绑定、return 或调用语句，不能嵌入纯 fn 或其他表达式。",
       "本课 lesson_fetch 适配器每组输入的前两次调用失败，第三次以已就绪的 Await 返回输入值。Runtime 负责等待与取消。只有达到第三次才成功。"
     ],
     "example": "import host \"lesson_fetch\"\nflow Fetch(input: any) -> any {\n    return retry(lesson_fetch(input), 3)\n}",
@@ -2092,8 +2094,8 @@
       "上限"
     ],
     "explanation": [
-      "feedback(initial_call, step, verify, attempts) 验证候选，不合格就修订，次数有上限。step/verify 传操作或纯函数名称，不写调用括号。",
-      "attempts 计数验证轮次；初始候选也占一轮。达到上限仍不合格就失败。它属于 Runtime 的有界策略，不是无限循环。",
+      "feedback(initial_call, step, verify, attempts) 是一个有界的“提案→检查→修订”流程：先执行 initial 得到候选，verify 返回 false 才调用 step 生成下一个候选。step/verify 传操作或纯函数名称，不写调用括号。",
+      "attempts 计数验证轮次；初始候选也占一轮。verify 一旦返回 true 就结束，达到上限仍不合格就失败。它属于 Runtime 的有界策略，不是无限循环。",
       "Feedback 直接作为绑定、return 或调用语句；上限是正整数字面量，包含首次验证。initial 只执行一次，验证 false 才修订；错误或取消立即停止。"
     ],
     "example": "fn start(x: number) -> number { return x }\nfn revise(x: number) -> number { return x + 2 }\nfn verify(x: number) -> bool { return x >= 4 }\nflow Improve(value: number) -> number {\n    return feedback(start(value), revise, verify, 3)\n}",

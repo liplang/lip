@@ -922,7 +922,7 @@ func validateSimpleExpr(expr ast.Expr) error {
 		}
 		return validateCallArguments(e)
 	case *ast.LambdaExpr:
-		return repairError("LIP_CALLBACK_ERROR", "inline fn is only supported as a collection callback", "Use it in list.map, list.filter, list.sort_by, list.group_by, list.split_by, list.any, list.all, list.scan or fold. For reusable functions, declare a named pure fn.")
+		return repairError("LIP_CALLBACK_ERROR", "inline fn is only supported as a collection callback", "Use it in list.map, list.filter, list.sort_by, list.sort_with, list.group_by, list.split_by, list.any, list.all, list.scan, fold or list.fold. For reusable functions, declare a named pure fn.")
 	default:
 		return fmt.Errorf("unsupported expression %T", expr)
 	}
@@ -1152,7 +1152,7 @@ func inferExprType(expr ast.Expr, env, fnTypes map[string]string, fnParams map[s
 		if _, ok := stringops.Lookup(e.Name); ok {
 			return inferStringCall(e, env, fnTypes, fnParams)
 		}
-		if e.Name == "len" || e.Name == "range" || e.Name == "fold" {
+		if e.Name == "len" || e.Name == "range" || e.Name == "fold" || e.Name == "isEmpty" || e.Name == "isNotEmpty" || e.Name == "is_empty" || e.Name == "is_not_empty" || randomBuiltinName(e.Name) {
 			return inferCollectionCall(e, env, fnTypes, fnParams)
 		}
 		if e.Name == "state" {
@@ -1423,11 +1423,15 @@ func compatibleType(expected, actual string) bool {
 func pureBuiltinName(name string) bool {
 	_, list := listops.Lookup(name)
 	_, text := stringops.Lookup(name)
-	return list || text || name == "str" || name == "len" || name == "range" || name == "fold" || name == "fail"
+	return list || text || name == "str" || name == "len" || name == "range" || name == "fold" || name == "fail" || name == "isEmpty" || name == "isNotEmpty" || name == "is_empty" || name == "is_not_empty"
+}
+
+func randomBuiltinName(name string) bool {
+	return name == "random" || name == "random_list" || name == "random_int" || name == "random_choice" || name == "random_shuffle"
 }
 
 func builtinName(name string) bool {
-	return pureBuiltinName(name) || name == "print" || name == "state" || name == "retry" || name == "feedback"
+	return pureBuiltinName(name) || randomBuiltinName(name) || name == "print" || name == "state" || name == "retry" || name == "feedback"
 }
 
 // Pure local functions may compose other local functions and str. External

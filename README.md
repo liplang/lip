@@ -1,6 +1,6 @@
-# LIP Alpha 0.6.3
+# LIP Alpha 0.6.4
 
-[English README](README.en.md) · 参考实现 `0.6.3`（[VERSION](VERSION)）
+[English README](README.en.md) · 参考实现 `0.6.4`（[VERSION](VERSION)）
 
 LIP（Logical / Incremental / Parallel）是一门面向依赖关系的小语言：
 **描述依赖，让 Runtime 决定执行。** 用简洁的不可变绑定组合数据、选择、
@@ -87,21 +87,21 @@ print(a / (a + b))
 
 ## 语言与运行库
 
-| 能力 | 0.6.3 契约 |
+| 能力 | 0.6.4 契约 |
 | --- | --- |
 | 完整程序 | 依赖头（Python/Host/Go 都支持 as 别名）、纯 fn、显式 flow 或顶层语句；有返回值时声明类型，用 return 或 match 分支给出结果 |
 | 数据 | null、bool、number、string、list、object；对象/列表可嵌套 |
-| 组合 | 不可变绑定、运算符、Rust 式 if/match、字面量模式、默认分支、守卫、Map、顺序 for、break/continue |
+| 组合 | 不可变绑定、运算符、块式 if、字面量/类型 match、默认分支、守卫、Map、顺序 for、break/continue |
 | 数学 | + - * /、向下取整 //、取余 %、乘方 **、对数 */；[示例](examples/math.lip) |
-| 纯操作 | str、len、半开区间 range、带初值的顺序 fold、显式 fail |
-| list 标准库 | 34 个纯函数：分组、合并、转置、窗口、过滤、排序、去重、累计与笛卡尔积 |
+| 核心操作 | str、len、isEmpty/isNotEmpty、半开区间 range、带初值的顺序 fold、显式 fail、random/random_list/random_int/random_choice/random_shuffle |
+| list 标准库 | 36 个纯函数：分组、合并、转置、窗口、过滤、排序、去重、累计与笛卡尔积 |
 | string 标准库 | 19 个纯操作：清理、切词、分行、合并、查询、截取、替换与数值解析 |
-| 递归 | 直接/间接纯递归；递归环显式返回类型，最大调用深度 256 |
+| 递归 | 直接/间接纯递归；尾递归与互相尾调用使用循环跳转，线性累积和满足整数状态表条件的分支递归使用循环；未能转换的递归环显式返回类型，最大调用深度 1024 |
 | 执行 | 自动/顺序/有限并行、效果与取消、State/Tick、纯依赖复用 |
 | 观察 | check --json 修复诊断、inspect 依赖图、run --trace 生命周期 |
 | 已有扩展 | Host Adapter、Await、有界 Retry/Feedback、Python Worker |
 
-`range(end)` 或 `range(start, end[, step])` 最多构造 1,000,000 个元素；列表推导式可直接使用纯列表表达式，也可放入调用参数，例如 `np.mean([x for x in range(1, 19)])`（先 `import python "numpy" as np`）。独立 Map 保留有界并行，嵌套推导式按顺序求值。集合回调可用本地函数名或内联 `fn(x) { x * x }`，例如 `list.map(range(5), fn(x) { x * x })`。fold 的二参数回调也可内联，空列表返回初值。单表达式 fn 的 return 可省略。完整签名见 [LIST-LIBRARY.md](docs/LIST-LIBRARY.md)。递归适合树和分治，集合遍历优先用 Map/fold。
+`range(end)` 或 `range(start, end[, step])` 最多构造 1,000,000 个元素；`isEmpty(x)` 和 `isNotEmpty(x)` 统一检查字符串、列表和对象。列表与字符串支持 `x[start:end:step]` 切片。列表推导式可直接使用纯列表表达式，也可放入调用参数，例如 `np.mean([x for x in range(1, 19)])`（先 `import python "numpy" as np`）。独立 Map 保留有界并行，嵌套推导式按顺序求值。集合回调可用本地函数名或内联 `fn(x) { x * x }`，例如 `list.map(range(5), fn(x) { x * x })`。fold 的二参数回调也可内联，空列表返回初值。单表达式 fn 的 return 可省略。`random()`、`random_list(n)`、`random_int(...)`、`random_choice(xs)` 和 `random_shuffle(xs)` 生成随机结果，属于有副作用操作。完整签名见 [LIST-LIBRARY.md](docs/LIST-LIBRARY.md)。递归适合树和分治，集合遍历优先用 Map/fold。
 
 `list`/`object` 检查外层形状，动态元素在实际运算中校验。CLI 的 string 参数
 原样传递，number 为有限十进制，bool 为 true/false，any/list/object 使用 JSON。
@@ -113,7 +113,7 @@ print(a / (a + b))
 ## 依赖是执行语义
 
 Flow 绑定形成图节点，变量引用形成依赖；fn 内部的纯表达式不展开为图。
-独立节点允许并行，消费者等待依赖。`if` 选择值；`match` 可以选值或执行匹配分支；if 的
+独立节点允许并行，消费者等待依赖。`if` 选择值；`match` 可以按整个值的字面量选择值或执行分支；if 的
 短路不会取消已经声明为独立节点的外部工作。
 
 Host 把真实能力接入图：
@@ -180,7 +180,8 @@ LIP 管理计算生命周期，Go GC 管理内存回收；输出、State 与有�
 
 [语言规范](docs/ALPHA-0.6-SPEC.md)统一定义当前规则，行注释使用 `#`，
 条件选值使用块式 `if`，执行分支使用 `match`。顺序操作可写 `for i in range(100) { print(i) }`，
-循环内支持绑定、match、嵌套循环和 break/continue，取消或错误停止执行；每次迭代独立作用域，
+循环内支持绑定、match、嵌套循环和 break/continue。CLI 的 Ctrl-C/超时或 Go 宿主取消 context
+会停止运行，普通错误也会停止后续操作；每次迭代独立作用域，
 不构造结果列表。列表转换用推导式，累加用 fold。见[循环示例](examples/for.lip)；后续计划见[路线图](docs/ROADMAP.md)。
 
 ```bash

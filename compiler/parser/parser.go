@@ -327,6 +327,13 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 		return &ast.LoopControlStmt{Kind: kw.Text, Pos: kw.Pos}, nil
 	case token.For:
 		pos := p.next().Pos
+		if p.match(token.LBrace) {
+			body, err := p.parseStatements()
+			if err != nil {
+				return nil, err
+			}
+			return &ast.ForStmt{Body: body, Pos: pos}, nil
+		}
 		variable, err := p.expect(token.Ident)
 		if err != nil {
 			return nil, err
@@ -337,6 +344,9 @@ func (p *Parser) parseStatement() (ast.Stmt, error) {
 		source, err := p.parseExpr(0)
 		if err != nil {
 			return nil, err
+		}
+		if p.peek().Kind == token.Colon {
+			return nil, p.errorf(p.peek(), "an unbounded range is not a list source; use `for { ... }` with break or Context cancellation, or use range(start, end, step) for a finite loop")
 		}
 		if _, err := p.expect(token.LBrace); err != nil {
 			return nil, err
@@ -613,13 +623,20 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 			}
 			p.next()
 			args := []ast.Expr{}
+			argNames := []string{}
 			if !p.match(token.RParen) {
 				for {
+					argName := ""
+					if p.peek().Kind == token.Ident && p.i+1 < len(p.tokens) && p.tokens[p.i+1].Kind == token.Assign {
+						argName = p.next().Text
+						p.next()
+					}
 					arg, err := p.parseExpr(0)
 					if err != nil {
 						return nil, err
 					}
 					args = append(args, arg)
+					argNames = append(argNames, argName)
 					if p.match(token.RParen) {
 						break
 					}
@@ -631,7 +648,7 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 					}
 				}
 			}
-			expr = &ast.CallExpr{Name: name, Args: args, Pos: tPos(expr)}
+			expr = &ast.CallExpr{Name: name, Args: args, ArgNames: argNames, Pos: tPos(expr)}
 		case token.Dot:
 			p.next()
 			field, err := p.expect(token.Ident)
@@ -641,14 +658,49 @@ func (p *Parser) parsePostfix(expr ast.Expr) (ast.Expr, error) {
 			expr = &ast.FieldExpr{Object: expr, Name: field.Text, Pos: field.Pos}
 		case token.LBracket:
 			p.next()
-			index, err := p.parseExpr(0)
-			if err != nil {
-				return nil, err
+			// A colon introduces a Python-style slice. The omitted bounds are
+			// represented by null literals inside a synthetic list index, so the
+			// existing AST traversal and generated runtime.Index path remain
+			// shared with ordinary indexing.
+			var start ast.Expr
+			var err error
+			if p.peek().Kind != token.Colon && p.peek().Kind != token.RBracket {
+				start, err = p.parseExpr(0)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if p.match(token.Colon) {
+				end, step := ast.Expr(&ast.LiteralExpr{Value: nil}), ast.Expr(&ast.LiteralExpr{Value: nil})
+				if p.peek().Kind != token.Colon && p.peek().Kind != token.RBracket {
+					end, err = p.parseExpr(0)
+					if err != nil {
+						return nil, err
+					}
+				}
+				bounds := []ast.Expr{startOrNull(start), end}
+				if p.match(token.Colon) {
+					if p.peek().Kind != token.RBracket {
+						step, err = p.parseExpr(0)
+						if err != nil {
+							return nil, err
+						}
+					}
+					bounds = append(bounds, step)
+				}
+				if _, err = p.expect(token.RBracket); err != nil {
+					return nil, err
+				}
+				expr = &ast.IndexExpr{Object: expr, Index: &ast.ListExpr{Items: bounds, Pos: tPos(expr)}, Pos: tPos(expr)}
+				break
+			}
+			if start == nil {
+				return nil, p.errorf(p.peek(), "expected index or slice expression")
 			}
 			if _, err = p.expect(token.RBracket); err != nil {
 				return nil, err
 			}
-			expr = &ast.IndexExpr{Object: expr, Index: index, Pos: tPos(expr)}
+			expr = &ast.IndexExpr{Object: expr, Index: start, Pos: tPos(expr)}
 		default:
 			return expr, nil
 		}
@@ -726,4 +778,11 @@ func (p *Parser) expect(kind token.Kind) (token.Token, error) {
 }
 func (p *Parser) errorf(t token.Token, format string, args ...any) error {
 	return &Error{Pos: t.Pos, Message: fmt.Sprintf(format, args...), Incomplete: t.Kind == token.EOF}
+}
+
+func startOrNull(expr ast.Expr) ast.Expr {
+	if expr != nil {
+		return expr
+	}
+	return &ast.LiteralExpr{Value: nil}
 }

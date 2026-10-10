@@ -1,6 +1,6 @@
-# LIP Alpha 0.6.3
+# LIP Alpha 0.6.4
 
-[中文版 README](README.md) · Reference implementation `0.6.3` ([VERSION](VERSION))
+[中文版 README](README.md) · Reference implementation `0.6.4` ([VERSION](VERSION))
 
 LIP (Logical / Incremental / Parallel) is a small dependency-oriented language:
 **Describe dependencies; let the Runtime decide execution.** Compose data,
@@ -94,16 +94,16 @@ Place tool options before the file and program inputs directly after it.
 
 ## Language and runtime
 
-| Capability | 0.6.3 contract |
+| Capability | 0.6.4 contract |
 | --- | --- |
 | Complete program | Requirements with Python/Host/Go aliases, pure fn, explicit flow or top-level statements; typed output via return or mutually exclusive match arms |
 | Data | null, bool, number, string, list, object; nested construction |
-| Composition | Immutable bindings, operators, Rust-style if/match, literal patterns, wildcards, guards, Map, sequential for, break/continue |
+| Composition | Immutable bindings, operators, block if, literal/type match, wildcards, guards, Map, sequential for, break/continue |
 | Arithmetic | + - * /, floor division //, modulo %, power **, logarithm */; [example](examples/math.lip) |
-| Pure operations | str, len, half-open range, ordered fold with an explicit seed, explicit fail |
-| List library | 34 pure functions for grouping, merging, transpose, windows, filtering, sorting, uniqueness, scans and Cartesian products |
+| Core operations | str, len, isEmpty/isNotEmpty, half-open range, ordered fold with an explicit seed, explicit fail, random/random_list/random_int/random_choice/random_shuffle |
+| List library | 36 pure functions for grouping, merging, transpose, windows, filtering, sorting, uniqueness, folds, scans and Cartesian products |
 | String library | 19 pure operations for cleanup, splitting, joining, searching, slicing, replacement and decimal parsing |
-| Recursion | Direct/mutual pure recursion; cycle result types required, call depth at most 256 |
+| Recursion | Direct/mutual pure recursion; cycle result types required; tail and common accumulative recurrences lower to loops, other calls have a 1024-frame safety bound |
 | Execution | Automatic/sequential/bounded parallel scheduling, effects, cancellation, State/Tick, pure dependency reuse |
 | Observation | inspect graph JSON, run --trace lifecycle JSON |
 | Existing extensions | Host Adapters, Await, bounded Retry/Feedback, Python Worker |
@@ -117,6 +117,9 @@ results. Bodies support bindings, match, nested loops and nearest-loop break/con
 each iteration has its own scope, awaits external calls and stops on cancellation or
 failure. Sources evaluate once; loops rerun on every Tick. Transform with comprehensions
 and aggregate with fold. See the [loop example](examples/for.lip).
+For a service-style loop with no finite source, write `for { ... }` and end it with
+`break`, cancellation or an error; it does not create a sentinel range or an overflowing
+index. `range(...)` remains the finite sequence constructor.
 The [list library](docs/LIST-LIBRARY.md) provides composable collection operations.
 Callbacks accept a local function name or an inline pure `fn(x) { x * x }`, e.g.
 `list.map(range(5), fn(x) { x * x })`. Fold accepts a two-parameter callback;
@@ -137,7 +140,7 @@ closed gate.
 
 Flow bindings become graph nodes; variable references become dependencies. Pure
 expressions inside fn do not become graph nodes. Independent nodes may run in
-parallel; consumers wait for their dependencies. if selects a value; match can
+parallel; consumers wait for their dependencies. if selects a value; literal match can
 select a value or execute a matching statement arm. Arms may produce different
 types; the enclosing fn or Flow checks its declared return type. Short-circuit
 expressions do not cancel separately bound external work.

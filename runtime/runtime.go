@@ -146,6 +146,21 @@ type Host struct {
 	pythonEffect Effect
 }
 
+// tailCall is an internal value used by generated local functions. Returning
+// it lets Host.Call jump to the next local operation without growing the Go
+// call stack; it is not part of the LIP value space exposed to programs.
+type tailCall struct {
+	name       string
+	args       []Value
+	resultType string
+}
+
+// TailCall asks the Runtime to invoke another generated local operation in the
+// same Host.Call trampoline. The compiler emits this only in tail position.
+func TailCall(name string, args []Value, resultType string) Result {
+	return Ready(tailCall{name: name, args: args, resultType: resultType})
+}
+
 func NewHost() Host {
 	return Host{ops: make(map[string]Op), effects: make(map[string]Effect)}
 }
@@ -244,14 +259,46 @@ func (h Host) Call(ctx context.Context, name string, args []Value) Result {
 	if err := ctx.Err(); err != nil {
 		return Failed(err)
 	}
-	op, ok := h.ops[name]
-	if !ok {
-		if h.python != nil {
-			return h.python.Call(ctx, name, args)
+	// Keep the caller's context stable across trampoline jumps. Wrapping the
+	// already-wrapped context on every iteration would retain an unbounded
+	// chain for a long-running tail recursion.
+	baseCtx := ctx
+	var resultType string
+	tailJump := false
+	for {
+		op, ok := h.ops[name]
+		if !ok {
+			if h.python != nil {
+				return h.python.Call(baseCtx, name, args)
+			}
+			return Failed(fmt.Errorf("unknown host operation %q", name))
 		}
-		return Failed(fmt.Errorf("unknown host operation %q", name))
+		invokeCtx := baseCtx
+		if tailJump {
+			invokeCtx = context.WithValue(baseCtx, tailCallKey{}, true)
+		}
+		result := op(invokeCtx, args)
+		if result.Future != nil || result.Err != nil {
+			return result
+		}
+		if jump, ok := result.Value.(tailCall); ok {
+			if err := baseCtx.Err(); err != nil {
+				return Failed(err)
+			}
+			if resultType == "" && jump.resultType != "" && jump.resultType != "any" {
+				resultType = jump.resultType
+			}
+			name, args = jump.name, jump.args
+			tailJump = true
+			continue
+		}
+		if resultType != "" {
+			if err := CheckType(result.Value, resultType); err != nil {
+				return Failed(fmt.Errorf("tail call result: %w", err))
+			}
+		}
+		return result
 	}
-	return op(ctx, args)
 }
 
 // NewPythonHost creates the standard Host with a generic Python fallback. Any
@@ -318,6 +365,17 @@ func Number(v Value) (float64, error) {
 		return 0, fmt.Errorf("expected a finite number, got %v", n)
 	}
 	return n, err
+}
+
+// IsIntegerNumber reports whether a finite numeric value is integral. It is
+// used by generated dynamic-programming loops that preserve the recursive
+// fallback for fractional inputs.
+func IsIntegerNumber(v Value) (bool, error) {
+	n, err := Number(v)
+	if err != nil {
+		return false, err
+	}
+	return n == math.Trunc(n), nil
 }
 
 func rawNumber(v Value) (float64, error) {
@@ -469,6 +527,9 @@ func Index(object, index Value) (Value, error) {
 	if object == nil {
 		return nil, errors.New("cannot index nil")
 	}
+	if bounds, ok := index.([]Value); ok && sliceableValue(object) {
+		return sliceIndex(object, bounds)
+	}
 	v := reflect.ValueOf(object)
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
@@ -524,6 +585,169 @@ func Index(object, index Value) (Value, error) {
 	default:
 		return nil, fmt.Errorf("cannot index %s", TypeName(object))
 	}
+}
+
+func sliceableValue(object Value) bool {
+	if object == nil {
+		return false
+	}
+	v := reflect.ValueOf(object)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	return v.Kind() == reflect.String || v.Kind() == reflect.Slice || v.Kind() == reflect.Array
+}
+
+// sliceIndex implements Python-style half-open slicing for strings and
+// lists. The parser represents an omitted bound with a null element in the
+// bounds list; an explicit scalar index continues to use the branch above.
+func sliceIndex(object Value, bounds []Value) (Value, error) {
+	if len(bounds) < 2 || len(bounds) > 3 {
+		return nil, fmt.Errorf("slice expects start:end[:step]")
+	}
+	step := 1
+	if len(bounds) == 3 && bounds[2] != nil {
+		var err error
+		step, err = integer(bounds[2])
+		if err != nil {
+			return nil, fmt.Errorf("slice step: %w", err)
+		}
+	}
+	if step == 0 {
+		return nil, errors.New("slice step cannot be zero")
+	}
+	var length int
+	var runes []rune
+	isText := false
+	if value, ok := scalarString(object); ok {
+		isText = true
+		if _, err := stringInput(value); err != nil {
+			return nil, err
+		}
+		runes, length = []rune(value), utf8.RuneCountInString(value)
+	} else {
+		v := reflect.ValueOf(object)
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return nil, errors.New("cannot slice nil pointer")
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+			return nil, fmt.Errorf("cannot slice %s", TypeName(object))
+		}
+		length = v.Len()
+	}
+	start, end, err := sliceBounds(bounds, length, step)
+	if err != nil {
+		return nil, err
+	}
+	count := sliceCount(start, end, step)
+	if isText {
+		out := make([]rune, 0, count)
+		for i := start; (step > 0 && i < end) || (step < 0 && i > end); i += step {
+			out = append(out, runes[i])
+		}
+		result := string(out)
+		if _, err := stringInput(result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	v := reflect.ValueOf(object)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if count > MaxListLength {
+		return nil, fmt.Errorf("slice result exceeds %d element slots", MaxListLength)
+	}
+	out := make([]Value, 0, count)
+	for i := start; (step > 0 && i < end) || (step < 0 && i > end); i += step {
+		out = append(out, v.Index(i).Interface())
+	}
+	if err := listSize(len(out)); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func sliceBounds(bounds []Value, length, step int) (int, int, error) {
+	if step > 0 {
+		start, end := 0, length
+		var err error
+		if bounds[0] != nil {
+			start, err = integer(bounds[0])
+			if err != nil {
+				return 0, 0, fmt.Errorf("slice start: %w", err)
+			}
+		}
+		if bounds[1] != nil {
+			end, err = integer(bounds[1])
+			if err != nil {
+				return 0, 0, fmt.Errorf("slice end: %w", err)
+			}
+		}
+		return normalizeSliceIndex(start, length, false), normalizeSliceIndex(end, length, false), nil
+	}
+	start, end := length-1, -1
+	var err error
+	if bounds[0] != nil {
+		start, err = integer(bounds[0])
+		if err != nil {
+			return 0, 0, fmt.Errorf("slice start: %w", err)
+		}
+		start = normalizeSliceIndex(start, length, true)
+	}
+	if bounds[1] != nil {
+		end, err = integer(bounds[1])
+		if err != nil {
+			return 0, 0, fmt.Errorf("slice end: %w", err)
+		}
+		end = normalizeSliceIndex(end, length, true)
+	}
+	return start, end, nil
+}
+
+func normalizeSliceIndex(index, length int, reverse bool) int {
+	if index < 0 {
+		index += length
+	}
+	if reverse {
+		if index < -1 {
+			return -1
+		}
+		if index >= length {
+			return length - 1
+		}
+		return index
+	}
+	if index < 0 {
+		return 0
+	}
+	if index > length {
+		return length
+	}
+	return index
+}
+
+func sliceCount(start, end, step int) int {
+	if step > 0 {
+		if start >= end {
+			return 0
+		}
+		return (end-start-1)/step + 1
+	}
+	if start <= end {
+		return 0
+	}
+	minInt := -int(^uint(0)>>1) - 1
+	if step == minInt {
+		return 1
+	}
+	return (start-end-1)/(-step) + 1
 }
 
 func Binary(op string, left, right Value) (value Value, err error) {

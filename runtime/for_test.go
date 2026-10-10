@@ -67,3 +67,28 @@ func TestForEachLimitsAndStops(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestForEverBreakContinueAndCancellation(t *testing.T) {
+	calls := 0
+	value, err := ForEver(context.Background(), func(context.Context) Result {
+		calls++
+		if calls < 3 {
+			return ContinueLoop()
+		}
+		return BreakLoop()
+	})
+	if err != nil || value != nil || calls != 3 {
+		t.Fatalf("infinite loop controls: value=%v err=%v calls=%d", value, err, calls)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls = 0
+	_, err = ForEver(ctx, func(context.Context) Result {
+		calls++
+		cancel()
+		return Ready(nil)
+	})
+	if !errors.Is(err, context.Canceled) || calls != 1 {
+		t.Fatalf("infinite loop cancellation: err=%v calls=%d", err, calls)
+	}
+}

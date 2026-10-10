@@ -48,9 +48,10 @@ func listInput(value Value) ([]Value, error) {
 // ListCall evaluates the fixed pure standard library. Callbacks are compiled
 // local functions, never operations looked up in a caller-supplied Host.
 func ListCall(ctx context.Context, name string, args []Value, callback Op) (result Value, err error) {
+	displayName := name
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("%s: %w", name, err)
+			err = fmt.Errorf("%s: %w", displayName, err)
 		}
 	}()
 	if err = checkContext(ctx); err != nil {
@@ -63,6 +64,9 @@ func ListCall(ctx context.Context, name string, args []Value, callback Op) (resu
 	if !ok {
 		return nil, fmt.Errorf("unknown list operation")
 	}
+	// Keep namespaced operation names canonical internally while accepting the
+	// short spellings in the compiler, REPL and direct Runtime API.
+	name = spec.Name
 	provided := len(args)
 	if spec.Callback >= 0 {
 		if callback == nil {
@@ -74,9 +78,16 @@ func ListCall(ctx context.Context, name string, args []Value, callback Op) (resu
 		return nil, argumentCountError(spec.MinArgs, spec.MaxArgs, provided)
 	}
 	for index, arg := range args {
-		if err := CheckType(arg, spec.TypeAt(index)); err != nil {
+		sourceIndex := index
+		if spec.Callback >= 0 && index >= spec.Callback {
+			sourceIndex++
+		}
+		if err := CheckType(arg, spec.TypeAt(sourceIndex)); err != nil {
 			return nil, fmt.Errorf("argument %d: %w", index+1, err)
 		}
+	}
+	if name == "list.fold" {
+		return Fold(ctx, args[0], args[1], callback)
 	}
 	switch name {
 	case "list.concat", "list.zip", "list.cartesian":
@@ -231,8 +242,18 @@ func ListCall(ctx context.Context, name string, args []Value, callback Op) (resu
 		return listTranspose(ctx, items)
 	case "list.unique", "list.group", "list.group_by", "list.split_by":
 		return listGroup(ctx, name, items, callback)
-	case "list.sort", "list.sort_by", "list.min", "list.max":
-		return listSort(ctx, name, items, callback)
+	case "list.sort", "list.sort_by", "list.sort_with", "list.min", "list.max":
+		reverse := false
+		if (name == "list.sort" || name == "list.sort_by") && len(args) == 2 {
+			reverse, err = Bool(args[1])
+			if err != nil {
+				return nil, fmt.Errorf("sort reverse: %w", err)
+			}
+		}
+		if name == "list.sort_with" {
+			return listSortWith(ctx, items, callback)
+		}
+		return listSort(ctx, name, items, callback, reverse)
 	case "list.sum", "list.product":
 		value := float64(0)
 		op := "+"
@@ -398,8 +419,8 @@ func listFlatten(ctx context.Context, items []Value, depth int) (Value, error) {
 	out := []Value{}
 	var visit func([]Value, int, int) error
 	visit = func(values []Value, remaining, nesting int) error {
-		if nesting > MaxCallDepth {
-			return fmt.Errorf("flatten nesting exceeds %d", MaxCallDepth)
+		if nesting > MaxNestingDepth {
+			return fmt.Errorf("flatten nesting exceeds %d", MaxNestingDepth)
 		}
 		for _, item := range values {
 			if err := ctx.Err(); err != nil {
@@ -600,7 +621,7 @@ func listGroup(ctx context.Context, name string, items []Value, callback Op) (Va
 	return out, nil
 }
 
-func listSort(ctx context.Context, name string, items []Value, callback Op) (Value, error) {
+func listSort(ctx context.Context, name string, items []Value, callback Op, reverse bool) (Value, error) {
 	type keyed struct {
 		item, key Value
 		number    float64
@@ -643,7 +664,13 @@ func listSort(ctx context.Context, name string, items []Value, callback Op) (Val
 			return false
 		}
 		if category == "string" {
+			if reverse {
+				return values[i].text > values[j].text
+			}
 			return values[i].text < values[j].text
+		}
+		if reverse {
+			return values[i].number > values[j].number
 		}
 		return values[i].number < values[j].number
 	})
@@ -662,6 +689,37 @@ func listSort(ctx context.Context, name string, items []Value, callback Op) (Val
 	out := make([]Value, len(values))
 	for index, entry := range values {
 		out[index] = entry.item
+	}
+	return out, nil
+}
+
+func listSortWith(ctx context.Context, items []Value, callback Op) (Value, error) {
+	if callback == nil {
+		return nil, fmt.Errorf("sort_with needs a pure callback")
+	}
+	out := append([]Value{}, items...)
+	var callbackErr error
+	sort.SliceStable(out, func(i, j int) bool {
+		if callbackErr != nil || ctx.Err() != nil {
+			return false
+		}
+		result, err := listCallback(ctx, callback, i, out[i], out[j])
+		if err != nil {
+			callbackErr = err
+			return false
+		}
+		less, err := Bool(result)
+		if err != nil {
+			callbackErr = fmt.Errorf("sort_with comparator at element %d: %w", i, err)
+			return false
+		}
+		return less
+	})
+	if callbackErr != nil {
+		return nil, callbackErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

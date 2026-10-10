@@ -74,3 +74,32 @@ func ForEach(ctx context.Context, source Value, body func(context.Context, Value
 	}
 	return nil, ctx.Err()
 }
+
+// ForEver runs an explicit `for { ... }` loop. It never materializes a
+// sentinel list: each iteration is bounded by the body, break, or Context
+// cancellation. continue starts the next iteration after the body returns.
+func ForEver(ctx context.Context, body func(context.Context) Result) (Value, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, fmt.Errorf("for has no body evaluator")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if _, err := ResolveValue(ctx, body(ctx)); err != nil {
+			if errors.Is(err, forBreak) {
+				return nil, nil
+			}
+			if errors.Is(err, forContinue) {
+				continue
+			}
+			return nil, err
+		}
+	}
+}

@@ -29,7 +29,7 @@ type catalog struct {
 
 func language() catalog {
 	c := catalog{Version: runtime.Version, Types: []string{"any", "bool", "list", "number", "object", "string", "void"},
-		Builtins: []string{"str", "len", "range", "fold", "fail", "print", "state", "retry", "feedback", "python.call", "python.getattr", "python.to_json", "python.release", "python.module_available", "python.open_blob", "python.put_blob", "python.release_blob"}}
+		Builtins: []string{"str", "len", "range", "fold", "fail", "print", "state", "retry", "feedback", "isEmpty", "isNotEmpty", "is_empty", "is_not_empty", "random", "random_list", "random_int", "random_choice", "random_shuffle", "python.call", "python.getattr", "python.to_json", "python.release", "python.module_available", "python.open_blob", "python.put_blob", "python.release_blob"}}
 	// Discover reserved words through the actual lexer rather than maintaining
 	// a second keyword list. Token spellings also supply every language operator.
 	for kind := token.Ident; kind <= token.Continue; kind++ {
@@ -52,6 +52,7 @@ func language() catalog {
 	for _, spec := range listops.All() {
 		c.Builtins = append(c.Builtins, spec.Name)
 	}
+	c.Builtins = append(c.Builtins, listops.Aliases()...)
 	for _, spec := range stringops.All() {
 		c.Builtins = append(c.Builtins, spec.Name)
 	}

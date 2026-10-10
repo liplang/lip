@@ -63,10 +63,24 @@ func operationSignature(name string) string {
 		return "str(value)"
 	case "len":
 		return "len(string_or_list_or_object)"
+	case "isEmpty", "is_empty":
+		return "isEmpty(string_or_list_or_object)"
+	case "isNotEmpty", "is_not_empty":
+		return "isNotEmpty(string_or_list_or_object)"
+	case "random":
+		return "random()"
+	case "random_list":
+		return "random_list(count)"
+	case "random_int":
+		return "random_int(end) or random_int(start, end)"
+	case "random_choice":
+		return "random_choice(list)"
+	case "random_shuffle":
+		return "random_shuffle(list)"
 	case "range":
 		return "range(end), range(start, end) or range(start, end, step)"
-	case "fold":
-		return "fold(list, seed, reducer), where reducer is a local pure function or fn(accumulator, item) { ... }"
+	case "fold", "list.fold":
+		return name + "(list, seed, reducer), where reducer is a local pure function or fn(accumulator, item) { ... }"
 	case "fail":
 		return "fail(message: string)"
 	case "state":
@@ -154,7 +168,8 @@ func spellingDistance(a, b []rune) int {
 }
 
 func operationCandidates(functions map[string]bool) []string {
-	candidates := strings.Fields("str len range fold fail print state retry feedback")
+	candidates := strings.Fields("str len range fold fail print state retry feedback isEmpty isNotEmpty is_empty is_not_empty random random_list random_int random_choice random_shuffle")
+	candidates = append(candidates, listops.Aliases()...)
 	for name := range functions {
 		candidates = append(candidates, name)
 	}

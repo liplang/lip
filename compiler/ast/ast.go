@@ -57,7 +57,9 @@ type MatchStmt struct {
 
 func (*MatchStmt) stmtNode() {}
 
-// ForStmt executes a finite list in source order without collecting results.
+// ForStmt executes a list in source order without collecting results. A nil
+// Source represents an explicit infinite loop (`for { ... }`) terminated by
+// break or context cancellation.
 type ForStmt struct {
 	Variable string
 	Source   Expr
@@ -75,14 +77,23 @@ type LoopControlStmt struct {
 
 func (*LoopControlStmt) stmtNode() {}
 
-// A nil Pattern is the wildcard _. Guards are evaluated only after the pattern
-// matches. Statement arms use Body; expression arms use Expr.
+// A nil Pattern with no Patterns or TypePatterns is the wildcard _. Guards are
+// evaluated only after any literal/type alternative matches. Statement arms
+// use Body; expression arms use Expr.
 type MatchArm struct {
-	Pattern *LiteralExpr
-	Guard   Expr
-	Body    []Stmt
-	Expr    Expr
-	Pos     token.Pos
+	// Pattern is retained as the first pattern for callers that construct the
+	// AST directly. Source code may provide several literal patterns in one arm;
+	// Patterns is then authoritative and Pattern points at Patterns[0].
+	Pattern  *LiteralExpr
+	Patterns []*LiteralExpr
+	// TypePatterns contains runtime type alternatives such as number/string.
+	// They share the same guard/result as Patterns; source order between literal
+	// and type alternatives does not affect their OR semantics.
+	TypePatterns []string
+	Guard        Expr
+	Body         []Stmt
+	Expr         Expr
+	Pos          token.Pos
 }
 
 type ReturnStmt struct {
@@ -123,7 +134,11 @@ func (*LiteralExpr) exprNode() {}
 type CallExpr struct {
 	Name string
 	Args []Expr
-	Pos  token.Pos
+	// ArgNames parallels Args; an empty entry is a positional argument.
+	// Named arguments are currently used by a small set of standard-library
+	// options, while keeping the AST ready for future APIs.
+	ArgNames []string
+	Pos      token.Pos
 	// Local distinguishes pure functions from imported Host operations with
 	// the same canonical name.
 	Local bool

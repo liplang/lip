@@ -574,7 +574,7 @@ func printLearnReference(output io.Writer, topic string) {
 	case "operators":
 		fmt.Fprintln(output, "+ - * /：加减乘除；//：向下取整；%：余数符号跟随除数；**：乘方，右结合且优先于负号；x */ y：以 y 为底的对数，与乘除同级。例：-7 // 2 = -4，-7 % 2 = 1，2 ** 3 ** 2 = 512，8 */ 2 = 3。行注释写 #。")
 	case "builtin":
-		fmt.Fprintln(output, "str(value) -> string\nlen(string|list|object) -> number\nrange(end) / range(start, end[, step]) -> list（半开区间）\nfold(list, seed, fn(acc, item)) -> any（顺序归约）\nfail(string) -> 失败\nprint(values...) -> null（外部写效果）\nstate(initial) -> any（持久实例状态，仅绑定）\nretry(operation(...), attempts) -> any（上限为正整数字面量，包含第一次调用）\nfeedback(initial, step, verify, attempts) -> any（上限为正整数字面量，有界验证与修订）")
+		fmt.Fprintln(output, "str(value) -> string\nlen(string|list|object) -> number\nisEmpty/isNotEmpty(value) -> bool\nrange(end) / range(start, end[, step]) -> list（半开区间）\nfold(list, seed, fn(acc, item)) / list.fold(...) -> any（顺序归约）\nrandom() / random_list(n) -> number / list（[0,1) 随机样本）\nrandom_int(end) / random_int(start, end) -> number\nrandom_choice(list) -> any；random_shuffle(list) -> list\nsort(xs[, reverse]) / sort_by(xs, key[, reverse]) / sort_with(xs, comparator) -> list\nfail(string) -> 失败\nprint(values...) -> null（外部写效果）\nstate(initial) -> any（持久实例状态，仅绑定）\nretry(operation(...), attempts) -> any（上限为正整数字面量，包含第一次调用）\nfeedback(initial, step, verify, attempts) -> any（上限为正整数字面量，有界验证与修订）")
 	case "list":
 		for _, spec := range listops.All() {
 			fmt.Fprintf(output, "%s(%s) -> %s", spec.Name, learnSignature(spec.Types, spec.MinArgs, spec.MaxArgs), spec.Result)

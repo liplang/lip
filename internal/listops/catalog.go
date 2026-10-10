@@ -17,7 +17,7 @@ type Spec struct {
 	MinArgs, MaxArgs int // -1 means variadic.
 	Types            []string
 	Result           string
-	Callback         int // -1 means none; otherwise the final source argument.
+	Callback         int // -1 means none; otherwise the source argument position.
 	CallbackArity    int
 	CallbackResult   string
 }
@@ -33,6 +33,13 @@ func callback(name, result string, arity int, fnResult string, types ...string) 
 	return s
 }
 
+func sortBy() Spec {
+	s := callback("sort_by", "list", 1, "any", "list")
+	s.MaxArgs = 3
+	s.Types = append(s.Types, "bool")
+	return s
+}
+
 var catalog = func() map[string]Spec {
 	entries := []Spec{
 		value("concat", "list", 0, -1, "list"),
@@ -42,12 +49,12 @@ var catalog = func() map[string]Spec {
 		value("flatten", "list", 1, 2, "list", "number"), value("transpose", "list", 1, 1, "list"), value("zip", "list", 0, -1, "list"),
 		value("enumerate", "list", 1, 1, "list"), value("riffle", "list", 2, 2, "list", "any"), value("repeat", "list", 2, 2, "any", "number"),
 		value("cartesian", "list", 0, -1, "list"), value("unique", "list", 1, 1, "list"), value("contains", "bool", 2, 2, "list", "any"),
-		value("count", "number", 2, 2, "list", "any"), value("sort", "list", 1, 1, "list"), value("group", "list", 1, 1, "list"),
+		value("count", "number", 2, 2, "list", "any"), value("sort", "list", 1, 2, "list", "bool"), value("group", "list", 1, 1, "list"),
 		value("sum", "number", 1, 1, "list"), value("product", "number", 1, 1, "list"),
 		value("min", "any", 1, 1, "list"), value("max", "any", 1, 1, "list"), value("first", "any", 1, 1, "list"), value("last", "any", 1, 1, "list"),
 		callback("map", "list", 1, "any", "list"), callback("filter", "list", 1, "bool", "list"),
-		callback("group_by", "list", 1, "any", "list"), callback("split_by", "list", 1, "any", "list"), callback("sort_by", "list", 1, "any", "list"),
-		callback("any", "bool", 1, "bool", "list"), callback("all", "bool", 1, "bool", "list"), callback("scan", "list", 2, "any", "list", "any"),
+		callback("group_by", "list", 1, "any", "list"), callback("split_by", "list", 1, "any", "list"), sortBy(), callback("sort_with", "list", 2, "bool", "list"),
+		callback("any", "bool", 1, "bool", "list"), callback("all", "bool", 1, "bool", "list"), callback("fold", "any", 2, "any", "list", "any"), callback("scan", "list", 2, "any", "list", "any"),
 	}
 	result := map[string]Spec{}
 	for _, s := range entries {
@@ -56,7 +63,24 @@ var catalog = func() map[string]Spec {
 	return result
 }()
 
-func Lookup(name string) (Spec, bool) { s, ok := catalog[name]; return s, ok }
+func Lookup(name string) (Spec, bool) {
+	if s, ok := catalog[name]; ok {
+		return s, true
+	}
+	// Keep the namespaced form canonical while allowing the short spelling in
+	// interactive use and small scripts.
+	switch name {
+	case "sort":
+		return catalog["list.sort"], true
+	case "sort_by":
+		return catalog["list.sort_by"], true
+	case "sort_with":
+		return catalog["list.sort_with"], true
+	case "fold":
+		return catalog["list.fold"], true
+	}
+	return Spec{}, false
+}
 func All() []Spec {
 	result := make([]Spec, 0, len(catalog))
 	for _, s := range catalog {
@@ -65,6 +89,10 @@ func All() []Spec {
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result
 }
+
+// Aliases are the short spellings accepted by the compiler and Runtime API.
+// Canonical list.* names remain the entries returned by All.
+func Aliases() []string { return []string{"sort", "sort_by", "sort_with"} }
 func (s Spec) TypeAt(index int) string {
 	if index < len(s.Types) {
 		return s.Types[index]

@@ -216,3 +216,114 @@ func TestDataShapesAndUnicode(t *testing.T) {
 		t.Fatal("numeric key converted to a string")
 	}
 }
+
+func TestEmptyChecksAndPythonStyleSlices(t *testing.T) {
+	for _, tc := range []struct {
+		value Value
+		empty bool
+	}{
+		{"", true}, {[]Value{}, true}, {map[string]Value{}, true},
+		{"x", false}, {[]Value{1}, false}, {map[string]Value{"x": 1}, false},
+	} {
+		got, err := IsEmpty(tc.value)
+		if err != nil || got != tc.empty {
+			t.Fatalf("isEmpty(%v) = %v, %v; want %v", tc.value, got, err, tc.empty)
+		}
+		notEmpty, err := IsNotEmpty(tc.value)
+		if err != nil || notEmpty == tc.empty {
+			t.Fatalf("isNotEmpty(%v) = %v, %v", tc.value, notEmpty, err)
+		}
+	}
+	if _, err := IsEmpty(nil); err == nil {
+		t.Fatal("isEmpty(null) should be an error")
+	}
+	values := []Value{0, 1, 2, 3, 4}
+	for _, tc := range []struct {
+		bounds []Value
+		want   []Value
+	}{
+		{[]Value{nil, nil, 2}, []Value{0, 2, 4}},
+		{[]Value{0, -1, 2}, []Value{0, 2}},
+		{[]Value{4, 0, -2}, []Value{4, 2}},
+	} {
+		got, err := Index(values, tc.bounds)
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("slice %v = %v, %v; want %v", tc.bounds, got, err, tc.want)
+		}
+	}
+	if got, err := Index("你好🌱", []Value{nil, nil, 2}); err != nil || got != "你🌱" {
+		t.Fatalf("unicode slice = %v, %v", got, err)
+	}
+	if _, err := Index(values, []Value{nil, nil, 0}); err == nil {
+		t.Fatal("zero slice step should be rejected")
+	}
+}
+
+func TestRandomCallBounds(t *testing.T) {
+	value, err := RandomCall(context.Background(), "random", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := Number(value)
+	if err != nil || n < 0 || n >= 1 {
+		t.Fatalf("random() = %v, %v", value, err)
+	}
+	value, err = RandomCall(context.Background(), "random_list", []Value{5})
+	if err != nil || len(value.([]Value)) != 5 {
+		t.Fatalf("random_list(5) = %v, %v", value, err)
+	}
+	if _, err := RandomCall(context.Background(), "random_list", []Value{-1}); err == nil {
+		t.Fatal("negative random_list count accepted")
+	}
+	for _, args := range [][]Value{{2, 2}, {3, 2}, {1.5}} {
+		if _, err := RandomCall(context.Background(), "random_int", args); err == nil {
+			t.Fatalf("random_int accepted %v", args)
+		}
+	}
+	if value, err := RandomCall(context.Background(), "random_int", []Value{5}); err != nil || value.(float64) < 0 || value.(float64) >= 5 {
+		t.Fatalf("random_int(5) = %v, %v", value, err)
+	}
+	for i := 0; i < 20; i++ {
+		value, err := RandomCall(context.Background(), "random_int", []Value{2, 5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		integerValue, err := Number(value)
+		if err != nil || integerValue < 2 || integerValue >= 5 || integerValue != math.Trunc(integerValue) {
+			t.Fatalf("random_int(2,5) = %v, %v", value, err)
+		}
+	}
+	choice, err := RandomCall(context.Background(), "random_choice", []Value{[]Value{"a"}})
+	if err != nil || choice != "a" {
+		t.Fatalf("random_choice: %v %v", choice, err)
+	}
+	if _, err := RandomCall(context.Background(), "random_choice", []Value{[]Value{}}); err == nil {
+		t.Fatal("random_choice accepted an empty list")
+	}
+	original := []Value{1, 2, 3, 4}
+	shuffled, err := RandomCall(context.Background(), "random_shuffle", []Value{original})
+	if err != nil || !sameElements(shuffled.([]Value), original) || !reflect.DeepEqual(original, []Value{1, 2, 3, 4}) {
+		t.Fatalf("random_shuffle: %v %v", shuffled, err)
+	}
+}
+
+func sameElements(left, right []Value) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	used := make([]bool, len(right))
+	for _, item := range left {
+		found := false
+		for index, candidate := range right {
+			if !used[index] && reflect.DeepEqual(item, candidate) {
+				used[index] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}

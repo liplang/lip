@@ -245,6 +245,13 @@ func resolveAliases(program *ast.Program, aliases map[string]importAlias) (*ast.
 			if !externalCall(&copy) && functions[copy.Name] {
 				copy.Local = true
 			}
+			// Disambiguate a named comparator from a bool value before generic
+			// callback traversal. Bound variables always retain their value role.
+			if !externalCall(&copy) && !copy.Local && (copy.Name == "sort" || copy.Name == "list.sort") && len(value.Args) == 2 {
+				if fn, ok := value.Args[1].(*ast.IdentExpr); ok && functions[fn.Name] && !bound[fn.Name] && (len(value.ArgNames) < 2 || value.ArgNames[1] == "") {
+					copy.Name = "list.sort_with"
+				}
+			}
 			if copy.Python && !strings.Contains(copy.Name, ".") && aliasError == nil {
 				aliasError = fmt.Errorf("%d:%d: Python module %q is not a function; call an operation inside it", value.Pos.Line, value.Pos.Column, root)
 			}

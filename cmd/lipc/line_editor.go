@@ -374,7 +374,7 @@ func (s *replSession) completions(prefix string) []string {
 		}
 		return false
 	}
-	for _, word := range strings.Fields("flow fn return match for in break continue if else import as true false null any number bool string list object void str len range fold fail print state retry feedback :help :vars :history :reset :cancel :quit :exit") {
+	for _, word := range strings.Fields("flow fn return match for in break continue if else import as true false null any number bool string list object void str len range fold fail print state retry feedback isEmpty isNotEmpty is_empty is_not_empty random random_list random_int random_choice random_shuffle :help :vars :history :reset :cancel :quit :exit") {
 		names[word] = true
 	}
 	for name := range s.values {
@@ -413,6 +413,9 @@ func (s *replSession) completions(prefix string) []string {
 		if !externalLibraryName(operation.Name) {
 			names[operation.Name] = true
 		}
+	}
+	for _, operation := range listops.Aliases() {
+		names[operation] = true
 	}
 	for _, operation := range stringops.All() {
 		if !externalLibraryName(operation.Name) {

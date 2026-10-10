@@ -79,6 +79,8 @@ func TestExecutionHintsAvoidMisleadingConversions(t *testing.T) {
 		{"logarithm base must be positive and different from 1", "different from 1", "parse_number"},
 		{"expected number, got null (null)", "handle the missing", "parse_number"},
 		{"expected bool, got number (1)", "comparison", "print"},
+		{"numeric result is not finite", "overflowed", "recursion"},
+		{"local function call depth exceeds 1024", "1024-frame fallback", "Map or fold"},
 		{"index 3 out of range", "index >= 0", "index < len" + " only"},
 		{"range step cannot be zero", "positive step", "str("},
 		{"list.sort: sort key at element 1 has type string, expected number", "all numbers or all strings", "parse_number"},

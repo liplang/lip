@@ -114,8 +114,8 @@ func diagnosticAdvice(stage string, err error) (string, []string) {
 		return advice("LIP_MATCH_ERROR", "Cover true and false for a bool, or add a final _ => arm. A guarded arm does not guarantee coverage.")
 	case has("unreachable match arm"):
 		return advice("LIP_MATCH_ERROR", "Remove the duplicate pattern or move the unguarded _ arm last. The first matching arm is selected.")
-	case has("match guard must be bool") || has("match pattern has type"):
-		return advice("LIP_TYPE_ERROR", "Match patterns against the input type and use a bool guard, e.g. _ if value > 0 => result.")
+	case has("match guard must be bool") || has("match pattern has type") || has("match type pattern"):
+		return advice("LIP_TYPE_ERROR", "Use a literal or runtime type pattern that matches the input, and keep guards bool; for other conditions, use _ if condition => result.")
 	case has("expected ,"):
 		return advice(stage, "Separate parameters, call arguments, list elements and object fields with commas; a trailing comma is allowed. Semicolons separate statements only.")
 	case has("expected else"):

@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	gotoken "go/token"
+	"math"
 	"strconv"
 	"strings"
 
@@ -237,7 +238,7 @@ func emitMapElement(comp *ast.ComprehensionExpr) (string, error) {
 }
 
 func emitResultExpr(expr ast.Expr, emitter *valueEmitter) (string, error) {
-	if call, ok := expr.(*ast.CallExpr); ok && !call.PythonAttribute && (externalCall(call) || !pureBuiltinName(call.Name)) {
+	if call, ok := expr.(*ast.CallExpr); ok && !call.PythonAttribute && (externalCall(call) || !pureBuiltinName(call.Name) && !randomBuiltinName(call.Name)) {
 		args := make([]string, len(call.Args))
 		for i, arg := range call.Args {
 			value, err := emitter.value(arg)
@@ -337,8 +338,9 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 		if spec, ok := listops.Lookup(x.Name); ok && !x.Python {
 			args := []string{}
 			reducer := "nil"
+			callbackSlot := callbackIndex(x)
 			for index, arg := range x.Args {
-				if index == spec.Callback {
+				if index == callbackSlot {
 					var err error
 					reducer, err = e.callback(arg)
 					if err != nil {
@@ -353,7 +355,11 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 				}
 			}
 			value := e.temp()
-			e.line("%s, err := runtime.ListCall(ctx, %s, []runtime.Value{%s}, %s)", value, quote(x.Name), strings.Join(args, ", "), reducer)
+			listName := spec.Name
+			if sortComparatorCall(x) {
+				listName = "list.sort_with"
+			}
+			e.line("%s, err := runtime.ListCall(ctx, %s, []runtime.Value{%s}, %s)", value, quote(listName), strings.Join(args, ", "), reducer)
 			e.line("if err != nil { return runtime.Failed(err) }")
 			return value, nil
 		}
@@ -391,6 +397,18 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 				return "", fmt.Errorf("str expects 1 argument")
 			}
 			return "runtime.StringValue(" + args[0] + ")", nil
+		}
+		if x.Name == "isEmpty" || x.Name == "isNotEmpty" || x.Name == "is_empty" || x.Name == "is_not_empty" || randomBuiltinName(x.Name) {
+			value := e.temp()
+			if randomBuiltinName(x.Name) {
+				e.line("%s, err := runtime.RandomCall(ctx, %s, []runtime.Value{%s})", value, quote(x.Name), strings.Join(args, ", "))
+			} else if x.Name == "isEmpty" || x.Name == "is_empty" {
+				e.line("%s, err := runtime.IsEmpty(%s)", value, args[0])
+			} else {
+				e.line("%s, err := runtime.IsNotEmpty(%s)", value, args[0])
+			}
+			e.line("if err != nil { return runtime.Failed(err) }")
+			return value, nil
 		}
 		if x.Name == "len" || x.Name == "range" || x.Name == "fail" {
 			value := e.temp()
@@ -561,7 +579,14 @@ func (e *valueEmitter) value(expr ast.Expr) (string, error) {
 
 func (e *valueEmitter) callback(expr ast.Expr) (string, error) {
 	if named, ok := expr.(*ast.IdentExpr); ok {
-		return "__lip_fn_" + named.Name + "(host)", nil
+		// Collection reducers invoke their Op directly. Route named local
+		// callbacks through Host.Call so a tail call at the callback's return
+		// position is consumed by the trampoline instead of escaping as an
+		// internal runtime value.
+		callback := e.temp()
+		args := e.temp()
+		e.line("%s := runtime.Op(func(ctx context.Context, %s []runtime.Value) runtime.Result { return host.Call(ctx, %s, %s) })", callback, args, quote("__lip_fn_"+named.Name), args)
+		return callback, nil
 	}
 	fn, ok := expr.(*ast.LambdaExpr)
 	if !ok {
@@ -617,22 +642,632 @@ func emitFunction(fn *ast.Function) (string, error) {
 		}
 	}
 	emitter := newValueEmitter(ident, "\t\t")
-	value, err := emitter.value(fn.Return)
-	if err != nil {
-		return "", fmt.Errorf("function %s: %w", fn.Name, err)
-	}
-	if code := emitter.code(); code != "" {
-		b.WriteString(code)
-		b.WriteString("\n")
-	}
 	resultType := fn.ReturnType
 	if resultType == "" {
 		resultType = fn.InferredReturnType
 	}
-	fmt.Fprintf(&b, "\t\tif err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }\n", value, quote(runtimeType(resultType)), fn.Name)
-	fmt.Fprintf(&b, "\t\treturn runtime.Ready(%s)\n", value)
+	if optimized, fallback, err := emitOptimizedRecursion(fn, emitter, runtimeType(resultType)); err != nil {
+		return "", fmt.Errorf("function %s: %w", fn.Name, err)
+	} else if optimized {
+		if fallback {
+			if err := emitNormalReturn(fn.Return, emitter, fn.Name, runtimeType(resultType)); err != nil {
+				return "", fmt.Errorf("function %s: %w", fn.Name, err)
+			}
+		}
+		if code := emitter.code(); code != "" {
+			b.WriteString(code)
+			b.WriteString("\n")
+		}
+		b.WriteString("\t}\n}\n")
+		return b.String(), nil
+	}
+	// A local call in return position is emitted as a runtime trampoline jump.
+	// The same helper handles if expressions so mutually recursive functions do
+	// not grow the Go stack. Non-tail expressions retain the ordinary generated
+	// value path and result validation.
+	if handled, err := emitTailReturn(fn.Return, emitter, fn.Name, runtimeType(resultType)); err != nil {
+		return "", fmt.Errorf("function %s: %w", fn.Name, err)
+	} else if !handled {
+		value, err := emitter.value(fn.Return)
+		if err != nil {
+			return "", fmt.Errorf("function %s: %w", fn.Name, err)
+		}
+		if code := emitter.code(); code != "" {
+			b.WriteString(code)
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "\t\tif err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }\n", value, quote(runtimeType(resultType)), fn.Name)
+		fmt.Fprintf(&b, "\t\treturn runtime.Ready(%s)\n", value)
+	} else if code := emitter.code(); code != "" {
+		b.WriteString(code)
+		b.WriteString("\n")
+	}
 	b.WriteString("\t}\n}\n")
 	return b.String(), nil
+}
+
+func emitNormalReturn(expr ast.Expr, emitter *valueEmitter, functionName, resultType string) error {
+	value, err := emitter.value(expr)
+	if err != nil {
+		return err
+	}
+	emitter.line("if err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }", value, quote(resultType), functionName)
+	emitter.line("return runtime.Ready(%s)", value)
+	return nil
+}
+
+type linearRecurrence struct {
+	param   string
+	condOp  string
+	bound   float64
+	combine string
+	term    ast.Expr
+	step    float64
+	base    ast.Expr
+}
+
+type branchRecurrence struct {
+	param               string
+	condOp              string
+	bound               float64
+	combine             string
+	leftDelta           int
+	rightDelta          int
+	base                ast.Expr
+	decreasing          bool
+	iterationStart      int
+	needsIterationOp    string
+	needsIterationBound float64
+}
+
+func emitOptimizedRecursion(fn *ast.Function, emitter *valueEmitter, resultType string) (bool, bool, error) {
+	recurrence, ok := matchLinearRecurrence(fn)
+	if ok {
+		if err := emitLinearRecurrence(fn, emitter, resultType, recurrence); err != nil {
+			return false, false, err
+		}
+		return true, false, nil
+	}
+	branch, ok := matchBranchRecurrence(fn)
+	if !ok {
+		return false, false, nil
+	}
+	if err := emitBranchRecurrence(fn, emitter, resultType, branch); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+func emitLinearRecurrence(fn *ast.Function, emitter *valueEmitter, resultType string, recurrence linearRecurrence) error {
+	index := -1
+	for i, name := range fn.Params {
+		if name == recurrence.param {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("recursive parameter not found")
+	}
+	arg := fmt.Sprintf("args[%d]", index)
+	// The current value is substituted for the recursive parameter in the
+	// condition, base and accumulation term. This keeps each loop iteration
+	// equivalent to one recursive frame while preserving runtime arithmetic.
+	emitter.line("recCurrent := %s", arg)
+	recIdent := func(name string) string {
+		if name == recurrence.param {
+			return "recCurrent"
+		}
+		return emitter.ident(name)
+	}
+	recEmitter := &valueEmitter{lines: emitter.lines, next: emitter.next, indent: emitter.indent, ident: recIdent}
+	base, err := recEmitter.value(recurrence.base)
+	if err != nil {
+		return err
+	}
+	emitter.line("recAccum := %s", base)
+	emitter.line("for {")
+	loop := emitter.child(emitter.indent + "\t")
+	loop.line("if err := ctx.Err(); err != nil { return runtime.Failed(err) }")
+	condition := loop.temp()
+	loop.line("%s, err := runtime.Binary(%s, recCurrent, %s)", condition, quote(recurrence.condOp), literal(recurrence.bound))
+	loop.line("if err != nil { return runtime.Failed(err) }")
+	done := loop.temp()
+	loop.line("%s, err := runtime.Bool(%s)", done, condition)
+	loop.line("if err != nil { return runtime.Failed(err) }")
+	loop.line("if %s {", done)
+	finish := loop.child(loop.indent + "\t")
+	finish.line("if err := runtime.CheckType(recAccum, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }", quote(resultType), fn.Name)
+	finish.line("return runtime.Ready(recAccum)")
+	loop.line("}")
+	term, err := recEmitterWithIndent(recEmitter, loop.indent).value(recurrence.term)
+	if err != nil {
+		return err
+	}
+	loop.line("recAccum, err = runtime.Binary(%s, recAccum, %s)", quote(recurrence.combine), term)
+	loop.line("if err != nil { return runtime.Failed(err) }")
+	loop.line("recCurrent, err = runtime.Binary(\"+\", recCurrent, %s)", literal(recurrence.step))
+	loop.line("if err != nil { return runtime.Failed(err) }")
+	emitter.line("}")
+	return nil
+}
+
+// emitBranchRecurrence lowers a small, name-independent dynamic recurrence
+// such as f(n) = f(n-1) + f(n-2) to a bounded state table. The matcher below
+// deliberately accepts only direct numeric branches, so fractional inputs and
+// shapes with unknown evaluation order use the original recursive code.
+func emitBranchRecurrence(fn *ast.Function, emitter *valueEmitter, resultType string, recurrence branchRecurrence) error {
+	index := -1
+	for i, name := range fn.Params {
+		if name == recurrence.param {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("recursive parameter not found")
+	}
+	arg := fmt.Sprintf("args[%d]", index)
+	emitter.line("branchInteger, err := runtime.IsIntegerNumber(%s)", arg)
+	emitter.line("if err != nil { return runtime.Failed(err) }")
+	emitter.line("if branchInteger {")
+	body := emitter.child(emitter.indent + "\t")
+	body.line("branchN, err := runtime.Number(%s)", arg)
+	body.line("if err != nil { return runtime.Failed(err) }")
+	body.line("if branchN %s %s && %s <= float64(runtime.MaxRangeLength) {", recurrence.needsIterationOp, goNumberLiteral(recurrence.needsIterationBound), recurrenceSizeExpression(recurrence))
+	loop := body.child(body.indent + "\t")
+	loop.line("branchValues := map[int]runtime.Value{}")
+	if recurrence.decreasing {
+		loop.line("for branchI := %d; branchI <= int(branchN); branchI++ {", recurrence.iterationStart)
+	} else {
+		loop.line("for branchI := %d; branchI >= int(branchN); branchI-- {", recurrence.iterationStart)
+	}
+	iteration := loop.child(loop.indent + "\t")
+	iteration.line("branchCurrent := runtime.Value(float64(branchI))")
+	baseCheck := iteration.temp()
+	iteration.line("%s, err := runtime.Binary(%s, branchCurrent, %s)", baseCheck, quote(recurrence.condOp), literal(recurrence.bound))
+	iteration.line("if err != nil { return runtime.Failed(err) }")
+	baseBool := iteration.temp()
+	iteration.line("%s, err := runtime.Bool(%s)", baseBool, baseCheck)
+	iteration.line("if err != nil { return runtime.Failed(err) }")
+	iteration.line("if %s {", baseBool)
+	baseEmitter := &valueEmitter{lines: iteration.lines, next: iteration.next, indent: iteration.indent + "\t", ident: func(name string) string {
+		if name == recurrence.param {
+			return "branchCurrent"
+		}
+		return emitter.ident(name)
+	}}
+	base, err := baseEmitter.value(recurrence.base)
+	if err != nil {
+		return err
+	}
+	iteration.line("branchValues[branchI] = %s", base)
+	iteration.line("continue")
+	iteration.line("}")
+	left := iteration.temp()
+	right := iteration.temp()
+	iteration.line("%s, ok := branchValues[branchI+%d]", left, recurrence.leftDelta)
+	iteration.line("if !ok { return runtime.Failed(fmt.Errorf(\"recurrence state missing at %%d\", branchI+%d)) }", recurrence.leftDelta)
+	iteration.line("%s, ok := branchValues[branchI+%d]", right, recurrence.rightDelta)
+	iteration.line("if !ok { return runtime.Failed(fmt.Errorf(\"recurrence state missing at %%d\", branchI+%d)) }", recurrence.rightDelta)
+	result := iteration.temp()
+	iteration.line("%s, err := runtime.Binary(%s, %s, %s)", result, quote(recurrence.combine), left, right)
+	iteration.line("if err != nil { return runtime.Failed(err) }")
+	iteration.line("branchValues[branchI] = %s", result)
+	loop.line("}")
+	branchResult := body.temp()
+	body.line("%s, ok := branchValues[int(branchN)]", branchResult)
+	body.line("if !ok { return runtime.Failed(fmt.Errorf(\"recurrence result missing\")) }")
+	body.line("if err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }", branchResult, quote(resultType), fn.Name)
+	body.line("return runtime.Ready(%s)", branchResult)
+	body.line("}")
+	emitter.line("}")
+	return nil
+}
+
+func goNumberLiteral(value float64) string {
+	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func recEmitterWithIndent(base *valueEmitter, indent string) *valueEmitter {
+	return &valueEmitter{lines: base.lines, next: base.next, indent: indent, ident: base.ident}
+}
+
+type boundCondition struct {
+	op    string
+	bound float64
+}
+
+func normalizedBound(expr ast.Expr, param string) (boundCondition, bool) {
+	binary, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return boundCondition{}, false
+	}
+	if left, ok := binary.Left.(*ast.IdentExpr); ok && left.Name == param {
+		if bound, ok := numericLiteral(binary.Right); ok {
+			return boundCondition{op: binary.Op, bound: bound}, binary.Op == "<=" || binary.Op == "<" || binary.Op == ">=" || binary.Op == ">"
+		}
+	}
+	if right, ok := binary.Right.(*ast.IdentExpr); ok && right.Name == param {
+		if bound, ok := numericLiteral(binary.Left); ok {
+			op := reverseComparison(binary.Op)
+			return boundCondition{op: op, bound: bound}, op == "<=" || op == "<" || op == ">=" || op == ">"
+		}
+	}
+	return boundCondition{}, false
+}
+
+func reverseComparison(op string) string {
+	switch op {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	default:
+		return op
+	}
+}
+
+func matchLinearRecurrence(fn *ast.Function) (linearRecurrence, bool) {
+	if len(fn.Params) != 1 {
+		return linearRecurrence{}, false
+	}
+	condition, ok := fn.Return.(*ast.IfExpr)
+	if !ok {
+		return linearRecurrence{}, false
+	}
+	bound, ok := normalizedBound(condition.Cond, fn.Params[0])
+	if !ok {
+		return linearRecurrence{}, false
+	}
+	stepCall := findRecursiveCall(condition.Else, fn.Name)
+	if stepCall == nil || containsCallNamed(condition.Then, fn.Name) {
+		return linearRecurrence{}, false
+	}
+	step, ok := recursiveStep(stepCall.Args[0], fn.Params[0])
+	if !ok || step == 0 || hasWrongDirection(bound.op, step) {
+		return linearRecurrence{}, false
+	}
+	combine, ok := condition.Else.(*ast.BinaryExpr)
+	if !ok || (combine.Op != "+" && combine.Op != "*") {
+		return linearRecurrence{}, false
+	}
+	var term ast.Expr
+	if containsCallNamed(combine.Left, fn.Name) {
+		leftCall, leftOK := combine.Left.(*ast.CallExpr)
+		if !leftOK || !sameRecursiveCall(leftCall, stepCall) || containsCallNamed(combine.Right, fn.Name) {
+			return linearRecurrence{}, false
+		}
+		term = combine.Right
+	} else if containsCallNamed(combine.Right, fn.Name) {
+		rightCall, rightOK := combine.Right.(*ast.CallExpr)
+		if !rightOK || !sameRecursiveCall(rightCall, stepCall) || containsCallNamed(combine.Left, fn.Name) {
+			return linearRecurrence{}, false
+		}
+		term = combine.Left
+	} else {
+		return linearRecurrence{}, false
+	}
+	if containsAnyCall(term) || containsAnyCall(condition.Then) {
+		return linearRecurrence{}, false
+	}
+	return linearRecurrence{param: fn.Params[0], condOp: bound.op, bound: bound.bound, combine: combine.Op, term: term, step: step, base: condition.Then}, true
+}
+
+func matchBranchRecurrence(fn *ast.Function) (branchRecurrence, bool) {
+	if len(fn.Params) != 1 {
+		return branchRecurrence{}, false
+	}
+	condition, ok := fn.Return.(*ast.IfExpr)
+	if !ok {
+		return branchRecurrence{}, false
+	}
+	bound, ok := normalizedBound(condition.Cond, fn.Params[0])
+	if !ok || !integerLiteral(bound.bound) || containsAnyCall(condition.Then) {
+		return branchRecurrence{}, false
+	}
+	combine, ok := condition.Else.(*ast.BinaryExpr)
+	if !ok || (combine.Op != "+" && combine.Op != "-" && combine.Op != "*" && combine.Op != "/") {
+		return branchRecurrence{}, false
+	}
+	left, lok := directRecursiveStep(combine.Left, fn.Name, fn.Params[0])
+	right, rok := directRecursiveStep(combine.Right, fn.Name, fn.Params[0])
+	if !lok || !rok || left == 0 || right == 0 || !integerLiteral(left) || !integerLiteral(right) {
+		return branchRecurrence{}, false
+	}
+	decreasing := bound.op == "<" || bound.op == "<="
+	increasing := bound.op == ">" || bound.op == ">="
+	if !decreasing && !increasing || decreasing && (left >= 0 || right >= 0) || increasing && (left <= 0 || right <= 0) {
+		return branchRecurrence{}, false
+	}
+	minStep, maxStep := left, left
+	if right < minStep {
+		minStep = right
+	}
+	if right > maxStep {
+		maxStep = right
+	}
+	if math.Abs(bound.bound) > float64(runtime.MaxRangeLength) || math.Abs(float64(minStep)) > runtime.MaxRangeLength || math.Abs(float64(maxStep)) > runtime.MaxRangeLength {
+		return branchRecurrence{}, false
+	}
+	start := 0
+	needsBound := bound.bound
+	if decreasing {
+		baseMax := int(bound.bound)
+		if bound.op == "<" {
+			baseMax--
+		}
+		start = baseMax + int(minStep)
+	} else {
+		baseMin := int(bound.bound)
+		if bound.op == ">" {
+			baseMin++
+		}
+		start = baseMin + int(maxStep) - 1
+	}
+	return branchRecurrence{
+		param:               fn.Params[0],
+		condOp:              bound.op,
+		bound:               bound.bound,
+		combine:             combine.Op,
+		leftDelta:           int(left),
+		rightDelta:          int(right),
+		base:                condition.Then,
+		decreasing:          decreasing,
+		iterationStart:      start,
+		needsIterationOp:    iterationGuardOp(bound.op),
+		needsIterationBound: needsBound,
+	}, true
+}
+
+func iterationGuardOp(conditionOp string) string {
+	switch conditionOp {
+	case "<":
+		return ">="
+	case "<=":
+		return ">"
+	case ">":
+		return "<="
+	case ">=":
+		return "<"
+	default:
+		return ">="
+	}
+}
+
+func recurrenceSizeExpression(recurrence branchRecurrence) string {
+	if recurrence.decreasing {
+		return fmt.Sprintf("branchN-float64(%d)", recurrence.iterationStart)
+	}
+	return fmt.Sprintf("float64(%d)-branchN", recurrence.iterationStart)
+}
+
+func directRecursiveStep(expr ast.Expr, name, param string) (float64, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || !call.Local || call.Name != name || len(call.Args) != 1 {
+		return 0, false
+	}
+	return recursiveStep(call.Args[0], param)
+}
+
+func integerLiteral(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value == math.Trunc(value)
+}
+
+func findRecursiveCall(expr ast.Expr, name string) *ast.CallExpr {
+	var found *ast.CallExpr
+	visitCalls(expr, func(call *ast.CallExpr) {
+		if found == nil && call.Local && call.Name == name {
+			found = call
+		}
+	})
+	return found
+}
+
+func sameRecursiveCall(a, b *ast.CallExpr) bool {
+	if a == nil || b == nil || len(a.Args) != 1 || len(b.Args) != 1 {
+		return false
+	}
+	leftA, okA := a.Args[0].(*ast.BinaryExpr)
+	leftB, okB := b.Args[0].(*ast.BinaryExpr)
+	if !okA || !okB || leftA.Op != leftB.Op {
+		return false
+	}
+	paramA, okA := leftA.Left.(*ast.IdentExpr)
+	paramB, okB := leftB.Left.(*ast.IdentExpr)
+	if !okA || !okB || paramA.Name != paramB.Name {
+		return false
+	}
+	boundA, okA := numericLiteral(leftA.Right)
+	boundB, okB := numericLiteral(leftB.Right)
+	return a.Local == b.Local && a.Name == b.Name && okA && okB && boundA == boundB
+}
+
+func recursiveStep(expr ast.Expr, param string) (float64, bool) {
+	binary, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return 0, false
+	}
+	left, ok := binary.Left.(*ast.IdentExpr)
+	if !ok || left.Name != param {
+		return 0, false
+	}
+	right, ok := numericLiteral(binary.Right)
+	if !ok {
+		return 0, false
+	}
+	if binary.Op == "-" {
+		return -right, true
+	}
+	if binary.Op == "+" {
+		return right, true
+	}
+	return 0, false
+}
+
+func numericLiteral(expr ast.Expr) (float64, bool) {
+	literal, ok := expr.(*ast.LiteralExpr)
+	if !ok {
+		return 0, false
+	}
+	value, ok := literal.Value.(float64)
+	return value, ok
+}
+
+func hasWrongDirection(op string, step float64) bool {
+	if (op == "<=" || op == "<") && step >= 0 {
+		return true
+	}
+	if (op == ">=" || op == ">") && step <= 0 {
+		return true
+	}
+	return false
+}
+
+func containsCallNamed(expr ast.Expr, name string) bool {
+	found := false
+	visitCalls(expr, func(call *ast.CallExpr) {
+		if call.Local && call.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func containsAnyCall(expr ast.Expr) bool {
+	found := false
+	visitCalls(expr, func(*ast.CallExpr) { found = true })
+	return found
+}
+
+// emitTailReturn emits a return expression directly when every possible
+// branch ends in a local call in tail position. It returns handled=true when
+// it wrote all returns. Branches that are not tail calls still return through
+// the normal runtime type check, preserving the function's error semantics.
+func emitTailReturn(expr ast.Expr, emitter *valueEmitter, functionName, resultType string) (bool, error) {
+	switch x := expr.(type) {
+	case *ast.CallExpr:
+		if !x.Local {
+			return false, nil
+		}
+		args := make([]string, len(x.Args))
+		for i, arg := range x.Args {
+			value, err := emitter.value(arg)
+			if err != nil {
+				return false, err
+			}
+			args[i] = value
+		}
+		emitter.line("return runtime.TailCall(%s, []runtime.Value{%s}, %s)", quote(dispatchName(x)), strings.Join(args, ", "), quote(resultType))
+		return true, nil
+	case *ast.IfExpr:
+		cond, err := emitter.value(x.Cond)
+		if err != nil {
+			return false, err
+		}
+		condition := emitter.temp()
+		emitter.line("%s, err := runtime.Bool(%s)", condition, cond)
+		emitter.line("if err != nil { return runtime.Failed(err) }")
+		emitter.line("if %s {", condition)
+		thenEmitter := emitter.child(emitter.indent + "\t")
+		thenHandled, err := emitTailBranch(x.Then, thenEmitter, functionName, resultType)
+		if err != nil {
+			return false, err
+		}
+		emitter.line("} else {")
+		elseEmitter := emitter.child(emitter.indent + "\t")
+		elseHandled, err := emitTailBranch(x.Else, elseEmitter, functionName, resultType)
+		if err != nil {
+			return false, err
+		}
+		emitter.line("}")
+		return thenHandled || elseHandled, nil
+	case *ast.MatchExpr:
+		return emitTailMatchReturn(x, emitter, functionName, resultType)
+	default:
+		return false, nil
+	}
+}
+
+func emitTailMatchReturn(expr *ast.MatchExpr, emitter *valueEmitter, functionName, resultType string) (bool, error) {
+	scrutinee, err := emitter.value(expr.Value)
+	if err != nil {
+		return false, err
+	}
+	emitter.line("_ = %s", scrutinee)
+	matched := emitter.temp()
+	emitter.line("%s := false", matched)
+	for _, arm := range expr.Arms {
+		emitter.line("if !%s {", matched)
+		branch := emitter.child(emitter.indent + "\t")
+		patterns := matchPatterns(arm)
+		typePatterns := matchTypePatterns(arm)
+		if len(patterns) > 0 || len(typePatterns) > 0 {
+			patternMatched := branch.temp()
+			branch.line("%s := false", patternMatched)
+			for _, pattern := range patterns {
+				comparison := branch.temp()
+				branch.line("%s, err := runtime.Binary(\"==\", %s, %s)", comparison, scrutinee, literal(pattern.Value))
+				branch.line("if err != nil { return runtime.Failed(err) }")
+				condition := branch.temp()
+				branch.line("%s, err := runtime.Bool(%s)", condition, comparison)
+				branch.line("if err != nil { return runtime.Failed(err) }")
+				branch.line("if %s { %s = true }", condition, patternMatched)
+			}
+			for _, patternType := range typePatterns {
+				condition := branch.temp()
+				branch.line("%s := runtime.IsType(%s, %s)", condition, scrutinee, quote(patternType))
+				branch.line("if %s { %s = true }", condition, patternMatched)
+			}
+			branch.line("if %s {", patternMatched)
+			branch = branch.child(branch.indent + "\t")
+		}
+		if arm.Guard != nil {
+			guard, err := branch.value(arm.Guard)
+			if err != nil {
+				return false, err
+			}
+			condition := branch.temp()
+			branch.line("%s, err := runtime.Bool(%s)", condition, guard)
+			branch.line("if err != nil { return runtime.Failed(err) }")
+			branch.line("if %s {", condition)
+			branch = branch.child(branch.indent + "\t")
+		}
+		branch.line("%s = true", matched)
+		if _, err := emitTailBranch(arm.Expr, branch, functionName, resultType); err != nil {
+			return false, err
+		}
+		if arm.Guard != nil {
+			emitter.line("}")
+		}
+		if len(patterns) > 0 || len(typePatterns) > 0 {
+			emitter.line("}")
+		}
+		emitter.line("}")
+	}
+	emitter.line("if !%s { return runtime.Failed(fmt.Errorf(\"non-exhaustive match\")) }", matched)
+	// Go cannot prove that every arm above returns after the generated guards;
+	// this fallback is unreachable for a validated exhaustive match but keeps
+	// the generated function total if malformed data reaches it.
+	emitter.line("return runtime.Failed(fmt.Errorf(\"non-exhaustive match\"))")
+	return true, nil
+}
+
+func emitTailBranch(expr ast.Expr, emitter *valueEmitter, functionName, resultType string) (bool, error) {
+	if handled, err := emitTailReturn(expr, emitter, functionName, resultType); handled || err != nil {
+		return handled, err
+	}
+	value, err := emitter.value(expr)
+	if err != nil {
+		return false, err
+	}
+	emitter.line("if err := runtime.CheckType(%s, %s); err != nil { return runtime.Failed(fmt.Errorf(\"function %s result: %%w\", err)) }", value, quote(resultType), functionName)
+	emitter.line("return runtime.Ready(%s)", value)
+	return true, nil
 }
 
 func visitCalls(expr ast.Expr, visit func(*ast.CallExpr)) {
@@ -771,6 +1406,15 @@ func runtimeType(typ string) string {
 }
 
 func generatedEffect(expr ast.Expr, functions []*ast.Function) string {
+	random := false
+	visitCalls(expr, func(call *ast.CallExpr) {
+		if !externalCall(call) && randomBuiltinName(call.Name) {
+			random = true
+		}
+	})
+	if random {
+		return "runtime.EffectExternalWrite"
+	}
 	operations := effectOperations(expr, functions)
 	if len(operations) == 0 {
 		return "runtime.EffectPure"

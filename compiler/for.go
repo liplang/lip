@@ -16,25 +16,28 @@ type ForNode struct {
 }
 
 func (b *builder) forStmt(stmt *ast.ForStmt, gates []string) error {
-	if reservedName(stmt.Variable) {
+	if stmt.Variable != "" && reservedName(stmt.Variable) {
 		return b.err(stmt.Pos, "identifier %q is reserved for generated graph nodes", stmt.Variable)
 	}
-	if err := b.validateCalls(stmt.Source, true); err != nil {
-		return b.wrapError(stmt.Pos, err)
-	}
-	if err := validateSimpleExpr(stmt.Source); err != nil {
-		return b.wrapError(stmt.Pos, err)
-	}
-	refs := refsOf(stmt.Source)
-	if err := b.checkRefs(refs, stmt.Pos); err != nil {
-		return err
-	}
-	typ, err := inferExprType(stmt.Source, b.types, b.fnTypes, b.fnParams)
-	if err != nil {
-		return b.wrapError(stmt.Pos, err)
-	}
-	if !compatibleType("list", typ) {
-		return b.err(stmt.Pos, "for source must be a list, got %s", typ)
+	var refs []string
+	if stmt.Source != nil {
+		if err := b.validateCalls(stmt.Source, true); err != nil {
+			return b.wrapError(stmt.Pos, err)
+		}
+		if err := validateSimpleExpr(stmt.Source); err != nil {
+			return b.wrapError(stmt.Pos, err)
+		}
+		refs = refsOf(stmt.Source)
+		if err := b.checkRefs(refs, stmt.Pos); err != nil {
+			return err
+		}
+		typ, err := inferExprType(stmt.Source, b.types, b.fnTypes, b.fnParams)
+		if err != nil {
+			return b.wrapError(stmt.Pos, err)
+		}
+		if !compatibleType("list", typ) {
+			return b.err(stmt.Pos, "for source must be a list, got %s", typ)
+		}
 	}
 	body := &Graph{Flow: b.graph.Flow, ReturnType: "void", ParamTypes: map[string]string{}, Dependencies: b.graph.Dependencies, Functions: b.graph.Functions}
 	inner := builder{
@@ -43,10 +46,12 @@ func (b *builder) forStmt(stmt *ast.ForStmt, gates []string) error {
 		fnTypes: b.fnTypes, fnParams: b.fnParams, functionNames: b.functionNames, aliases: b.aliases,
 		allowNestedExternalCalls: b.allowNestedExternalCalls,
 	}
-	inner.known[stmt.Variable], inner.allNames[stmt.Variable] = true, true
-	inner.types[stmt.Variable] = "any"
-	if call, ok := stmt.Source.(*ast.CallExpr); ok && call.Name == "range" && !externalCall(call) {
-		inner.types[stmt.Variable] = "number"
+	if stmt.Variable != "" {
+		inner.known[stmt.Variable], inner.allNames[stmt.Variable] = true, true
+		inner.types[stmt.Variable] = "any"
+		if call, ok := stmt.Source.(*ast.CallExpr); ok && call.Name == "range" && !externalCall(call) {
+			inner.types[stmt.Variable] = "number"
+		}
 	}
 	if err := inner.stmts(stmt.Body, nil); err != nil {
 		return err
@@ -76,11 +81,17 @@ func (b *builder) forStmt(stmt *ast.ForStmt, gates []string) error {
 		body.ParamTypes[name] = b.types[name]
 		deps = append(deps, captures[name])
 	}
-	body.Params = append(body.Params, stmt.Variable)
-	body.ParamTypes[stmt.Variable] = inner.types[stmt.Variable]
+	if stmt.Variable != "" {
+		body.Params = append(body.Params, stmt.Variable)
+		body.ParamTypes[stmt.Variable] = inner.types[stmt.Variable]
+	}
 	name := fmt.Sprintf("__for_%d", b.forID)
 	b.forID++
-	b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Expr: b.graphExpr(stmt.Source), Deps: unique(deps), Gates: unique(gates), Type: "void", Pos: stmt.Pos, For: &ForNode{Variable: stmt.Variable, Body: body, Captures: captures}})
+	var source ast.Expr
+	if stmt.Source != nil {
+		source = b.graphExpr(stmt.Source)
+	}
+	b.graph.Nodes = append(b.graph.Nodes, Node{Name: name, Expr: source, Deps: unique(deps), Gates: unique(gates), Type: "void", Pos: stmt.Pos, For: &ForNode{Variable: stmt.Variable, Body: body, Captures: captures}})
 	for local := range inner.allNames {
 		b.allNames[local] = true
 	}

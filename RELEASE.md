@@ -1,8 +1,8 @@
-# 0.6.3 本地发布验收清单
+# 0.6.4 本地发布验收清单
 
 当前契约：[ALPHA-0.6-SPEC.md](docs/ALPHA-0.6-SPEC.md) 与其规范组成部分
 [LIST-LIBRARY.md](docs/LIST-LIBRARY.md) 与 [STRING-LIBRARY.md](docs/STRING-LIBRARY.md)。
-参考实现版本为 `0.6.3`，变更见 [CHANGELOG.md](CHANGELOG.md#063--dependency-lifetimes-and-release-consistency)。
+参考实现版本为 `0.6.4`，变更见 [CHANGELOG.md](CHANGELOG.md#064--consistent-collection-apis-and-bounded-infinite-loops)。
 这是本地实现与验收记录。源码包、工具包和 SHA-256 清单由本地打包脚本生成；
 远程发布与 Git 版本标签是独立操作，尚未执行。
 
@@ -24,7 +24,7 @@ bash scripts/verify-release.sh
 
 自动一致性检查覆盖：
 
-- VERSION、Runtime、CLI、生成文件版本与全部当前文档；0.6.3 规范、README、教程和课程使用现行规则。
+- VERSION、Runtime、CLI、生成文件版本与全部当前文档；0.6.4 规范、README、教程和课程使用现行规则。
 - 全部文档 LIP 代码块的检查与生成格式；表达式和练习模板使用明确的包装规则。
 - 预期失败代码及其真实诊断 JSON；标准库目录、课程编号/ID 和本地链接。
 - 47 个文档 LIP 代码块、19 处标注源码与 `.lip` 文件核对；全部 12 份生成示例与当前编译器逐字核对。
@@ -44,8 +44,8 @@ python3 scripts/package-release.py
 python3 scripts/verify-package.py
 ```
 
-产物位于 `dist/`：`lip-0.6.3-source.tar.gz`、当前平台工具包、
-`lip-0.6.3-manifest.json` 和 `lip-0.6.3-SHA256SUMS`。工具包内含编译器、课程、
+产物位于 `dist/`：`lip-0.6.4-source.tar.gz`、当前平台工具包、
+`lip-0.6.4-manifest.json` 和 `lip-0.6.4-SHA256SUMS`。工具包内含编译器、课程、
 Runtime、规范、示例与三套编辑器插件，安装见 [EDITORS.md](docs/EDITORS.md)；
 源码包含实现、测试和验证脚本。manifest 记录源码与产物
 SHA-256、Go 工具链和目标平台；验证脚本检查完整性并在仓库外离线 run/build。
@@ -64,7 +64,7 @@ zip 使用固定的 1980 时间戳。工具包不包含 Git、个人配置、缓
 `check/inspect` 无需 Go；`run/build/repl/learn` 的代码执行需要 Go；构建好的
 核心程序独立运行。Host/Go 适配器需在宿主注册，Python 能力另需对应环境。
 
-## 0.6.3 验收（2026-10-09）
+## 0.6.4 验收（2026-10-09）
 
 - [x] 完整 verify-release.sh：tests/race/vet/build、安装模拟与 56 份 LIP 源程序的 check/生成/build/vet。
 - [x] 值生命周期、异步/跳过/别名/失败/取消、State/纯缓存与生成组合的回归和 race 检查。
@@ -83,7 +83,7 @@ zip 使用固定的 1980 时间戳。工具包不包含 Git、个人配置、缓
 - [x] 文档、规范、课程、版本与 12 份生成文件的自动同步检查通过。
 - [x] match、八种算术、for/break/continue、三种 import/as、词法遮蔽、可空边界、外部表达式效果、State/Retry/Feedback 通过回归。
 - [x] REPL 和 learn 的编辑、历史、补全、粘贴、失败恢复、课程进度和导出通过回归。
-- [x] 34 个 list 与 19 个 string 操作、纯递归、Host/Python 及 blob/句柄边界通过回归。
+- [x] 36 个 list 与 19 个 string 操作、纯递归、Host/Python 及 blob/句柄边界通过回归。
 - [ ] 在发布仓库创建并核对版本标签与发布产物（独立发布操作）。
 
 ## 先前验收记录

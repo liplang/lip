@@ -9,9 +9,18 @@ import (
 )
 
 const MaxRangeLength = 1_000_000
-const MaxCallDepth = 256
+
+// MaxCallDepth is the safety bound for recursive local calls that the
+// compiler cannot lower to an iterative loop. It is separate from the
+// nesting limit used by recursive data walkers such as flatten.
+const MaxCallDepth = 1024
+
+// MaxNestingDepth protects recursive data walkers from cyclic or adversarial
+// native values. It is not a limit on user function recursion.
+const MaxNestingDepth = 256
 
 type callDepthKey struct{}
+type tailCallKey struct{}
 
 // EnterFunction gives each call its own depth while preserving cancellation.
 // Context state is scoped to a call, so sibling calls and Map workers do not
@@ -22,6 +31,12 @@ func EnterFunction(ctx context.Context) (context.Context, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// Host.Call uses this marker while jumping between tail-recursive local
+	// functions. Consume it here so ordinary nested calls in the target still
+	// receive their normal depth accounting.
+	if tail, _ := ctx.Value(tailCallKey{}).(bool); tail {
+		return context.WithValue(ctx, tailCallKey{}, false), nil
 	}
 	depth, _ := ctx.Value(callDepthKey{}).(int)
 	if depth >= MaxCallDepth {
@@ -44,6 +59,36 @@ func Length(value Value) (Value, error) {
 		}
 	}
 	return nil, fmt.Errorf("len expects string, list or object, got %s", TypeName(value))
+}
+
+// IsEmpty reports whether a string, list or object has no elements. Null and
+// other scalar values are errors so callers cannot accidentally confuse a
+// missing value with an empty collection.
+func IsEmpty(value Value) (bool, error) {
+	if value == nil {
+		return false, fmt.Errorf("isEmpty expects string, list or object, got null")
+	}
+	if text, ok := scalarString(value); ok {
+		if _, err := stringInput(text); err != nil {
+			return false, err
+		}
+		return utf8.RuneCountInString(text) == 0, nil
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Array, reflect.Slice:
+		return v.Len() == 0, nil
+	case reflect.Map:
+		if v.Type().Key().Kind() == reflect.String {
+			return v.Len() == 0, nil
+		}
+	}
+	return false, fmt.Errorf("isEmpty expects string, list or object, got %s", TypeName(value))
+}
+
+func IsNotEmpty(value Value) (bool, error) {
+	empty, err := IsEmpty(value)
+	return !empty, err
 }
 
 // Range materializes a finite half-open interval; there is no iterator state.

@@ -48,17 +48,17 @@ class ReleaseTests(unittest.TestCase):
             entries = [("lipc", b"binary", 0o755), ("docs/\u89c4\u8303.md", "你好".encode(), 0o644)]
             for extension in [".tar.gz", ".zip"]:
                 a, b = root / ("a" + extension), root / ("b" + extension)
-                package.write_archive(a, "lip-0.6.3", entries, 0)
-                package.write_archive(b, "lip-0.6.3", entries, 0)
+                package.write_archive(a, "lip-0.6.4", entries, 0)
+                package.write_archive(b, "lip-0.6.4", entries, 0)
                 self.assertEqual(a.read_bytes(), b.read_bytes())
                 if extension == ".zip":
                     with zipfile.ZipFile(a) as archive:
-                        self.assertEqual(archive.read("lip-0.6.3/lipc"), b"binary")
-                        self.assertEqual(archive.getinfo("lip-0.6.3/lipc").external_attr >> 16 & 0o777, 0o755)
+                        self.assertEqual(archive.read("lip-0.6.4/lipc"), b"binary")
+                        self.assertEqual(archive.getinfo("lip-0.6.4/lipc").external_attr >> 16 & 0o777, 0o755)
                 else:
                     with tarfile.open(a) as archive:
-                        self.assertEqual(archive.extractfile("lip-0.6.3/lipc").read(), b"binary")
-                        self.assertEqual(archive.getmember("lip-0.6.3/lipc").mode, 0o755)
+                        self.assertEqual(archive.extractfile("lip-0.6.4/lipc").read(), b"binary")
+                        self.assertEqual(archive.getmember("lip-0.6.4/lipc").mode, 0o755)
 
 
 if __name__ == "__main__":

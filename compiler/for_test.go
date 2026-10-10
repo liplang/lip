@@ -13,6 +13,7 @@ func TestForContracts(t *testing.T) {
 	for _, source := range []string{
 		`for i in range(4) { doubled = i * 2; print(doubled) }`,
 		`for i in [] {}`,
+		`flow Forever() { for { break }; print("done") }`,
 		`flow Each(values: list) -> number { for x in values { print(x) }; return 7 }`,
 		`for i in [true, false] { match i { true => { continue }, _ => { break } } }`,
 		`for i in range(3) { for j in range(i) { print(j); break }; print(i) }`,
@@ -52,6 +53,7 @@ func TestForContracts(t *testing.T) {
 		{`for i in [] { match true { true => { break }, false => { continue } }; print(i) }`, "statements after"},
 		{`fn each() { for i in [] {} }; print(each())`, "only allowed in Flow"},
 		{`for i in range(2) { undeclared(i) }`, "not declared"},
+		{`for i in 1: { break }`, "unbounded range"},
 	} {
 		if _, err := ParseAndBuild(tc.source); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: got %v, want %s", tc.source, err, tc.want)
