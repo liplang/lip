@@ -1,4 +1,4 @@
--- Native editing support for LIP 0.6.3, Neovim 0.10+.
+-- Native editing support for LIP 0.6.4, Neovim 0.10+.
 local M = {}
 local catalog = require('lip.catalog')
 local options = { compiler = 'lipc', indent_width = 4, check_on_save = false }

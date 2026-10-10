@@ -1,4 +1,4 @@
-# LIP 0.6.3 值的计算生命周期与 Go GC
+# LIP 0.6.4 值的计算生命周期与 Go GC
 
 LIP 负责判断计算是否还会使用一个值，Go GC 负责判断对象是否仍可达并回收内存。
 编译器生成的图默认在最后一个声明的消费者完成或跳过后，删除执行值表中的引用。
@@ -67,6 +67,12 @@ g := runtime.NewGraphWithOptions(runtime.GraphOptions{ReleaseIntermediates: true
 每次执行复制整数计数，每条消费边完成时减一。并行值快照的大小与本节点依赖数相关。
 实现不递归扫描对象大小，也不主动调用 Go GC。收益主要来自较大对象、长时间执行与
 无关慢任务；标量本身没有可回收的底层对象。
+
+因此没有采用“底层对象超过 1 MiB 才置 nil”的运行时分支。Go 的 `interface{}` 无法
+便宜而准确地给出任意 list、map、string 的递归占用：slice/map/string 的头部大小与
+backing array、共享子对象和句柄生命周期分开计算，估算本身会遍历数据并增加锁与分支。
+按最后消费者释放引用只维护静态整数计数，成本稳定，也能及时释放小而大量的中间对象；
+真正的文件、连接、Python handle 等资源仍由 adapter 的 Close/release 契约管理。
 
 复现命令：
 

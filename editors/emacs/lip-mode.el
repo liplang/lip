@@ -1,4 +1,4 @@
-;;; lip-mode.el --- Native editing support for LIP 0.6.3 -*- lexical-binding: t; -*-
+;;; lip-mode.el --- Native editing support for LIP 0.6.4 -*- lexical-binding: t; -*-
 
 ;; Requires Emacs 27.1+; Flymake, JSON and imenu are built in.
 ;;; Commentary:

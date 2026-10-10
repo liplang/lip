@@ -1,4 +1,4 @@
-# LIP 0.6.3 编辑器支持
+# LIP 0.6.4 编辑器支持
 
 发行包的 `editors/` 提供三套原生插件：Neovim 使用 Lua（0.10+），Vim 使用
 Vim9script（Vim 9.0+，需带 `+vim9script`），Emacs 使用 Elisp（27.1+）。

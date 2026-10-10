@@ -1,4 +1,4 @@
-# 用 `lipc learn` 交互学习 LIP 0.6.3
+# 用 `lipc learn` 交互学习 LIP 0.6.4
 
 `lipc learn` 内置 26 节中文课程。每节按讲解、示例、代码练习和验证展开，覆盖
 15 个关键字、程序组织、纯计算、list/string 标准库、Runtime 与外部集成。
@@ -124,7 +124,7 @@ State 课的一次提交则会在同一个持久实例里连续运行多个 Tick
 :reference string
 ```
 
-标准库速查直接读取编译器和 Runtime 共用的签名目录，列出全部 34 个 list
+标准库速查直接读取编译器和 Runtime 共用的签名目录，列出全部 36 个 list
 操作与 19 个 string 操作，包括可选参数和回调契约。两套库无需 import。
 完整语义和边界规则见[列表库](LIST-LIBRARY.md)与[字符串库](STRING-LIBRARY.md)。
 

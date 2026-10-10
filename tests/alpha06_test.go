@@ -48,9 +48,12 @@ func TestAlpha06LibraryComposition(t *testing.T) {
 	source := `
 fn add(a: number, b: number) -> number { return a+b }
 fn fact(n: number) -> number { return if n<=1 { 1 } else { n*fact(n-1) } }
+fn sum_to(n: number) -> number { return if n<=0 { 0 } else { n+sum_to(n-1) } }
+fn fib(n: number) -> number { return if n<2 { n } else { fib(n-1)+fib(n-2) } }
+fn down(n: number) -> number { return match n { 0 => 0, _ => down(n-1) } }
 fn even(n: number) -> bool { return if n==0 { true } else { odd(n-1) } }
 fn odd(n: number) -> bool { return if n==0 { false } else { even(n-1) } }
-fn forever(n: number) -> number { return forever(n) }
+fn forever(n: number) -> number { return 1 + forever(n) }
 fn compose(values: list) -> number { return fold(values, 0, add) }
 flow Core(values: list, recurse: bool) -> object {
  seed = state(0)
@@ -58,7 +61,7 @@ flow Core(values: list, recurse: bool) -> object {
  squares = [x*x for x in numbers]
  result = if recurse { forever(0) } else { compose(values)+seed }
  facts = [fact(x) for x in numbers]
- return {sum: result, squares: squares, facts: facts, even: even(4), unicode: "你好🌱"[2], missing: null}
+ return {sum: result, sum_large: sum_to(10000), down: down(10000), fib: fib(20), fib_large: fib(1120), squares: squares, facts: facts, even: even(10000), unicode: "你好🌱"[2], missing: null}
 }`
 	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, source, false))
 	writeTestFile(t, filepath.Join(dir, "flow_test.go"), `package main
@@ -68,12 +71,12 @@ func TestComposition(t *testing.T){
  // Core builtins and reducers have fixed meaning, including inside local fn.
  for _,name:=range []string{"len","range","fold","str","add"}{host.Register(name,func(context.Context,[]runtime.Value)runtime.Result{return runtime.Failed(errors.New("host override invoked"))})}
  inputs:=map[string]runtime.Value{"values":[]int{1,2,3},"recurse":false}
- want:=map[string]runtime.Value{"sum":float64(6),"squares":[]runtime.Value{float64(0),float64(1),float64(4)},"facts":[]runtime.Value{float64(1),float64(1),float64(2)},"even":true,"unicode":"🌱","missing":nil}
+ want:=map[string]runtime.Value{"sum":float64(6),"sum_large":float64(50005000),"down":float64(0),"fib":float64(6765),"fib_large":5.208013218024404e+233,"squares":[]runtime.Value{float64(0),float64(1),float64(4)},"facts":[]runtime.Value{float64(1),float64(1),float64(2)},"even":true,"unicode":"🌱","missing":nil}
  for _,run:=range []func(context.Context,runtime.Host,map[string]runtime.Value)(runtime.Value,[]runtime.TraceEvent,error){Run,RunSequential,func(c context.Context,h runtime.Host,v map[string]runtime.Value)(runtime.Value,[]runtime.TraceEvent,error){return RunParallel(c,h,v,2)}} {
   got,_,err:=run(context.Background(),host,inputs);if err!=nil||!reflect.DeepEqual(got,want){t.Fatalf("value=%v err=%v",got,err)}
   ctx,cancel:=context.WithCancel(context.Background());cancel();if _,_,err:=run(ctx,host,inputs);!errors.Is(err,context.Canceled){t.Fatal(err)}
   if _,_,err:=run(context.Background(),host,map[string]runtime.Value{"values":[]runtime.Value{1,"bad"},"recurse":false});err==nil||!strings.Contains(err.Error(),"fold element 1"){t.Fatalf("dynamic fold: %v",err)}
-  if _,_,err:=run(context.Background(),host,map[string]runtime.Value{"values":[]int{},"recurse":true});err==nil||!strings.Contains(err.Error(),"call depth exceeds 256"){t.Fatalf("recursion bound: %v",err)}
+  if _,_,err:=run(context.Background(),host,map[string]runtime.Value{"values":[]int{},"recurse":true});err==nil||!strings.Contains(err.Error(),"call depth exceeds 1024"){t.Fatalf("recursion bound: %v",err)}
  }
  instance,err:=NewInstance(host,inputs);if err!=nil{t.Fatal(err)}
  if _,_,err:=instance.Tick(context.Background(),nil);err!=nil{t.Fatal(err)}

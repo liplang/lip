@@ -1,4 +1,4 @@
-# LIP Alpha 0.6.3：从第一个 Flow 到可验证的数据程序
+# LIP Alpha 0.6.4：从第一个 Flow 到可验证的数据程序
 
 按“先运行、理解数据、组合操作、观察执行、接入外部能力”的顺序学习。
 前 11 节足够编写独立的文本与列表程序；后面讲 Go Host、State、策略和 Python。
@@ -23,7 +23,7 @@ go install ./cmd/lipc
 
 ```bash
 lipc version
-# 0.6.3
+# 0.6.4
 ```
 
 安装后的 `run/build` 也可在自己的项目目录使用，编译器内置 Runtime，无需保留
@@ -365,8 +365,10 @@ lipc run examples/tutorial/05_range.lip 0
 ```
 
 range(4) 与 range(0,4) 都是 0、1、2、3，不含终点。Map 每项求平方；fold 从 seed=0 起，
-依次加 0、1、4、9，得 14。scan 保存初值及每步结果，所以两个开头的 0
-分别是 seed 与处理首项后的值。空 fold 返回 seed，空 scan 返回 [seed]。
+依次加 0、1、4、9，得 14。`fold` 只回答“最后累计值是多少”；`list.scan` 保存初值
+和每一步结果，所以两个开头的 0 分别是 seed 与处理首项后的值。空 fold 返回 seed，
+空 scan 返回 [seed]。如果喜欢把所有列表操作放在同一个命名空间，也可写
+`list.fold(squares, 0, add)`，两种写法完全相同。
 
 range(5,0,-2) 是 [5,3,1]；方向不匹配为空。0 步长、小数和超量报错；
 参数使用绝对值≤2^53−1 的可精确整数，最多生成 1,000,000 项。
@@ -402,9 +404,13 @@ flow Each(stop: number) {
 `lipc run examples/for.lip 8` 依次打印 `0 0`、`1 1`、`3 9`、`4 16`、`done`。
 continue 跳过当前项的剩余操作，break 结束最近一层循环；两者都可放在 match 分支中。
 嵌套循环的 break/continue 只影响内层。source 求值一次，逐项等待整个循环体完成，
-取消或错误停止后续操作，空列表不执行体内语句。for 不收集结果，可直接写在顶层或 REPL。
+宿主取消运行上下文（CLI 的 Ctrl-C/超时，或 Go 的 `context`）或体内普通错误会停止后续操作，
+空列表不执行体内语句。for 不收集结果，可直接写在顶层或 REPL。
 每次迭代的绑定独立，循环变量遮蔽同名外层值，体内变量不能逃出；变量仍不可重新赋值。
-循环体不使用 return/state，返回写在循环之后；列表转换继续用推导式，累加用 fold。
+如果确实需要持续运行，写无变量的 `for { ... }`；它不创建 `range` 列表，也不偷偷维护
+一个会溢出的索引，直到 `break`、宿主取消运行上下文或普通错误才结束。循环体不使用 return/state，
+返回写在循环之后；列表转换继续用推导式，累加用 fold。需要序号时应让 Host 提供有界
+批次或事件编号，而不是依靠无限浮点数递增。
 
 ## 7. 查询、筛选、排序、去重
 
@@ -439,8 +445,10 @@ lipc run examples/tutorial/06_lists.lip '[3,0,-1,3,2]'
 ```
 
 filter 保留原元素，map 才变换。unique 保留首次出现顺序；再 sort 得升序。
-sort 只接全数字或全字符串列表，不混合比较。sort_by 用 fn 提取同类键，
-稳定排序，相同键保留原顺序。
+`sort`/`list.sort` 按元素本身排序，`sort_by` 按一元 key fn 排序，`sort_with` 接收二元
+比较器；三者都稳定。交互式代码可省略 `list.` 写 `sort_by(values, key)` 或
+`sort_with(values, fn(a,b) { a <= b })`。`sort` 和 `sort_by` 都接受末尾的
+`reverse=true`；比较器场景直接在 comparator 中决定顺序。
 
 any 在首个 true 停止，all 在首个 false 停止；predicate 返回 bool。
 空列表 any=false、all=true，表示没有反例。sum/product 空输入为 0/1，
@@ -452,7 +460,7 @@ list.take([1,2,3],-2) 为 [2,3]。超长截断。append/prepend 添加项，conc
 
 再用 [] 和 [1,"bad"] 运行本例：空列表正常，后者在 positive 的参数检查失败。
 list 只检查外层，不意味着元素都是数字。列表库不修改输入，输出容器新建，
-嵌套值共享但视为只读。34 项操作及边界见 [LIST-LIBRARY.md](LIST-LIBRARY.md)。
+嵌套值共享但视为只读。36 项操作及边界见 [LIST-LIBRARY.md](LIST-LIBRARY.md)。
 
 ## 8. 改变形状：窗口、转置、zip、笛卡尔积
 
@@ -558,10 +566,11 @@ factorial 是教学算法，约定输入为小的非负整数。n≤1 是终止�
 children，再 sum；叶子 children=[]，空 sum=0。二叉树用 null 的完整例子
 另见 [examples/tree.lip](../examples/tree.lip)。
 
-直接/间接递归环中的每个 fn 必须显式 ->type，缺少则 check 失败。最大本地
-调用深度 256，每次调用检查取消，超限时返回错误。列表遍历
-用 map/fold，不用逐项递归耗深度。n=300 可观察超深度错误；过大的阶乘也会
-因非有限算术结果失败。
+直接/间接递归环中的每个 fn 必须显式 ->type，缺少则 check 失败。可识别的尾递归和
+可累积递归会由编译器改成循环；其他递归最多保留 1024 层运行时保护。运行期间，CLI
+收到 Ctrl-C/超时，或 Go 宿主取消传入的 context 时，递归会停止并返回取消错误；未转换
+递归超过 1024 层时返回递归深度错误。列表遍历用 map/fold，树和分治可以使用递归；
+实际上仍受内存、算术范围和宿主取消约束。
 
 ## 11. 综合例子：文本 → 部门报表
 
@@ -647,7 +656,7 @@ Completed/Skipped/Cancelled，无耗时或局部变量快照。独立文件不�
 Pure/ReadOnly Host 才可自动并行，外部写入形成顺序屏障。已声明的独立节点
 不会因 return 的 if 未选它就被取消；要阻止外部操作执行，把操作放进 match。
 
-## 13. match：模式分支与返回值
+## 13. match：字面量分支与返回值
 
 [10_gate.lip](../examples/tutorial/10_gate.lip)：
 
@@ -671,13 +680,43 @@ lipc run --trace gate-trace.json examples/tutorial/10_gate.lip 0
 # null
 ```
 
-match 按模式选择分支。这里 false 分支为空，doubled/return 跳过，库得到 nil，
+match 按整个值的字面量选择分支；当前不做列表、对象解构或字符串内容匹配。这里 false 分支为空，doubled/return 跳过，库得到 nil，
 CLI 输出 null；因此输出写 number?。分支内绑定只在该分支可用，其他分支的外部操作也不会执行。
 如果各分支都 return，可以使用非可选输出类型。执行中的错误向宿主返回。
 
-match 也可直接产生值，支持数字、字符串、bool、null 字面量和 `_` 默认分支。
+match 也可直接产生值，支持数字、字符串、bool、null 字面量、`number`/`string`/`bool`/
+`list`/`object` 类型分支和 `_` 默认分支；字符串字面量比较整个字符串。类型分支适合
+`any` 输入，并会在分支内收窄匹配变量。列表和对象应使用索引/字段读取、`isEmpty`/`len`、布尔比较、
+列表/字符串库函数和推导式组合条件。树和其他递归结构继续用纯递归函数表达；尾递归、
+线性累积和部分整数分支递推会转成循环，不能识别的深度递归仍受 1024 层保护。需要
+处理无限输入或极深数据时，应让 Go/Python Host 提供迭代式操作。
 分支按顺序匹配，匹配值只计算一次；`模式 if 条件` 添加守卫。需要覆盖所有可能值，
 bool 可列出 true/false，其他情况通常使用最后一个无守卫的 `_`。
+
+同一结果适用于多个字面量时，可以在一个分支中用逗号列出它们；守卫和分支表达式只写一次：
+值分支之间使用逗号，块分支可用换行或逗号；分号只用于块内的多条语句。
+
+```lip
+fn classify(value: number) -> string {
+    match value {
+        0, 1 => "small",
+        _ => "other",
+    }
+}
+```
+
+类型分支可以处理动态输入；`_` 接收剩余类型和 null：
+
+```lip
+fn describe(value: any) -> string {
+    match value {
+        number => str(value),
+        string => "String: " + value,
+        null => "Nil",
+        _ => "Other",
+    }
+}
+```
 
 ```lip
 flow Describe(mode: string) -> any {
@@ -766,6 +805,17 @@ g.Add(runtime.NodeSpec{Name: "save", Op: "save", After: []string{"prepare"}, Eva
 
 ## 16. 完整宿主例子：State、Retry、Feedback、Await
 
+先把三个名字分开记：
+
+| 写法 | 它解决的问题 | 直观想象 |
+| --- | --- | --- |
+| `state(initial)` | 跨多次 Tick 保存一个 Flow 值 | 一个由宿主持有的记事本 |
+| `retry(call, n)` | 同一个调用失败时再试几次 | “这次没成功，再按原请求试一次” |
+| `feedback(initial, step, verify, n)` | 候选结果不合格时修订后再检查 | “先提案 → 检查 → 修改 → 再检查” |
+
+它们不是互相替代的循环：State 不会自动递增，Retry 不会修改输入，Feedback 也不会
+无限运行；三个 `n` 都是明确的上限。
+
 [session.lip](../examples/tutorial/session.lip)：
 
 <!-- example: examples/tutorial/session.lip -->
@@ -802,13 +852,16 @@ go run -buildvcs=false ./examples/tutorial/host_demo
 # [{"fetch_calls":2,"tick":1,"value":{"count":0,"result":3},"writes":1},{"fetch_calls":3,"tick":2,"value":{"count":2,"result":3},"writes":2},{"fetch_calls":3,"tick":3,"value":null,"writes":2}]
 ```
 
-fetch 注册 ReadOnly，首次故意失败，后续通过 Await 返回输入。write_report
-注册外部写入，用写计数表示外部改变；纯 start/revise/verify 由生成库提供。
+fetch 注册 ReadOnly，首次故意失败，后续通过 Await 返回输入。`retry(fetch(input), 3)`
+表示“最多调用 fetch 三次”，第一次也算一次；它只重做这个调用，不会重做无关的
+绑定。`feedback(start(fetched), revise, verify, 3)` 先得到一个候选，再调用 verify：
+候选 1 不合格就 revise 成 2，候选 2 不合格再 revise 成 3，候选 3 合格后结束。
+验证一旦成功，不再调用 revise；三次都失败则整个节点报错。
+
 首次 Tick 初始化 count=0，fetch 第二次成功，反馈验证 1→2→3，写报告一次。
-第二次前 SetState(count,2)，再次 fetch，写次数增至 2。第三次更新
-enabled=false，读/反馈/写/输出都跳过，返回 null，计数不变。
-这是可确定验收的策略练习，无真实网络或 AI；换成真实能力时由 adapter
-处理网络、预算和业务错误。
+第二次前 SetState 只是安排下一次 Tick 使用 2，不会立即运行图；再次 Tick 后写次数
+增至 2。第三次把 enabled 更新为 false，读/反馈/写/输出都跳过，返回 null，计数保持
+2。这个例子没有真实网络或 AI；换成真实能力时由 adapter 负责超时、幂等写入和业务错误。
 
 ## 17. 持久实例、Tick 与缓存
 
@@ -839,11 +892,14 @@ NewInstance 要完整输入，Tick 接部分更新，nil 不更新。未知字�
 
 ## 18. 有界策略、异步结果、取消
 
-retry(fetch(input),3) 最多三次，包含第一次；只接受正整数字面上限，无退避、
-错误分类或幂等性推断。写入操作重试前，宿主须确定它可重复。
-feedback(initial_call,step,verify,3) 最多验证三次：先验初值，未通过才 step。
-verify 返回 bool，到上限仍不通过是错误；可用纯 fn 或声明并注册的 Host。
-每种策略都有明确的执行次数上限。
+`retry(fetch(input), 3)` 最多三次，包含第一次；只接受正整数字面上限，不做退避、
+错误分类或幂等性推断。写入操作重试前，宿主须确认重复执行不会产生重复扣款、重复
+消息等副作用。取消会直接停止，不把取消当成一次可重试失败。
+
+`feedback(initial_call, step, verify, 3)` 最多检查三次：先执行一次 initial，再检查；
+只有 verify 返回 false 才执行 step。verify 必须返回 bool，到上限仍为 false 就报错。
+step/verify 可以是纯 fn，也可以是声明并注册的 Host。它适合“候选→审核→修订”，
+不适合代替没有退出条件的后台循环。
 
 Await 的 channel 交付 Result。上节用缓冲 channel 立即交付，展示协议。
 真实异步工作可用 goroutine，但应协作取消；下面是 **Go callback 片段**：

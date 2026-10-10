@@ -1,5 +1,5 @@
 vim9script
-# LIP 0.6.3. Only # introduces comments.
+# LIP 0.6.4. Only # introduces comments.
 import autoload 'lip/catalog.vim'
 if exists('b:current_syntax')
   finish

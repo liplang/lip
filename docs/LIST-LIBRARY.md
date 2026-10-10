@@ -1,6 +1,6 @@
-# list 纯函数标准库（0.6.3）
+# list 纯函数标准库（0.6.4）
 
-本库提供 34 个纯函数，可直接组合于 Flow、fn、if 和 Map 元素。
+本库提供 36 个纯函数，可直接组合于 Flow、fn、if 和 Map 元素。
 callback 使用本地纯 fn 名或内联 `fn(x) { expression }`。
 编译器与 Runtime 共用一个签名目录；增加函数必须同时补契约与语义测试。
 显式导入同名外部命名空间时，调用归属于声明的后端；使用 as 可让外部库与核心 list.* 并存。
@@ -27,6 +27,7 @@ GatherBy/GroupBy、SplitBy、FoldList、Tuples 等组合能力。命名采用小
 first/last 返回选中的元素，其余构造与选择操作返回新列表，不原地改变输入。
 嵌套对象和列表仍共享只读值，不深拷贝。
 取单个索引继续使用 `xs[index]`；和 slice 不同，单索引越界是错误。
+列表和字符串也支持 Python 风格的 `xs[start:end:step]`：`start` 省略时为 0，`end` 省略时为容器末端（负步长时为末端之前），`step` 省略时为 1；三个位置都可省略，但至少保留冒号，例如 `xs[:4]`、`xs[2:]`、`xs[::2]` 和 `xs[::-1]`。负索引从尾部计数，step 不能为 0，切片返回新容器。普通切片不产生无限序列。
 
 ## 形状与组合
 
@@ -56,7 +57,9 @@ flow Shapes() -> object {
 | `list.contains(xs, value)` | 按 LIP 相等语义查询，命中即停止 |
 | `list.count(xs, value)` | 相等元素的数量 |
 | `list.unique(xs)` | 保留首次出现顺序；比较包括 list/object，不按显示字符串去重 |
-| `list.sort(xs)` | 全部数字或全部字符串；升序、稳定，不接受混合键或隐式转换 |
+| `list.sort(xs[, reverse])` / `sort(xs[, reverse])` | 按元素本身排序；全部数字或全部字符串；稳定，默认升序；`reverse` 为 bool，true 时降序，不接受混合键或隐式转换。命名参数写作 `sort(xs, reverse=true)` 或 `list.sort(xs, reverse=true)` |
+| `list.sort_by(xs, key_fn[, reverse])` / `sort_by(xs, key_fn[, reverse])` | key fn 接收一个元素并返回 number 或 string；稳定地按 key 排序，默认升序；`reverse=true` 时降序，相同 key 保留原顺序 |
+| `list.sort_with(xs, comparator)` / `sort_with(xs, comparator)` | comparator 接收两个元素并返回 bool，例如 `sort_with(xs, fn(a,b) { a <= b })`；排序稳定，比较错误会中止 |
 | `list.sum(xs)` / `list.product(xs)` | 只接受有限数字；空输入分别为 0 / 1，非有限结果报错 |
 | `list.min(xs)` / `list.max(xs)` | 同类数字/字符串；空输入报错 |
 | `list.group(xs)` | 按元素本身分组，首次出现的组在前，组内保持输入顺序 |
@@ -83,7 +86,8 @@ callback 可用本文件的纯函数名，或直接写 `fn(x) { x * x }`。具�
 | `list.filter(xs, predicate)` | predicate 必须返回 bool，保留 true 的原元素 |
 | `list.any(xs, predicate)` | 首个 true 停止；空输入 false |
 | `list.all(xs, predicate)` | 首个 false 停止；空输入 true |
-| `list.sort_by(xs, key_fn)` | 每个键恰好计算一次；键为同类数字/字符串，稳定排序 |
+| `fold(xs, seed, reducer)` / `list.fold(xs, seed, reducer)` | 只返回最终累计值；reducer 接收 accumulator 和当前元素；空输入返回 seed |
+| `list.sort_by(xs, key_fn[, reverse])` | 每个键恰好计算一次；键为同类数字/字符串，稳定排序；reverse=true 时降序 |
 | `list.group_by(xs, key_fn)` | 按纯函数键合并所有相同组，保持首次组顺序和组内顺序 |
 | `list.split_by(xs, key_fn)` | 只合并相邻的相同键；不把非相邻的组再合并 |
 | `list.scan(xs, seed, reducer)` | 返回 seed 及每步累计值；类似 FoldList，空输入 `[seed]` |
@@ -113,12 +117,13 @@ print(fold(range(5), 0, fn(total, x) { total + x })) # 10
 print(list.scan(range(4), 0, fn(total, x) { total + x })) # [0,0,1,3,6]
 ```
 
-`group_by`、`split_by`、`sort_by`、`any`、`all` 使用相同的内联写法。
+`group_by`、`split_by`、`sort_by`、`sort_with`、`any`、`all` 使用相同的内联写法。
 predicate 必须返回 bool；sort_by 的键必须是同类 number/string，键每项只计算一次。
 
 独立的 Map 推导式是 Runtime 动态展开节点，允许有界并行；嵌入参数、fn 或
 其他推导式的 Map 与 `list.map` 都顺序求值。它们可直接使用 range 等纯列表表达式。
-fold 只返回最终累计值，scan 返回累计历史。没有隐含线程或
+fold（也可写 `list.fold`）只返回最终累计值，scan 返回累计历史：需要“最后答案”用 fold，
+需要“每一步的累计过程”用 scan。两者都从左到右执行同一个二参数 reducer，没有隐含线程或
 独立缓存：整个表达式的依赖与纯性决定所在节点是否可复用。
 
 ## 有界执行与错误
@@ -126,9 +131,10 @@ fold 只返回最终累计值，scan 返回累计历史。没有隐含线程或
 单个操作输入列表长度不超过 1,000,000，新生成的列表元素槽位合计也不超过
 1,000,000（zip/partition/transpose/cartesian 的外层和新内层都计算）。复用输入
 嵌套值不再次计数；这限制新分配的列表结构，不是整份输入的字节配额。flatten
-额外限制嵌套深度 256，循环的 Go 宿主列表会失败，不无限展开。
+额外限制数据遍历嵌套深度 256，循环的 Go 宿主列表会失败，不无限展开；这与普通函数递归的 1024 调用深度上限相互独立。
 
-操作在遍历/调用边界检查 Context 取消，callback 失败或取消不返回部分列表。
+操作在遍历/调用边界检查运行上下文；CLI 的 Ctrl-C/超时或 Go 宿主取消 context 会停止
+操作。callback 失败或被取消时不返回部分列表。
 形状、数量、整数步长和 predicate 返回值错误都有明确失败；sum/product 的溢出
 与普通数字运算采用同一错误规则。排序期间也观察取消。
 

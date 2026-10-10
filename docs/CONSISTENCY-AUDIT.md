@@ -1,4 +1,4 @@
-# Alpha 0.6.3 实现一致性审计
+# Alpha 0.6.4 实现一致性审计
 
 当前契约为 [ALPHA-0.6-SPEC.md](ALPHA-0.6-SPEC.md) 与
 [LIST-LIBRARY.md](LIST-LIBRARY.md)、[STRING-LIBRARY.md](STRING-LIBRARY.md)。本次审计把核心、已有 Runtime policy 和
@@ -14,8 +14,8 @@
 | 语句式 for/break/continue | 有限集合、顺序等待、局部作用域与捕获、嵌套控制跳转、首次错误/取消停止、每 Tick 重跑及三种调度/REPL 验证 |
 | 可组合推导式 | Flow source/元素可组合外部调用，fn/回调保持纯；调用参数、多层嵌套；变量遮蔽、惰性分支、错误顺序、取消、增量复用与真实 Python/REPL 验证 |
 | 统一集合回调 | map/filter/fold/scan/group_by/split_by/sort_by/any/all 内联纯 fn；捕获依赖、参数遮蔽、短路、类型/元素错误与 REPL 验证 |
-| 纯递归 | 递归环结果类型验证、每次调用的 Context/256 深度检查；直接/间接及经 list.map 的递归 conformance |
-| 34 个纯 list 操作 | internal/listops 共用签名，全部目录项正面测试；空输入、分组/排序稳定性、形状、取消、错误与不修改输入 |
+| 纯递归 | 递归环结果类型验证、尾调用/线性累积循环化、每次调用的运行上下文/1024 深度检查；直接/间接及经 list.map 的递归 conformance |
+| 36 个纯 list 操作 | internal/listops 共用签名，全部目录项正面测试；空输入、分组/排序稳定性、形状、取消、错误与不修改输入 |
 | 19 个纯 string 操作 | internal/stringops 共用签名；Unicode、空项、字面匹配、解析、资源/错误与组合验证 |
 | 明确失败与类型 | fail 不产值，内部 never 保留成功分支类型，Host 不可覆盖；编译/生成/惰性分支验证 |
 | 统一资源约束 | 字符串边界/len/索引/+/*/库统一 UTF-8/16 MiB；Map/fold 处理前拒绝超量 |
@@ -68,7 +68,7 @@ bash scripts/verify-release.sh
 0.6.2 完整验收于 2026-10-09 通过：55 份源程序、46 个文档 LIP 代码块、18 处标注源码、
 12 份生成文件、26 节课程和 27 个教程 CLI 用例；包含 tests/race/vet/build、独立安装
 以及 math/for/可空 CLI 的独立运行。
-0.6.3 完整验收于 2026-10-09 通过：56 份源程序、47 个文档 LIP 代码块、19 处标注源码，
+0.6.4 完整验收于 2026-10-09 通过：56 份源程序、47 个文档 LIP 代码块、19 处标注源码，
 保留全部 12 份生成文件、26 节课程和 27 个教程 CLI 用例的同步检查。
 值生命周期回归覆盖最后消费者/跳过、嵌套 Await、无关 worker、返回/Host 别名、
 失效缓存、State/null、失败/取消和乱序节点；Runtime race 重复验证 10 次，
@@ -82,7 +82,7 @@ bash scripts/verify-release.sh
 重复打包逐字相同，Linux 解压后仓库外离线 run/build 和无 Go 的产物执行通过。
 Windows/macOS 只验证交叉构建，原生执行需对应环境。
 新增审计回归位于 compiler/audit_test.go、tests/audit_test.go、REPL 与可空类型教程用例。
-编辑器扩展保持 0.6.3：完整发行检查与 Vim 9.2 / Neovim 0.12.5 / Emacs 31.1
+编辑器扩展保持 0.6.4：完整发行检查与 Vim 9.2 / Neovim 0.12.5 / Emacs 31.1
 原生测试通过；覆盖中文/组合字符/Tab、带空格路径、注释/字符串内的运算符和
 调用名、`=>` 换行与嵌套缩进、实际检查命令、过期结果、取消与资源清理。
 Emacs 在临时安装目录中以警告为错误做字节编译，再运行 5 个 ERT 用例。
@@ -97,7 +97,7 @@ Emacs 在临时安装目录中以警告为错误做字节编译，再运行 5 �
 失败转换泄漏句柄；测试把 Worker 启动故障当缺环境跳过。修正都有失败或
 组合验证，没有减少检查来掩盖问题。
 
-list/object 在边界检查外层形状，动态元素在运算时检查。Host 通过 Context
+list/object 在边界检查外层形状，动态元素在运算时检查。Host 通过运行上下文（Go 的 `context`）
 协作取消并保护共享资源，外部写入完成后保留其结果。
 
 生成代码的 vet 曾发现 Host/Go 入口提前返回后的不可达分支，现已通过生成器

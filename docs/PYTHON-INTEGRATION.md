@@ -1,4 +1,4 @@
-# LIP 0.6.3 Python 科学计算与进程集成设计
+# LIP 0.6.4 Python 科学计算与进程集成设计
 
 Go/Python/纯库组合从[教程](TUTORIAL.md)第 19 节的 mixed Flow 开始。
 有限标量、list/tuple/object 自动进入 LIP 值域，长期对象使用句柄。

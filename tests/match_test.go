@@ -11,9 +11,12 @@ func TestGeneratedMatchExecution(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "flow.go"), generatedSource(t, `import host "emit"
 fn choice(flag: bool) -> any { match flag { true => 7, false => "nil" } }
+fn grouped(value: number) -> number { match value { 0, 1 => value, _ => value + 10 } }
+fn describe(value: any) -> string { match value { number => str(value), string => "String: " + value, null => "Nil", _ => "Other" } }
+fn kind(value: any) -> string { match value { bool => "bool", list => "list", object => "object", _ => "other" } }
 flow Choice(mode: any, flag: bool, values: list) -> any {
  match mode {
-  123 if fail("selected guard") => { return null },
+  123, 124 if fail("selected guard") => { return null },
   null => { return choice(flag) },
   true if flag => {
    local = [match x { 0 => 0, _ => x * 2 } for x in values]
@@ -30,6 +33,13 @@ flow Choice(mode: any, flag: bool, values: list) -> any {
    emit(local)
    return local
   },
+  100 => { return grouped(1) },
+  101 => { return describe("hello") },
+  102 => { return describe(3) },
+  103 => { return describe([]) },
+  104 => { return kind(true) },
+  105 => { return kind([]) },
+  106 => { return kind({name: "lip"}) },
   _ => {
    match flag {
     true => { return match mode { -1 => "negative", _ => mode } },
@@ -46,6 +56,9 @@ func TestMatch(t *testing.T) {
    {nil,true,float64(7),0},{nil,false,"nil",0},
    {true,true,[]runtime.Value{float64(0),float64(2),float64(4)},1},
    {true,false,"disabled",1},{false,true,map[string]runtime.Value{"kind":"false"},1},
+   {100,true,float64(1),0},
+   {101,true,"String: hello",0},{102,true,"3",0},{103,true,"Other",0},
+   {104,true,"bool",0},{105,true,"list",0},{106,true,"object",0},
    {-1,true,"negative",0},{99,true,99,0},{99,false,nil,0},
   } {
    emitted:=[]runtime.Value{}
