@@ -1,0 +1,6 @@
+# 一个 LIP 程序有一个 Flow 入口。Hello 是入口名称，不必叫 Main。
+# -> string 声明输出类型；return 给出 Flow 的最终结果。
+# lipc 会把结果编码为 JSON 后写到终端，因此字符串带双引号。
+flow Hello() -> string {
+    return "Hello, LIP!"
+}

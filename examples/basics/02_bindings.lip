@@ -1,0 +1,11 @@
+# = 创建不可变绑定：名字与一个值关联，不能在同一作用域重复赋值。
+# 需要改变结果时使用新名字；不要把这里的 = 当作可变变量更新。
+flow Bindings() -> object {
+    price = 12
+    count = 3
+    subtotal = price * count
+    discount = 5
+    total = subtotal - discount
+    # {字段: 值} 构造对象。对象键可以是不带引号的名字。
+    return {subtotal: subtotal, total: total}
+}

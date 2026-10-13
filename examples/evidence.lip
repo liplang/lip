@@ -1,0 +1,11 @@
+# 多个结论独立贡献证据，再用完整快照生成缺失证据报告。
+# 没有 live snapshot，汇聚结果与合法调度次序无关。
+flow Evidence() -> object {
+    facts = claim()
+    for conclusion in ["a", "b", "c"] parallel {
+        facts <+ {name: conclusion, evidence: if conclusion == "a" {["source"]} else {[]}}
+    }
+    rows = facts
+    missing = [row.value.name for row in rows if len(row.value.evidence) == 0]
+    return {missing: missing}
+}

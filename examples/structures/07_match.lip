@@ -1,0 +1,14 @@
+# match 按顺序尝试 arm；=> 左侧是模式，右侧是结果表达式。
+# 模式可以是字面量、类型名或 _。_ 匹配任何值。
+# if 是可选 guard；先 has 再取字段，可安全处理缺键对象。
+fn describe(x: any) -> string {
+    match x {
+        null => "empty",
+        number if x >= 0 => "nonnegative",
+        object if has(x, "kind") && x.kind == "note" => "note",
+        _ => "other"
+    }
+}
+flow Matching() -> list {
+    return map([null, 3, -2, {kind: "note"}, {}], describe)
+}

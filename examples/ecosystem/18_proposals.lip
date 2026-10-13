@@ -1,0 +1,11 @@
+# 运行：lipc run -host demo 本文件
+# proposal 是值，构造和绑定它时不会调用 provider。
+# perform 是唯一执行边界；普通 fn 中不允许 perform。
+import go "strings" as text
+flow Proposals() -> object {
+    request = effect text.ToUpper("hello")
+    result = perform request
+    # 已记录的外部结果可以自然成为下一次请求的参数。
+    repeated = perform effect text.ToUpper(result + ", lip")
+    return {first: result, second: repeated}
+}

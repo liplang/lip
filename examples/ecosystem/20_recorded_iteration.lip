@@ -1,0 +1,13 @@
+# 运行：lipc run -host demo 本文件
+# 每一轮读取上一轮的记录值，提出下一次请求；EvalPath 区分每轮 CallID。
+# 这里用 Python 标准库模拟逐步提高分数，不要求接入真实模型服务。
+import python "statistics" as stats
+flow RecordedIteration() -> object {
+    answer = for with s = {score: 0, rounds: 0} {
+        next_score = perform effect stats.mean([s.score + 0.2])
+        updated = {score: next_score, rounds: s.rounds + 1}
+        if next_score >= 0.8 { break updated }
+        else { next updated }
+    }
+    return answer
+}

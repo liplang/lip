@@ -1,0 +1,18 @@
+# 运行：lipc run -host demo -parallel 4 本文件
+# parallel 内只允许 Concurrent ReadOnly 操作；Write 必须在区域外执行。
+# 推荐结构：并行计算 -> 完整读取 -> 顺序写入。
+import go "strings" as text
+import host "console" as console
+flow ReadThenWrite() -> list {
+    facts = claim()
+    for name in ["ada", "lin", "sam"] parallel {
+        upper = perform effect text.ToUpper(name)
+        facts <+ upper
+    }
+    results = [row.value for row in facts]
+    for name in results {
+        # console.write 是 Write，向 stderr 输出；调用顺序按源码/迭代顺序。
+        perform effect console.write("processed " + name)
+    }
+    return results
+}

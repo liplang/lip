@@ -1,0 +1,14 @@
+# 业务失败应显式成为普通 Data，才能统计、分支或继续下一项。
+# fail("...") 是程序错误，会终止节点；不是可 catch 的业务值。
+# carry 到第三个失败就停止，尚未处理的后续项不会执行。
+flow BusinessFailures() -> object {
+    stopped = for result in [
+        {ok: false}, {ok: true}, {ok: false}, {ok: false}, {ok: true}
+    ] with s = {failures: 0, visited: 0} {
+        failures = if result.ok { s.failures } else { s.failures + 1 }
+        updated = {failures: failures, visited: s.visited + 1}
+        if failures == 3 { break updated }
+        else { next updated }
+    }
+    return stopped
+}

@@ -1,0 +1,8 @@
+# [结果 for 名字 in 列表 if 条件] 是带过滤条件的推导式。
+# if 子句可省略；guard 为 false 时，不求值该项的结果表达式。
+# range(n) 生成从 0 到 n-1 的列表，顺序不受调度影响。
+flow Comprehensions() -> object {
+    evens = [x for x in range(8) if x % 2 == 0]
+    reciprocals = [1 / x for x in [0, 2, 4] if x != 0]
+    return {evens: evens, reciprocals: reciprocals}
+}

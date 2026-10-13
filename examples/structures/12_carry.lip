@@ -1,0 +1,13 @@
+# carry 是有结果的顺序迭代表达式，with 指定初始携带值。
+# 每轮的 s 都是上一轮 next 的结果；它仍是不可变绑定。
+# next 更新下一轮的携带值，break e 直接返回 e。
+flow Carry() -> object {
+    answer = for x in [1, 2, 3, 4, 5] with s = 0 {
+        updated = s + x
+        if updated >= 6 { break updated }
+        else { next updated }
+    }
+    # 有限列表耗尽时，carry 返回最后的携带值。
+    complete_sum = for x in [1, 2, 3] with s = 0 { next s + x }
+    return {early: answer, complete: complete_sum}
+}

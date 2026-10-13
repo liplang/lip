@@ -1,0 +1,7 @@
+# Flow 参数来自 CLI 的 JSON 对象；字段名必须与参数名一致。
+# lipc run -input '{"name":"Ada","scores":[0.6,0.9]}' 本文件
+# 输入和结果只允许 Data：null/bool/number/string/list/object。
+flow Inputs(name: string, scores: list) -> object {
+    good = [score for score in scores if score >= 0.8]
+    return {message: "Hello, " + name, accepted: good}
+}

@@ -1,0 +1,16 @@
+# list 保留顺序，从 0 开始索引。object 用 string 作为键。
+# .name 和 ["name"] 都可读取对象字段；缺键读取会报错。
+# put / concat 返回新容器，原容器保持原值。
+flow Containers() -> object {
+    names = ["Ada", "Lin"]
+    person = {name: names[0], role: "reader"}
+    updated = put(person, "role", "writer")
+    return {
+        first: person.name,
+        original_role: person["role"],
+        updated: updated,
+        names: concat(names, ["Sam"]),
+        fields: keys(person),
+        has_age: has(person, "age")
+    }
+}

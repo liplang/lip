@@ -1,0 +1,13 @@
+# string 索引和 slice 的边界使用 Unicode 标量，不是 UTF-8 字节偏移。
+# slice 的右边界不包含在结果里。split 保留相邻分隔符之间的空串。
+# str 用于显示；parse_number 只接受规范中的完整数字文本。
+flow TextAndNumbers() -> object {
+    text = "a𐀀b"
+    score = parse_number("8e-1")
+    return {
+        length: len(text), middle: slice(text, 1, 2),
+        words: split("red,,blue", ","),
+        score: score, display: "score=" + str(score),
+        lexical_order: "10" < "9"
+    }
+}

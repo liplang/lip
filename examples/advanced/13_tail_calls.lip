@@ -1,0 +1,13 @@
+# 尾调用把下一次调用直接作为函数结果，十万轮不增加调用栈深度。
+# 直接调用、互递归和通过 function 值间接调用都享有这条保证。
+fn sum_to(n: number, acc: number) -> number {
+    if n == 0 { acc } else { sum_to(n - 1, acc + n) }
+}
+fn even(n: number) -> bool { if n == 0 { true } else { odd(n - 1) } }
+fn odd(n: number) -> bool { if n == 0 { false } else { even(n - 1) } }
+fn indirect(n: number, callback: function) -> number {
+    if n == 0 { 0 } else { callback(n - 1, callback) }
+}
+flow TailCalls() -> object {
+    return {sum: sum_to(100000, 0), even: even(100000), indirect: indirect(100000, indirect)}
+}
