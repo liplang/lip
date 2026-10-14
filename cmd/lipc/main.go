@@ -39,7 +39,7 @@ func run(ctx context.Context, args []string) error {
 		command = "run"
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	hostName := flags.String("host", "", "registered Host: empty (pure core) or demo")
+	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	output := flags.String("o", "", "generated Go or executable destination")
 	input := flags.String("input", "{}", "Flow inputs as a JSON object")
 	parallel := flags.Int("parallel", 1, "maximum active graph nodes")
@@ -70,6 +70,8 @@ func run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown Host %q", *hostName)
 	}
+	host = script.NewNativeHost(host)
+	defer host.Close()
 	source, err := os.ReadFile(flags.Arg(0))
 	if err != nil {
 		return err

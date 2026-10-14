@@ -326,13 +326,6 @@ func toReflect(v Value, typ reflect.Type) (reflect.Value, error) {
 // PythonHandler invokes an explicitly registered member of an installed
 // module. A worker process handles a single call; module output goes to stderr.
 func PythonHandler(executable string, contract Contract) func(context.Context, Request) Response {
-	return pythonHandler(executable, contract, false, false)
-}
-
-// The interactive adapter declares list/object arguments and explicitly maps
-// NumPy scalars and arrays to Data. Registered PythonHandler contracts retain
-// their own argument and conversion rules.
-func pythonHandler(executable string, contract Contract, packed, documentation bool) func(context.Context, Request) Response {
 	if executable == "" {
 		executable = "python3"
 	}
@@ -342,7 +335,7 @@ func pythonHandler(executable string, contract Contract, packed, documentation b
 			return Rejected("E-SCHEMA", err.Error())
 		}
 		id, _ := r.CallID.Wire().Native()
-		payload, _ := json.Marshal(map[string]any{"module": contract.Operation.Path, "member": contract.Operation.Member, "args": params, "call_id": id, "write": contract.Effect != ReadOnlyEffect, "packed": packed, "documentation": documentation})
+		payload, _ := json.Marshal(map[string]any{"module": contract.Operation.Path, "member": contract.Operation.Member, "args": params, "call_id": id, "write": contract.Effect != ReadOnlyEffect})
 		cmd := exec.CommandContext(ctx, executable, "-c", pythonWorker)
 		cmd.Stdin = strings.NewReader(string(payload))
 		output, err := cmd.Output()
@@ -378,17 +371,6 @@ func pythonHandler(executable string, contract Contract, packed, documentation b
 const pythonWorker = `import contextlib, importlib, json, math, sys
 request = json.load(sys.stdin, parse_int=float, parse_float=float)
 def data(x):
-    if request.get("packed"):
-        numpy = sys.modules.get("numpy")
-        if numpy is not None:
-            if isinstance(x, numpy.ndarray):
-                return data(x.tolist())
-            if isinstance(x, numpy.bool_):
-                return bool(x)
-            if isinstance(x, numpy.integer):
-                return data(int(x))
-            if isinstance(x, numpy.floating):
-                return data(float(x))
     if x is None or isinstance(x, (str, bool)):
         return x
     if isinstance(x, int):
@@ -410,10 +392,6 @@ try:
         for name in request["member"].split("."):
             fn = getattr(fn, name)
         positional, named = request["args"]
-        if request.get("packed"):
-            positional, named = positional
-        if request.get("documentation"):
-            named["renderer"] = importlib.import_module("pydoc").plaintext
         result = fn(*positional, **named)
 except Exception as error:
     uncertain = request["write"] and isinstance(error, (TimeoutError, ConnectionError))

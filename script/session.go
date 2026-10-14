@@ -16,8 +16,6 @@ type Session struct {
 	mu       sync.Mutex
 	host     Host
 	baseHost Host
-	python   string
-	packed   map[string]bool
 	values   map[string]Value
 	imports  []importDecl
 }
@@ -35,18 +33,19 @@ func NewSession(host Host) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{host: program.host, baseHost: program.host, values: map[string]Value{}, packed: map[string]bool{}}, nil
+	return &Session{host: program.host, baseHost: program.host, values: map[string]Value{}}, nil
 }
 
-// NewInteractiveSession also enables generic Data calls to installed Python
-// modules. Imports and completion never execute Python. NewSession only calls
-// operations explicitly registered by its Host.
+// NewInteractiveSession enables the persistent, package-independent library bridge.
+// Imports and completion do not execute native code; operations still use Host.
 func NewInteractiveSession(host Host) (*Session, error) {
-	s, err := NewSession(host)
-	if err == nil {
-		s.python = "python3"
-	}
-	return s, err
+	return NewSession(NewNativeHost(host))
+}
+
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.host.Close()
 }
 
 // Values returns a copy. Mutating it cannot change the session or its closures.
@@ -69,16 +68,31 @@ func (s *Session) Complete(prefix string) []string {
 		names[name] = true
 	}
 	names["help"] = true
+	if s.host.Native != nil {
+		names["native_data"], names["native_release"] = true, true
+	}
 	for name := range s.values {
 		names[name] = true
 	}
 	for _, im := range s.imports {
 		names[im.alias] = true
 		names[im.alias+"."] = true
+		if im.language == "go" && s.host.Native != nil {
+			for _, member := range s.host.Native.completions(im.path) {
+				names[im.alias+"."+member] = true
+			}
+		}
 		for _, contract := range s.host.Contracts {
 			op := contract.Operation
 			if op.Language == im.language && op.Path == im.path {
-				names[im.alias+"."+op.Member] = true
+				member := op.Member
+				if contract.Version == "lip-native-1" {
+					member = strings.TrimPrefix(strings.TrimPrefix(member, "get."), "prepare.")
+					if member == "get" {
+						continue
+					}
+				}
+				names[im.alias+"."+member] = true
 			}
 		}
 	}
@@ -103,10 +117,10 @@ func copyValues(values map[string]Value) map[string]Value {
 func (s *Session) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.host.Close()
 	s.values = map[string]Value{}
 	s.imports = nil
 	s.host = s.baseHost
-	s.packed = map[string]bool{}
 }
 
 // Eval commits bindings only if the entire cell succeeds. External actions
@@ -125,7 +139,11 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	newImports := syntax.imports
 	syntax.imports = append(append([]importDecl(nil), s.imports...), newImports...)
 	imports := append([]importDecl(nil), syntax.imports...)
-	host, packed, help, err := s.prepareCell(syntax)
+	host, help, err := s.prepareCell(ctx, syntax)
+	if err != nil {
+		return CellResult{}, err
+	}
+	host, err = lowerNative(ctx, syntax, host, s.values)
 	if err != nil {
 		return CellResult{}, err
 	}
@@ -156,7 +174,7 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	if err != nil {
 		return CellResult{Report: report}, err
 	}
-	s.values, s.imports, s.host, s.packed = saved, imports, host, packed
+	s.values, s.imports, s.host = saved, imports, host
 	hasValue := false
 	if n := len(syntax.body.items); n > 0 {
 		last := syntax.body.items[n-1]
@@ -167,8 +185,12 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 
 const sessionHelp = `LIP 交互帮助
 help(value) 查看值、纯函数、核心函数或请求的说明。
-help(module) / help(module.member) 查看已导入 Python 模块或成员的文档。
-import python "numpy" as np; np.sqrt(3) 调用已安装的 Python 库。
+help(module) / help(module.member) 查看 Go 导出签名或 Python 库文档。
+CLI 默认使用通用 Go/Python 桥接；包需由当前 Go module 或 Python 环境提供。
+Go 第三方库使用区分大小写的完整包路径，并在终端用 go get 配置当前 module 的依赖；as 指定简称。
+import python "math"; math.sqrt(3) 调用 Python 库。
+import go "strings"; strings.ToUpper("hello") 调用 Go 包导出的函数。
+native_data(value) 取得普通数据快照；native_release(value) 释放原生对象引用。
 直接外部调用经 Host 执行；effect 构造请求，perform 执行请求。
 :vars 查看保存的值；:reset 清空会话；:quit 退出。`
 
@@ -191,16 +213,12 @@ var sessionBuiltinHelp = map[string]string{
 // Interactive conveniences lower into ordinary proposals, perform, blocks and
 // pure functions before checking. The registry belongs to this cell until it
 // succeeds, so a failed cell cannot publish imports or newly discovered calls.
-func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, error) {
+func (s *Session) prepareCell(ctx context.Context, syntax *syntax) (Host, bool, error) {
 	host := s.host
 	host.Contracts = append([]Contract(nil), host.Contracts...)
 	contracts := map[string]Contract{}
 	for _, c := range host.Contracts {
 		contracts[identityKey(c.Operation.Wire())] = c
-	}
-	packed := map[string]bool{}
-	for key, value := range s.packed {
-		packed[key] = value
 	}
 	aliases := map[string]importDecl{}
 	names := map[string]bool{"claim": true}
@@ -288,7 +306,7 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 			im, imported := aliases[parts[0]]
 			pythonTarget := ok && imported && im.language == "python"
 			stringTarget := e.args[0].expr.tag == "lit" && e.args[0].expr.value.k == String
-			if s.python != "" && (pythonTarget || stringTarget) {
+			if host.Native != nil && (pythonTarget || stringTarget) {
 				if imported {
 					target = im.path
 					if len(parts) == 2 {
@@ -302,10 +320,39 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 				op := Operation{"host", "lip.repl", "help"}
 				if _, exists := contracts[identityKey(op.Wire())]; !exists {
 					c := Contract{Operation: op, Version: "1", Params: []Parameter{{Name: "target", Schema: Schema{Type: "string"}}}, Result: Schema{Type: "string"}, Effect: UnknownEffect}
-					c.Invoke = pythonHandler(s.python, Contract{Operation: Operation{"python", "pydoc", "render_doc"}, Effect: UnknownEffect}, false, true)
+					c.Invoke = func(ctx context.Context, r Request) Response {
+						target, _ := r.Positional[0].Text()
+						module, member := target, ""
+						if i := strings.LastIndex(target, "."); i >= 0 {
+							module, member = target[:i], target[i+1:]
+						}
+						req := r
+						req.Positional = []Value{ListValue(), object(nil)}
+						return host.Native.invoke(ctx, Operation{"python", module, member}, "help", req)
+					}
 					add(c)
 				}
 				*e = expression{tag: "perform", tok: e.tok, x: &expression{tag: "proposal", tok: e.tok, name: alias + ".help", args: []argument{{expr: &expression{tag: "lit", tok: e.tok, value: textValue(target)}}}}}
+				return
+			}
+			if ok && imported && im.language == "go" && host.Native != nil {
+				pkg, failure := host.Native.discover(ctx, im.path)
+				if failure != nil {
+					err = at(failure, e.tok)
+					return
+				}
+				lines := []string{fmt.Sprintf("import go %q as %s", im.path, im.alias)}
+				for member, signature := range pkg.members {
+					if len(parts) == 1 || parts[1] == member {
+						lines = append(lines, signature)
+					}
+				}
+				if len(parts) == 2 && len(lines) == 1 {
+					err = at(diagnostic("E-OPERATION", "no exported Go symbol "+target), e.tok)
+					return
+				}
+				sort.Strings(lines[1:])
+				*e = expression{tag: "lit", tok: e.tok, value: textValue(strings.Join(lines, "\n"))}
 				return
 			}
 			if ok && imported {
@@ -335,6 +382,13 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 			parts := strings.SplitN(name, ".", 2)
 			_, imported := aliases[parts[0]]
 			direct = direct && imported && len(parts) == 2
+			if direct && host.Native != nil {
+				im := aliases[parts[0]]
+				c, registered := contracts[identityKey(Operation{im.language, im.path, parts[1]}.Wire())]
+				if (im.language == "go" || im.language == "python") && (!registered || c.Version == "lip-native-1") {
+					direct = false
+				}
+			}
 		}
 		if e.tag == "fn" {
 			for _, p := range e.params {
@@ -370,14 +424,7 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 		if !imported || len(parts) != 2 {
 			return
 		}
-		op := Operation{im.language, im.path, parts[1]}
-		key := identityKey(op.Wire())
-		if _, registered := contracts[key]; !registered && im.language == "python" && s.python != "" {
-			c := Contract{Operation: op, Version: "lip-repl-data-1", Params: []Parameter{{Name: "args", Schema: Schema{Type: "list"}}, {Name: "kwargs", Schema: Schema{Type: "object"}}}, Result: Schema{Type: "any"}, Effect: UnknownEffect}
-			c.Invoke = pythonHandler(s.python, c, true, false)
-			add(c)
-			packed[key] = true
-		}
+		_ = im
 		proposal := e
 		var body *block
 		if direct {
@@ -389,18 +436,6 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 				body.items = append(body.items, &statement{tag: "bind", tok: arg.expr.tok, name: local, expr: arg.expr})
 				proposal.args[i].expr = &expression{tag: "id", tok: arg.expr.tok, name: local}
 			}
-		}
-		if packed[key] {
-			pos := &expression{tag: "list", tok: e.tok}
-			named := &expression{tag: "object", tok: e.tok}
-			for _, arg := range proposal.args {
-				if arg.name == "" {
-					pos.elems = append(pos.elems, arg.expr)
-				} else {
-					named.fields = append(named.fields, field{name: arg.name, expr: arg.expr, tok: arg.expr.tok})
-				}
-			}
-			proposal.args = []argument{{expr: pos}, {expr: named}}
 		}
 		if direct {
 			body.tail = &expression{tag: "perform", tok: proposal.tok, x: proposal}
@@ -416,7 +451,7 @@ func (s *Session) prepareCell(syntax *syntax) (Host, map[string]bool, bool, erro
 		last := syntax.body.items[n-1]
 		help = last.tag == "eval" && documentation[last.expr]
 	}
-	return host, packed, help, err
+	return host, help, err
 }
 
 func memberName(e *expression) (string, bool) {

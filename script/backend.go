@@ -16,7 +16,7 @@ import (
 // Runtime sources are bundled with the compiler. Emitted programs use only
 // the standard library; they need neither the compiler nor a source checkout.
 //
-//go:embed compiler.go checker.go values.go evaluator.go scheduler.go host.go adapters.go
+//go:embed compiler.go checker.go values.go evaluator.go scheduler.go host.go adapters.go native.go native_workers.go go_adapter.go
 var runtimeSources embed.FS
 
 // GoOptions supplies trusted native integration code, never LIP program text.
@@ -60,7 +60,18 @@ func DemoHostGoSource() (string, error) {
 // expression and local statement becomes a specialized Go function. Static
 // region metadata is retained for the shared scheduler, not reparsed at run time.
 func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
-	if len(p.host.Contracts) > 0 && options.HostSource == "" {
+	needsHostSource := false
+	for _, c := range p.host.Contracts {
+		needsHostSource = needsHostSource || c.Version != "lip-native-1"
+	}
+	if p.host.Native != nil && p.host.Native.Go != nil {
+		for _, im := range p.syntax.imports {
+			if im.language == "go" && p.host.Native.Go.packageMembers(im.path) != nil {
+				needsHostSource = true
+			}
+		}
+	}
+	if needsHostSource && options.HostSource == "" {
 		return nil, diagnostic("E-OPERATION", "Go emission requires native Host registration source")
 	}
 	g := &goEmitter{program: p, exprID: map[*expression]int{}, stmtID: map[*statement]int{}, blockID: map[*block]int{}}
@@ -108,6 +119,25 @@ func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
 	}
 	body.WriteString("var generatedMetadataOnce sync.Once\n")
 	body.WriteString("func generatedProgram(host Host)(*Program,error){\n")
+	if p.host.Native != nil {
+		body.WriteString("host=NewNativeHost(host)\n")
+		for _, c := range p.host.Contracts {
+			if c.Version != "lip-native-1" {
+				continue
+			}
+			action := "call"
+			if c.Operation.Member == "get" || strings.HasPrefix(c.Operation.Member, "get.") {
+				action = "get"
+			}
+			if strings.HasPrefix(c.Operation.Member, "prepare.") {
+				action = "prepare"
+			}
+			if c.Operation.Language == "host" && !strings.HasPrefix(c.Operation.Member, "call.") && c.Operation.Member != "call" && action != "get" && action != "prepare" {
+				action = c.Operation.Member
+			}
+			fmt.Fprintf(&body, "host.Contracts=append(host.Contracts,host.Native.contract(Operation{%s,%s,%s},%s))\n", quote(c.Operation.Language), quote(c.Operation.Path), quote(c.Operation.Member), quote(action))
+		}
+	}
 	body.WriteString(`contracts:=make(map[string]Contract)
  for _,c:=range host.Contracts { if err:=validateContract(c);err!=nil{return nil,err};key:=identityKey(c.Operation.Wire());if _,ok:=contracts[key];ok{return nil,diagnostic("E-OPERATION","duplicate Host operation")};contracts[key]=cloneContract(c) }
 `)
@@ -404,7 +434,7 @@ func compiledRuntime() (string, map[string]string, map[string]*ast.FuncDecl, err
 	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl syntax analysis function proposal asciiDigit asciiLetter validID checker builtinArity error resolve") {
 		allowed[n] = true
 	}
-	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "adapters.go"} {
+	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "adapters.go", "native.go", "native_workers.go", "go_adapter.go"} {
 		src, _ := runtimeSources.ReadFile(name)
 		f, err := goparser.ParseFile(gotoken.NewFileSet(), name, src, 0)
 		if err != nil {
@@ -547,7 +577,7 @@ func generatedRun()error{
  elements:=flag.Int64("elements",1000000,"list budget; 0 unlimited")
  flag.Parse();if flag.NArg()!=0{return fmt.Errorf("compiled program accepts flags only")}
  data,err:=DecodeData([]byte(*input));if err!=nil{return err};fields,ok:=data.Fields();if !ok{return fmt.Errorf("input must be an object")}
- host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err}
+ host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err};defer p.host.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt);defer cancel()
  r,err:=p.Run(ctx,fields,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000});if err!=nil{return err}
  out,err:=EncodeJSON(r.Output);if err!=nil{return err};fmt.Println(string(out));return nil

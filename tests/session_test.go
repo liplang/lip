@@ -262,6 +262,7 @@ def nonfinite():
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s.Close() })
 	eval := func(source, want string) CellResult {
 		t.Helper()
 		result, err := s.Eval(ctx, source, Options{})
@@ -298,7 +299,7 @@ def nonfinite():
 	eval(`math.sqrt(3)`, "1.7320508075688772")
 	eval(`help("math.sqrt")`, "")
 	for source, code := range map[string]string{
-		`failed=py.unsupported()`:      "E-VALUE",
+		`failed=py.nonfinite()`:        "E-VALUE",
 		`py.nonfinite()`:               "E-VALUE",
 		`py.missing()`:                 "E-EFFECT-REJECTED",
 		`py.add(fn()->number {1})`:     "E-SCHEMA",
@@ -312,7 +313,7 @@ def nonfinite():
 	if _, saved := s.Values()["failed"]; saved {
 		t.Fatal("failed call committed a binding")
 	}
-	if names := s.Complete("py.unsupported"); len(names) != 0 {
+	if names := s.Complete("py.nonfinite"); len(names) != 0 {
 		t.Fatalf("failed cell published its operation: %v", names)
 	}
 	eval(`py.add(1)`, "2")
@@ -321,6 +322,7 @@ def nonfinite():
 		t.Fatal(err)
 	}
 	denied, _ := NewInteractiveSession(Host{Authorize: func(context.Context, Request) error { return errors.New("denied") }})
+	t.Cleanup(func() { denied.Close() })
 	_, _ = denied.Eval(ctx, `import python "lip_repl_fixture" as py`, Options{})
 	for _, source := range []string{`py.add(1)`, `help(py)`} {
 		_, err := denied.Eval(ctx, source, Options{})
@@ -336,9 +338,9 @@ def nonfinite():
 	} else {
 		eval(`import python "numpy" as np`, "")
 		eval(`np.sqrt(3)`, "1.7320508075688772")
-		eval(`np.sqrt([1,4,9])`, "[1,2,3]")
+		eval(`native_data(np.sqrt([1,4,9]))`, "[1,2,3]")
 		eval(`np.sum([1,2,3])`, "6")
-		eval(`np.all([true,false])`, "false")
+		eval(`np.all([true,false]).item()`, "false")
 		eval(`import python "numpy"`, "")
 		eval(`numpy.sqrt(3)`, "1.7320508075688772")
 	}

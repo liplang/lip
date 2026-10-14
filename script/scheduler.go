@@ -74,6 +74,10 @@ func Compile(source string, host Host) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
+	host, err = lowerNative(context.Background(), s, host, nil)
+	if err != nil {
+		return nil, err
+	}
 	c, err := analyze(s, host)
 	if err != nil {
 		return nil, err

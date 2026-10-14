@@ -86,7 +86,7 @@ live snapshot 的观察差异是语义的一部分。需要最终完整结论时
 ./lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
 ```
 
-LIP 源码只描述业务程序。Go 操作的注册、schema 和 bytes 转换集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中，独立于 LIP 示例。import alias 只能用于 operation 名称，例如 `effect stats.mean(xs)`；不是任意 Python 对象访问。
+这些教学示例的显式操作合约、schema 和 bytes 编码集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中。CLI 默认还提供通用 Go/Python 桥接，可以直接调用导入库的函数、读取模块属性和操作原生对象，例如 `import go "strings"; strings.ToUpper("hello")` 或 `import python "math"; math.sqrt(3)`。直接调用和属性访问会降为 `perform effect`；数组等原生对象以资源引用保留，使用 `native_data(value)` 显式取得普通数据快照。通用配置、转换规则和运行条件见 [README](../README.md#接入-go--python)。
 
 ## 同一个例子编译执行
 

@@ -59,7 +59,8 @@ store handle。变量只绑定一次；内层可遮蔽普通值，但不得遮�
 
 `effect` 构造请求，`perform` 解释请求。所有 Go/Python 调用、外部属性读取、随机、时钟、
 日志、存储和网络访问都经 perform；没有第二条即时 Host 调用通道。纯核心操作与本地 fn
-可直接调用，外部 operation 不可直接调用。
+可直接调用，外部 operation 不可直接调用。第 10 节的通用库适配配置可在核心检查前
+把直接库调用和属性访问降为 perform；降级后仍使用这一条外部通道。
 
 ## 2. 源文件和语法
 
@@ -827,7 +828,8 @@ flow Collect(items: list) -> object {
 
 `import` 声明依赖命名空间/alias，不执行模块代码、不联网安装、不授予权限。省略 alias
 时取路径最后一个 `/` 或 `.` 后的片段；若不是合法 id 则必须显式 as。alias 在文件中
-唯一，只用于 operation 解析，不是可传入 fn 的原生模块值。
+唯一。核心中的 alias 只用于 operation 解析；本节的通用适配配置可将其值用法降为
+模块资源引用的 perform，不能将原生模块本体直接传入 fn。
 Go operation 由 Host 注册函数/method 或生成的 adapter 提供；Python 的 module/path/
 method 通道可通用映射环境中安装的包，不把包名单写进编译器。
 
@@ -844,7 +846,8 @@ Response = Result(Data) | Rejected(ErrorData) | Uncertain(ErrorData)
 operation 合约至少声明 name/version、参数/结果 schema、ReadOnly/Write/Unknown、
 Concurrent、capabilities 和资源需求。调用前验证，不能从名称推断纯性、并发、幂等性或
 授权。命名参数在位置参数之后、每名一次，并按 schema 解析；固定 proposal 不保留原生
-对象别名。构造 effect 不调用 provider、不写 intent、不消耗调用预算。
+对象本体；需要对象身份时只保留经声明的资源引用。构造 effect 不调用 provider、不写
+intent、不消耗调用预算。
 规范 operation 名由 `[language, import_path, member_path]` 唯一解析，其中 member_path
 是 alias 后以 `.` 连接的 ASCII 成员名。内建 snapshot 名为 `["lip","claim","snapshot"]`。
 这里 language 取 import 的 go/python/host 标记，import_path 是解码后的路径 string，
@@ -878,7 +881,7 @@ worker 而阻止释放许可所需的工作。
 整体等待/拒绝，不能部分占用后等待其余资源。预算/并发额度由 Host 公布；释放与
 journal 清理不能依赖已经关闭的 Flow control gate。无资源需求的调用不申请虚假许可。
 
-Go 的 error/Python exception 为节点 Error；Go panic/worker crash 由 adapter 分类为
+合约声明为失败通道的 Go error/Python exception 为节点 Error；Go panic/worker crash 由 adapter 分类为
 明确失败或 Uncertain。普通 provider Rejected 为 E-EFFECT-REJECTED；Host 确认外部动作
 完成后的转换/schema fault 保留 E-VALUE/E-SCHEMA，Uncertain 为 E-UNCERTAIN。
 结构化 `{ok: false, ...}` 若属于返回 schema，则仍是普通 Result，可做业务分支。
@@ -913,15 +916,17 @@ Go adapter 处理 context、有限值、struct/string-keyed map/list、声明的
 Python worker 处理相同 Data、exception、call ID、deadline、取消和有限队列。
 协议的 number 始终是 binary64；传输即使用 JSON，也按第 3 节解码，不能依赖 Python
 默认 int/float 猜测。默认 native 参数映射为 Go float64/Python float；需要 Go int 或
-Python 整数参数时 schema 必须声明并验证安全整数转换。bytes 不属于 Data，必须通过
+Python 整数参数时，adapter 合约必须声明并验证安全整数转换规则。bytes 不属于 Data，必须通过
 声明的 string 编码（如 base64/hex）或资源引用传输，不能隐式采用平台字符集。
 Python tuple 可以按声明映射为 list；set、native callable、array/DataFrame 等必须由
 adapter 给出显式 Data/资源引用转换，不能靠宿主默认 str 或不可检验 pickle 混入 Data。
 
 长期对象/大数组可以用 Host 管理的资源引用：引用是 Data object 中的不可猜测 token，
-只由认可该 schema 的 operation 解释，且绑定 Host/worker generation、run、类型、寿命
-和 capability。纯计算只能处理这个 object，不能访问原生对象。引用不等于权限，scope
-不符、过期、worker 重启或未迁移时必须拒绝；Host 提供 release/run 结束清理。
+只由认可该 schema 的 operation 解释，且绑定 Host/worker generation、类型、寿命和
+授权 scope。Host 必须声明寿命为单次 run 或显式会话；会话允许引用跨成功 cell 使用，
+不回放旧 cell 以重建对象。纯计算只能处理这个 object，不能访问原生对象。引用不等于
+权限，scope 不符、过期、worker 重启或未迁移时必须拒绝；Host 提供 release 和生命周期
+结束清理。Go 包初始化状态可具有进程寿命，不等于资源引用仍然有效。
 持久重放不得把已失效原生对象 token 当作可用结果，须重建、拒绝或显式 reconcile。
 
 ```text
@@ -938,8 +943,30 @@ flow Statistics(xs: list) -> object {
 本例的 Host 合约固定 version="1"：np.mean 接收有限 number list，返回 number，并
 声明 Concurrent ReadOnly；sha.Sum256 接收 string，由 adapter 将 UTF-8 bytes 传入
 Go 函数，把 32-byte 返回数组编码为 64 位小写 hex string，并声明 Concurrent ReadOnly。
-这些映射是注册合约，import 不会自动生成任意 Go 原生调用接口。
+这些映射是本例的显式注册合约；通用 adapter 不得将它们作为其他操作的默认转换规则。
 第三方 callback、stream、事务和大型对象由 adapter 合约承接，不增加第二套 LIP 计算语义。
+
+工具可提供通用库适配配置，例如 `NewNativeHost`。该配置通过 Go 导出类型信息生成
+adapter，或通过持久 Python worker 解析模块与对象，不限制包名单。它在核心检查前将
+直接调用、属性读取、方法、索引及资源转换降为注册的 proposal/perform，并声明 Unknown；
+不把 native callable 变成纯 fn，不绕过授权，也不推导 Concurrent。callee 解析和可获得的
+签名/arity 检查先于实参求值；无法获得原生签名时由实际调用检查，adapter 须说明这一
+限制。仅构造 effect 不执行这些原生检查或加载代码。
+
+这一配置可把 import alias 的值用法降为取模块资源引用的 perform，核心中的 alias
+仍只用于 operation 解析。import/补全不执行包初始化；Go 导出发现允许使用工具链与
+module resolver，Python importlib 在首次授权的实际操作时运行。CLI、交互会话与生成
+程序必须使用同一转换和调用边界，不能只在 REPL 中模拟库行为。
+
+本实现通用配置的转换合约为：Go number 按目标签名验证整数范围与精确转换；string
+映射到 Go `[]byte` 时明确采用 UTF-8。Python number 的安全整数值转为 int，其他值转
+为 float；这不改变 LIP number 的 binary64 身份。普通 Python list/tuple/字符串键 dict
+映射为 Data；Go 容器/结构体和其他原生对象保留为资源引用。`native_data` 经 perform
+取得有限无环 Data 快照，`native_release` 释放引用；不能以 release 代替对象自身的
+外部关闭方法。跨运行时的数据须显式取快照或编码，不能直接解释另一运行时的引用。
+进程取消或失联不得自动重试可能已完成的写入；重置或关闭须使原有引用失效。
+Go 多返回值中的末尾 error 按失败通道解释；唯一的 error 返回值保留为原生资源（nil
+为 null），使错误构造与比较操作可以组合。应用可通过显式合约声明其他错误映射。
 
 授权和数据边界不等于执行沙箱。进程内 Go、Python worker 仍具有其 OS 权限；不受信任
 库须由 Host 使用进程/容器隔离。effect/perform 不会使任意 native 代码自动变安全。
@@ -1085,7 +1112,7 @@ Host 显式处理旧外部事实/DedupKey，不能靠换 run_id 规避未决写�
 | 撤回、active view | 新的修订事实 + 明确投影，或 Host 持久 store |
 | 阈值等待 | 不属于核心；即时 snapshot 只读取一次，完整读取等待全部 producer |
 | trace、provenance UI、缓存、审批、限流 | Runtime 产品/策略，仍不得违背核心边界 |
-| 所有外部调用 | 统一 effect/perform，普通调用只用于纯核心/fn |
+| 所有外部调用 | 统一 effect/perform；通用库适配配置先把直接库调用与属性访问降为 perform（第 10 节） |
 
 count/bag 的事件 identity 必须保留；完整 snapshot 投影中不同 id 的相同 payload 分别
 计数，同一 id 重投只算一次。log 使用 Position 排序；浮点求和使用明确的左 fold，

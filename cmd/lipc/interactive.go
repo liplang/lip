@@ -63,6 +63,9 @@ func interactiveOptions() script.Options {
 }
 
 func showValue(value script.Value) string {
+	if description, ok := script.NativeDescription(value); ok {
+		return description
+	}
 	if value.Kind() == script.Function {
 		return "<纯函数>"
 	}
@@ -79,7 +82,7 @@ func showValue(value script.Value) string {
 func repl(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("repl", flag.ContinueOnError)
 	quiet := flags.Bool("quiet", !terminal(os.Stdin) || !terminal(os.Stdout), "hide prompts (automatic for pipes)")
-	hostName := flags.String("host", "", "registered Host: empty or demo")
+	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -100,6 +103,7 @@ func repl(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer session.Close()
 	if !*quiet {
 		fmt.Println("LIP beta 0.9 · 交互计算")
 		fmt.Println("输入表达式、绑定或 fn；:help 查看命令，:quit 或 Ctrl-D 退出。")
@@ -134,8 +138,11 @@ func repl(ctx context.Context, args []string) error {
 			case text == ":cancel":
 				source = ""
 			case text == ":help":
-				fmt.Println("help() 查看交互帮助；help(value)、help(np)、help(np.sqrt) 查看值、模块或成员的说明。")
-				fmt.Println("import python \"numpy\" as np 后可直接 np.sqrt(3)；Python 库需已安装。")
+				fmt.Println("help() 查看交互帮助；help(value)、help(module)、help(module.member) 查看值、Go 导出签名或 Python 库文档。")
+				fmt.Println("默认使用通用 Go/Python 桥接；包需由当前 Go module 或 Python 环境提供。")
+				fmt.Println("Go 第三方库使用区分大小写的完整包路径；在终端用 go get 配置当前 module 的依赖，as 指定简称。")
+				fmt.Println("import go \"strings\"; strings.ToUpper(\"hello\")；import python \"math\"; math.sqrt(3)。")
+				fmt.Println("native_data(value) 取得普通数据快照；native_release(value) 释放原生对象引用。")
 				fmt.Println(":vars 查看保存的值；:history 查看输入；:reset 清空会话；:cancel 丢弃未完成输入；:quit 退出。")
 				fmt.Println(":run file.lip 执行完整 Flow，可包含 Claim；使用当前 -host，不读取或改变会话绑定。")
 				fmt.Println("名字不可重复绑定。打开的 () [] {} 可继续输入；其他表达式用行末 \\ 续行。")

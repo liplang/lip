@@ -363,6 +363,8 @@ func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64) (fun
 }
 
 type Host struct {
+	// Native is an opt-in library bridge. Explicit contracts take precedence.
+	Native       *NativeLibraries
 	Contracts    []Contract
 	Authorize    func(context.Context, Request) error
 	Resources    *ResourcePool
