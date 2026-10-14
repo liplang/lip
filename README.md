@@ -127,6 +127,22 @@ In [3]: twice(x)
 12
 ```
 
+REPL 还支持直接调用已导入的 Python 库，以及通用帮助。Python 3 和相应的库需要已经安装：
+
+```text
+In [4]: import python "numpy" as np
+In [5]: np.sqrt(3)
+1.7320508075688772
+In [6]: help(np)
+...显示 NumPy 模块文档...
+In [7]: help(np.sqrt)
+...显示 sqrt 的签名和用法...
+```
+
+省略 `as` 时使用路径的最后一段，因此 `import python "numpy"` 后可调用 `numpy.sqrt(3)`。`help()` 显示交互帮助，`help(value)` 说明值、核心函数、纯函数或尚未执行的请求；`help("math.sqrt")` 可按名字查询 Python 文档。帮助以普通文本显示。Go/Host 模块的帮助列出已注册操作的签名。
+
+直接外部调用由 REPL 转换为 `perform effect`，仍经过参数、授权和结果检查；嵌套调用按实参顺序求值。已注册操作沿用 Host 合约；未注册的 Python 成员由交互适配器采用通用 Data 参数/结果合约，声明为 `Unknown`，不推断纯性或并发性。该适配器显式将 NumPy 实数/整数/布尔标量转换为普通值，将数组转换为嵌套列表；非有限数、复数、集合和其他不支持的原生对象报错。`import` 和补全不加载 Python 模块，只有实际调用或查询 Python 文档才启动 worker。
+
 打开的括号或大括号支持多行输入，其他续行使用行末 `\`。`:vars` 查看保存的值，`:history` 查看输入，`:reset` 清空会话，`:cancel` 丢弃未完成输入，`:quit` 退出。管道输入自动隐藏提示符：
 
 ```sh
@@ -187,6 +203,8 @@ make compile SOURCE=examples/ecosystem/17_go_python.lip HOST=demo OUTPUT=.build/
 ## 接入 Go / Python
 
 应用先通过 `script.Host` 注册允许调用的操作，说明名字、版本、参数和结果、是否读写、是否允许并发，以及权限和资源需求。LIP 的 `import` 声明这些名字的对应关系；不安装依赖，也不授予任意原生调用权限。
+
+嵌入会话使用 `script.NewSession(host)`，支持直接调用已注册操作和本地帮助；`script.NewInteractiveSession(host)` 另外启用上述通用 Python 适配器，也是 `lipc repl` 的默认配置。完整文件程序仍显式使用 `perform effect` 和已注册的 Host 合约。
 
 - `GoHandler` 适配固定 Go 签名，支持 context、结构体、字符串键的 map、列表和末尾 error。
 - `PythonHandler` 调用已安装模块中注册的成员，每次调用使用一个独立进程。

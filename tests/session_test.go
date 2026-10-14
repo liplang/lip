@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"errors"
 	. "lipbeta/script"
 	"os"
 	"os/exec"
@@ -111,6 +112,247 @@ fn odd(n:number)->bool { if n==0 {false} else {even(n-1)} }`, Options{})
 	}
 }
 
+func TestSessionDirectCallsKeepHostSemantics(t *testing.T) {
+	var arguments []float64
+	host := testHost(func(_ context.Context, request Request) Response {
+		value := request.Named["value"]
+		if len(request.Positional) != 0 {
+			value = request.Positional[0]
+		}
+		arguments = append(arguments, num(value))
+		return Result(value)
+	})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	eval := func(source, want string) {
+		t.Helper()
+		result, err := s.Eval(ctx, source, Options{Parallelism: 1})
+		if err != nil || want != "" && display(t, result.Value) != want {
+			t.Fatalf("%s: %v, %s", source, err, display(t, result.Value))
+		}
+	}
+	eval(`import python "example.worker"`, "")
+	eval(`x = worker.read(worker.read(3) + 1)`, "4")
+	eval(`worker.read(value=x)`, "4")
+	eval(`x + 1`, "5")
+	eval(`if false { worker.read(99) } else { 8 }`, "8")
+	if len(arguments) != 3 || arguments[0] != 3 || arguments[1] != 4 || arguments[2] != 4 {
+		t.Fatalf("call order or saved call replay: %v", arguments)
+	}
+	for source, code := range map[string]string{
+		`worker.read(worker.read(9), 2)`:         "E-ARITY",
+		`worker.read("bad")`:                     "E-SCHEMA",
+		`worker.missing(worker.read(9))`:         "E-OPERATION",
+		`fn impure()->number { worker.read(9) }`: "E-PURITY",
+		`effect worker.read(worker.read(9))`:     "E-PURITY",
+	} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != code {
+			t.Fatalf("%s: expected %s, got %v", source, code, err)
+		}
+	}
+	if len(arguments) != 3 {
+		t.Fatalf("invalid or unselected call executed provider: %v", arguments)
+	}
+	if _, err := Compile(`import python "example.worker"
+flow Main()->number { return worker.read(3) }`, host); err == nil {
+		t.Fatal("file compiler accepted an interactive shortcut")
+	}
+	host.Authorize = func(context.Context, Request) error { return errors.New("denied") }
+	denied, _ := NewSession(host)
+	_, _ = denied.Eval(ctx, `import python "example.worker"`, Options{})
+	_, err = denied.Eval(ctx, `worker.read(9)`, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-CAPABILITY" || len(arguments) != 3 {
+		t.Fatalf("direct call bypassed authorization: %v, %v", err, arguments)
+	}
+}
+
+func TestSessionGeneralHelp(t *testing.T) {
+	var calls atomic.Int64
+	s, _ := NewSession(testHost(func(context.Context, Request) Response {
+		calls.Add(1)
+		return Result(number(1))
+	}))
+	ctx := context.Background()
+	for _, source := range []string{`import python "example.worker"`, `fn twice(n:number)->number { n * 2 }`, `p = effect worker.read(3)`, `f = twice`} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, want := range map[string]string{
+		`help()`:            "LIP 交互帮助",
+		`help(3)`:           "binary64",
+		`help(true)`:        "bool",
+		`help(null)`:        "null",
+		`help("hello")`:     "UTF-8",
+		`help([1,2])`:       "list",
+		`help({x:1})`:       "object",
+		`help(len)`:         "len",
+		`help(twice)`:       "fn(n:number) -> number",
+		`help(f)`:           "fn(n:number) -> number",
+		`help([twice][0])`:  "fn(n:number) -> number",
+		`help(p)`:           "尚未执行",
+		`help(worker)`:      "worker.read(value:number)",
+		`help(worker.read)`: "worker.read(value:number)",
+	} {
+		result, err := s.Eval(ctx, source, Options{})
+		text, _ := result.Value.Text()
+		if err != nil || !result.Help || !strings.Contains(text, want) {
+			t.Fatalf("%s: %v, %q", source, err, text)
+		}
+	}
+	for source, code := range map[string]string{
+		`help(1,2)`:                  "E-ARITY",
+		`help(value=worker.read(9))`: "E-ARITY",
+		`help(missing)`:              "E-NAME",
+		`help(worker.missing)`:       "E-OPERATION",
+	} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != code {
+			t.Fatalf("%s: expected %s, got %v", source, code, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("help executed an operation being described")
+	}
+	for _, source := range []string{`h = help`, `h(twice)`, `fn describe(x:any)->string {help(x)}`, `describe(2)`, `fn invoke(help:function)->number {help(3)}`, `invoke(twice)`, `[help+1 for help in [1,2]]`, `for help in [1,2] with total=0 {next total+help}`} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatalf("help value or lexical scope %s: %v", source, err)
+		}
+	}
+	if _, err := s.Eval(ctx, `help = twice`, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Eval(ctx, `help(3)`, Options{})
+	if err != nil || result.Help || num(result.Value) != 6 {
+		t.Fatalf("help shadowing: %v, %v", result, err)
+	}
+}
+
+func TestInteractivePythonCallsAndDocumentation(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("Python 3 unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var authorized atomic.Int64
+	moduleDir := t.TempDir()
+	marker := filepath.Join(moduleDir, "imported")
+	module := `from pathlib import Path
+Path(__file__).with_name("imported").write_text("yes")
+def add(x, y=1):
+    """Add values for interactive adapter tests."""
+    return x + y
+def unsupported():
+    return {1, 2}
+def nonfinite():
+    return float("inf")
+`
+	if err := os.WriteFile(filepath.Join(moduleDir, "lip_repl_fixture.py"), []byte(module), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", moduleDir)
+	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
+	host := Host{Authorize: func(context.Context, Request) error { authorized.Add(1); return nil }}
+	s, err := NewInteractiveSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval := func(source, want string) CellResult {
+		t.Helper()
+		result, err := s.Eval(ctx, source, Options{})
+		if err != nil || want != "" && display(t, result.Value) != want {
+			t.Fatalf("%s: %v, %s", source, err, display(t, result.Value))
+		}
+		return result
+	}
+	eval(`import python "lip_repl_fixture" as py`, "")
+	_ = s.Complete("py.")
+	if _, err := os.Stat(marker); !os.IsNotExist(err) || authorized.Load() != 0 {
+		t.Fatal("import or completion executed Python", err)
+	}
+	eval(`x=py.add(3, y=4)`, "7")
+	eval(`py.add(py.add(x), y=2)`, "10")
+	eval(`proposal=effect py.add(8, y=2)`, "")
+	before := authorized.Load()
+	eval(`perform proposal`, "10")
+	eval(`x`, "7")
+	if authorized.Load() != before+1 {
+		t.Fatal("saved value or proposal repeated a call")
+	}
+	result := eval(`help(py.add)`, "")
+	text, _ := result.Value.Text()
+	if !result.Help || !strings.Contains(text, "Add values for interactive adapter tests.") {
+		t.Fatal("missing Python member documentation", text)
+	}
+	result = eval(`help(py)`, "")
+	text, _ = result.Value.Text()
+	if !strings.Contains(text, "lip_repl_fixture") || strings.Contains(text, "\b") {
+		t.Fatal("missing or terminal-formatted module documentation", text)
+	}
+	eval(`import python "math"`, "")
+	eval(`math.sqrt(3)`, "1.7320508075688772")
+	eval(`help("math.sqrt")`, "")
+	for source, code := range map[string]string{
+		`failed=py.unsupported()`:      "E-VALUE",
+		`py.nonfinite()`:               "E-VALUE",
+		`py.missing()`:                 "E-EFFECT-REJECTED",
+		`py.add(fn()->number {1})`:     "E-SCHEMA",
+		`fn bad()->number {py.add(1)}`: "E-PURITY",
+	} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != code {
+			t.Fatalf("%s: expected %s, got %v", source, code, err)
+		}
+	}
+	if _, saved := s.Values()["failed"]; saved {
+		t.Fatal("failed call committed a binding")
+	}
+	if names := s.Complete("py.unsupported"); len(names) != 0 {
+		t.Fatalf("failed cell published its operation: %v", names)
+	}
+	eval(`py.add(1)`, "2")
+	// An application authorization callback must run before module import.
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	denied, _ := NewInteractiveSession(Host{Authorize: func(context.Context, Request) error { return errors.New("denied") }})
+	_, _ = denied.Eval(ctx, `import python "lip_repl_fixture" as py`, Options{})
+	for _, source := range []string{`py.add(1)`, `help(py)`} {
+		_, err := denied.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-CAPABILITY" {
+			t.Fatalf("%s bypassed authorization: %v", source, err)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("denied operation imported the Python module", err)
+	}
+	if err := exec.CommandContext(ctx, python, "-c", "import numpy").Run(); err != nil {
+		t.Log("NumPy unavailable; standard-library and fixture coverage passed")
+	} else {
+		eval(`import python "numpy" as np`, "")
+		eval(`np.sqrt(3)`, "1.7320508075688772")
+		eval(`np.sqrt([1,4,9])`, "[1,2,3]")
+		eval(`np.sum([1,2,3])`, "6")
+		eval(`np.all([true,false])`, "false")
+		eval(`import python "numpy"`, "")
+		eval(`numpy.sqrt(3)`, "1.7320508075688772")
+	}
+	s.Reset()
+	if _, err := s.Eval(ctx, `py.add(1)`, Options{}); err == nil {
+		t.Fatal("reset retained an import")
+	}
+	eval(`import python "lip_repl_fixture" as py`, "")
+	if names := s.Complete("py.add"); len(names) != 0 {
+		t.Fatalf("reset retained a discovered operation: %v", names)
+	}
+	eval(`py.add(1)`, "2")
+}
+
 func TestCellContinuationUsesCoreGrammar(t *testing.T) {
 	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else"} {
 		if !CellIncomplete(source) {
@@ -163,6 +405,15 @@ func TestInteractiveCLI(t *testing.T) {
 		stdout, stderr := run("import go \"strings\" as text\nx=perform effect text.ToUpper(\"Ada\")\nx+\"!\"\n:quit\n", "repl", "-host", "demo")
 		if stdout != "\"ADA\"\n\"ADA!\"\n" || stderr != "" {
 			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("repl-python-and-help", func(t *testing.T) {
+		if _, err := exec.LookPath("python3"); err != nil {
+			t.Skip("Python 3 unavailable")
+		}
+		stdout, stderr := run("3 ** -2\nimport python \"math\" as m\nm.sqrt(3)\nhelp(m.sqrt)\nimport python \"math\"\nmath.sqrt(3)\nhelp()\nhelp(len)\nhelp([1,2])\nm.missing()\nm.sqrt(4)\n:quit\n", "repl")
+		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 交互帮助\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
+			t.Fatalf("stdout %q stderr %q", stdout, stderr)
 		}
 	})
 	t.Run("all-lessons", func(t *testing.T) {

@@ -96,7 +96,7 @@ func repl(ctx context.Context, args []string) error {
 	} else if *hostName != "" {
 		return fmt.Errorf("unknown Host %q", *hostName)
 	}
-	session, err := script.NewSession(host)
+	session, err := script.NewInteractiveSession(host)
 	if err != nil {
 		return err
 	}
@@ -134,6 +134,8 @@ func repl(ctx context.Context, args []string) error {
 			case text == ":cancel":
 				source = ""
 			case text == ":help":
+				fmt.Println("help() 查看交互帮助；help(value)、help(np)、help(np.sqrt) 查看值、模块或成员的说明。")
+				fmt.Println("import python \"numpy\" as np 后可直接 np.sqrt(3)；Python 库需已安装。")
 				fmt.Println(":vars 查看保存的值；:history 查看输入；:reset 清空会话；:cancel 丢弃未完成输入；:quit 退出。")
 				fmt.Println(":run file.lip 执行完整 Flow，可包含 Claim；使用当前 -host，不读取或改变会话绑定。")
 				fmt.Println("名字不可重复绑定。打开的 () [] {} 可继续输入；其他表达式用行末 \\ 续行。")
@@ -177,7 +179,12 @@ func repl(ctx context.Context, args []string) error {
 					if err != nil {
 						fmt.Fprintln(os.Stderr, err)
 					} else if result.HasValue {
-						fmt.Println(showValue(result.Value))
+						if result.Help {
+							text, _ := result.Value.Text()
+							fmt.Println(text)
+						} else {
+							fmt.Println(showValue(result.Value))
+						}
 					}
 				}
 				source = ""
