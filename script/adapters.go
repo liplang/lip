@@ -22,8 +22,9 @@ func FromNative(native any) (Value, error) {
 }
 
 type visitKey struct {
-	typ reflect.Type
-	ptr uintptr
+	typ    reflect.Type
+	ptr    uintptr
+	length int // Different slice views may share a start address without a cycle.
 }
 
 func fromReflect(v reflect.Value, seen map[visitKey]bool) (Value, error) {
@@ -67,7 +68,7 @@ func fromReflect(v reflect.Value, seen map[visitKey]bool) (Value, error) {
 			return Value{}, diagnostic("E-VALUE", "bytes require explicit encoding")
 		}
 		if v.Kind() == reflect.Slice {
-			key := visitKey{v.Type(), v.Pointer()}
+			key := visitKey{typ: v.Type(), ptr: v.Pointer(), length: v.Len()}
 			if seen[key] {
 				return Value{}, diagnostic("E-VALUE", "cyclic native list")
 			}
@@ -87,7 +88,7 @@ func fromReflect(v reflect.Value, seen map[visitKey]bool) (Value, error) {
 		if v.Type().Key().Kind() != reflect.String {
 			return Value{}, diagnostic("E-VALUE", "native map requires string keys")
 		}
-		key := visitKey{v.Type(), uintptr(v.UnsafePointer())}
+		key := visitKey{typ: v.Type(), ptr: uintptr(v.UnsafePointer())}
 		if seen[key] {
 			return Value{}, diagnostic("E-VALUE", "cyclic native object")
 		}
@@ -106,7 +107,7 @@ func fromReflect(v reflect.Value, seen map[visitKey]bool) (Value, error) {
 			}
 			o[k] = x
 		}
-		return object(o), nil
+		return ObjectValue(o)
 	case reflect.Struct:
 		o := map[string]Value{}
 		for i := 0; i < v.NumField(); i++ {
@@ -130,7 +131,7 @@ func fromReflect(v reflect.Value, seen map[visitKey]bool) (Value, error) {
 			}
 			o[name] = x
 		}
-		return object(o), nil
+		return ObjectValue(o)
 	}
 	return Value{}, diagnostic("E-VALUE", "native value requires an explicit Data adapter")
 }

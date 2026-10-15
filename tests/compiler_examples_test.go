@@ -24,7 +24,7 @@ var examples = []exampleCase{
 	{path: "basics/01_hello.lip", want: `"Hello, LIP!"`},
 	{path: "basics/02_bindings.lip", want: `{"subtotal":36,"total":31}`},
 	{path: "basics/03_arithmetic.lip", want: `{"division":3.5,"grouped":20,"inverse_power":0.125,"logarithm":3,"logic":true,"negative_base":9,"negative_power":-9,"power":8,"power_chain":512,"quotient":-2,"remainder":1,"sum":14}`},
-	{path: "basics/04_containers.lip", want: `{"fields":["name","role"],"first":"Ada","has_age":false,"names":["Ada","Lin","Sam"],"original_role":"reader","updated":{"name":"Ada","role":"writer"}}`},
+	{path: "basics/04_containers.lip", want: `{"every_other":[1,3,5,7],"fields":["name","role"],"first":"Ada","has_age":false,"last":"Lin","names":["Ada","Lin","Sam"],"original_role":"reader","reversed":["Lin","Ada"],"selected":["Lin","Ada","Lin"],"updated":{"name":"Ada","role":"writer"}}`},
 	{path: "basics/05_strings_numbers.lip", want: `{"display":"score=0.8","length":3,"lexical_order":true,"middle":"𐀀","score":0.8,"words":["red","","blue"]}`},
 	{path: "basics/22_multiline_strings.lip", want: `{"html":"\u000a<main>\u000a  <h1 title=\"Welcome\">Hello, LIP!</h1>\u000a</main>\u000a","prompt":"Read \"carefully\".\u000a# This is text, not a comment.\u000a","quotes":"Embedded triple quotes: \"\"\""}`},
 	{path: "structures/06_conditions.lip", want: `{"grade":"ready","safe":false}`},
@@ -562,6 +562,39 @@ export flow Adjust(x:number)->number{return x+BASE}`},
 
 // One frozen diamond dependency exercises the same dynamic contexts on both
 // execution paths; modes include gated calls and runtime Data boundary faults.
+func TestSnapshotProposalComposition(t *testing.T) {
+	source := `flow Collect(value:number)->list {
+ facts=claim()
+ facts <+ value
+ complete=facts
+ request={len(complete);effect claim.snapshot("facts")}
+ reader=fn()->effect{request}
+ boxed=map([reader()],fn(p:effect)->effect{p})
+ selected=for x in [0] with p=boxed[::-1][[0,0]][-1] {next p}
+ observed=perform selected
+ return [r.value for r in observed]
+}
+flow Main()->list {return [Collect(1),Collect(2)]}`
+	p, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, parallel := range []int{1, 7} {
+		journal := NewMemoryJournal()
+		for replay := 0; replay < 2; replay++ {
+			report, err := p.Run(context.Background(), nil, Options{RunID: "snapshot-composition", Parallelism: parallel, Journal: journal})
+			if err != nil || display(t, report.Output) != `[[1],[2]]` || len(journal.Records()) != 2 {
+				t.Fatal("snapshot identity or replay changed", report, err, journal.Records())
+			}
+		}
+		stdout, stderr, err := runNative(t, executable, "-parallel", fmt.Sprint(parallel))
+		if err != nil || strings.TrimSpace(stdout) != `[[1],[2]]` {
+			t.Fatal(stdout, stderr, err)
+		}
+	}
+}
+
 func TestCoreCompositionConformance(t *testing.T) {
 	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
 		"main.lip": {Version: "local", Text: `import lip "./left.lip" as left
@@ -641,5 +674,83 @@ export fn scale(x:number)->number{x |>double}`},
 				}
 			}
 		})
+	}
+}
+
+func TestIndexAndSliceConformance(t *testing.T) {
+	source := `flow Main(op:string,x:any,i:any,start:any,stop:any,step:any)->any {
+ return match op {"index"=>x[i],"slice"=>x[start:stop:step],
+ "composition"=>{f=[fn(x:number)->number{x+1},fn(x:number)->number{x*2}];chosen=f[::-1][[0,1,0]];{values:map(chosen,fn(g:function)->number{g(3)}),nested:range(10)[2:8:2][::-1][[0,-1,0]],total:fold(slice(range(5),null,null,-1),0,fn(a:number,b:number)->number{a+b})}},
+ _=>slice(x,start,stop,step)}
+}`
+	p, err := Compile(source, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, test := range []struct{ op, x, i, start, stop, step, want, code string }{
+		{"composition", "null", "null", "null", "null", "null", `{"nested":[6,2,6],"total":10,"values":[6,4,6]}`, ""},
+		{"index", "[0,1,2,3,4]", "-1", "null", "null", "null", "4", ""},
+		{"index", "[0,1,2,3,4]", "[3,-1,3,0]", "null", "null", "null", "[3,4,3,0]", ""},
+		{"index", "[]", "[]", "null", "null", "null", "[]", ""},
+		{"index", `"a𐀀b"`, "-2", "null", "null", "null", `"𐀀"`, ""},
+		{"index", `{"x":7}`, `"x"`, "null", "null", "null", "7", ""},
+		{"slice", "[0,1,2,3,4]", "null", "null", "null", "-1", "[4,3,2,1,0]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "1", "5", "2", "[1,3]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "99", "-99", "-2", "[4,2,0]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "null", "-1", "-1", "[]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "-4", "-1", "null", "[1,2,3]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "4", "1", "1", "[]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "1", "4", "-1", "[]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "-9007199254740991", "9007199254740991", "9007199254740991", "[0]", ""},
+		{"slice", "[0,1,2,3,4]", "null", "9007199254740991", "-9007199254740991", "-9007199254740991", "[4]", ""},
+		{"slice", `"a𐀀b"`, "null", "null", "null", "-1", `"b𐀀a"`, ""},
+		{"slice", "[]", "null", "null", "null", "-1", "[]", ""},
+		{"slice", `""`, "null", "null", "null", "-1", `""`, ""},
+		{"builtin", "[0,1,2,3,4]", "null", "-99", "99", "2", "[0,2,4]", ""},
+		{"builtin", `"a𐀀b"`, "null", "null", "null", "-1", `"b𐀀a"`, ""},
+		{"index", "[0]", "-2", "null", "null", "null", "", "E-INDEX"},
+		{"index", "[0]", "1", "null", "null", "null", "", "E-INDEX"},
+		{"index", "[0]", "[0,1]", "null", "null", "null", "", "E-INDEX"},
+		{"index", "[0]", "0.5", "null", "null", "null", "", "E-INDEX"},
+		{"index", "[0]", "9007199254740992", "null", "null", "null", "", "E-INDEX"},
+		{"index", "[0]", "[false]", "null", "null", "null", "", "E-TYPE"},
+		{"index", `"a"`, "[0]", "null", "null", "null", "", "E-TYPE"},
+		{"index", `{}`, `"missing"`, "null", "null", "null", "", "E-INDEX"},
+		{"index", `{}`, "0", "null", "null", "null", "", "E-TYPE"},
+		{"slice", "[0]", "null", "null", "null", "0", "", "E-VALUE"},
+		{"slice", "[]", "null", "null", "null", "0", "", "E-VALUE"},
+		{"slice", "[0]", "null", "null", `"x"`, "1", "", "E-TYPE"},
+		{"slice", "[0]", "null", "0.5", "null", "1", "", "E-INDEX"},
+		{"slice", "[0]", "null", "null", "null", "-9007199254740992", "", "E-INDEX"},
+		{"builtin", "[0]", "null", "null", "null", "0", "", "E-VALUE"},
+		{"slice", "{}", "null", "null", "null", "1", "", "E-TYPE"},
+	} {
+		input := fmt.Sprintf(`{"op":%q,"x":%s,"i":%s,"start":%s,"stop":%s,"step":%s}`, test.op, test.x, test.i, test.start, test.stop, test.step)
+		data, err := DecodeData([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields, _ := data.Fields()
+		report, runErr := p.Run(context.Background(), fields, Options{MaxElements: 100})
+		stdout, stderr, nativeErr := runNative(t, executable, "-input", input, "-elements", "100")
+		if test.code == "" {
+			if runErr != nil || display(t, report.Output) != test.want || nativeErr != nil || strings.TrimSpace(stdout) != test.want {
+				t.Fatalf("%s: interpreter=%v %v compiled=%q %s %v", input, report, runErr, stdout, stderr, nativeErr)
+			}
+		} else if runErr == nil || runErr.(*Diagnostic).Code != test.code || nativeErr == nil || stdout != "" || !strings.Contains(stderr, runErr.Error()) {
+			t.Fatalf("%s: interpreter=%v compiled=%q %s %v", input, runErr, stdout, stderr, nativeErr)
+		}
+	}
+	// Inputs are already allocated: only the new gather/slice can exceed this budget.
+	for _, op := range []string{"index", "slice", "builtin"} {
+		input := fmt.Sprintf(`{"op":%q,"x":[0,1,2,3],"i":[0,0,0],"start":null,"stop":null,"step":1}`, op)
+		data, _ := DecodeData([]byte(input))
+		fields, _ := data.Fields()
+		_, err := p.Run(context.Background(), fields, Options{MaxElements: 2})
+		stdout, stderr, nativeErr := runNative(t, executable, "-input", input, "-elements", "2")
+		if err == nil || err.(*Diagnostic).Code != "E-BUDGET" || nativeErr == nil || stdout != "" || !strings.Contains(stderr, "E-BUDGET") {
+			t.Fatal(op, err, stdout, stderr, nativeErr)
+		}
 	}
 }

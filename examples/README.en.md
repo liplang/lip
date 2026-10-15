@@ -4,7 +4,7 @@
 
 These executable examples develop one LIP 1.0 model: pure functions compute values, Flows organize dependencies, Claims collect facts, and effect/perform executes external actions. `#` starts a line comment; each file explains its syntax in English. Run `make build` at the project root first. Examples are checked through interpretation and actual generated Go programs.
 
-Start with `./lipc learn` for 18 interactive lessons or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select multiple entries with `-entry` and provide `-input` or `-entry-input`.
+Start with `./lipc learn` for 19 interactive lessons or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select multiple entries with `-entry` and provide `-input` or `-entry-input`.
 
 ## Five rules to remember
 
@@ -25,7 +25,7 @@ Run `./lipc run examples/basics/FILE.lip`.
 | [01_hello](basics/01_hello.lip) | Entry, return annotation, final result | `"Hello, LIP!"` |
 | [02_bindings](basics/02_bindings.lip) | Immutable names for new results | subtotal=36, total=31 |
 | [03_arithmetic](basics/03_arithmetic.lip) | Precedence, power/log, division/floor/remainder, logic | 2**3=8, 8*/2=3 |
-| [04_containers](basics/04_containers.lip) | Lists/objects, indices, has/keys/put/concat | Original role remains reader |
+| [04_containers](basics/04_containers.lip) | Lists/objects, negative/gather indices, slices, has/keys/put/concat | Original role remains reader |
 | [05_strings_numbers](basics/05_strings_numbers.lip) | Unicode, slice/split, parsing, string order | score=0.8, middle="𐀀" |
 | [22_multiline_strings](basics/22_multiline_strings.lip) | Triple quotes, indentation, escapes/newlines | HTML/prompts are ordinary strings |
 
@@ -149,3 +149,5 @@ make compile SOURCE=examples/advanced/26_flows.lip ENTRY=Main OUTPUT=.build/flow
 Generated programs fix entry/module snapshots, accept runtime -input/-entry-input/-entry-output/-parallel options, and do not accept .lip files. make compile supports ENTRY/PROJECT/HOST. See [input/output conventions](../README.en.md#language-core-and-program-structure).
 
 make examples prints acceptance results; make clean removes outputs/caches.
+
+`a[-1]` selects the last item, `a[[2,0,-1]]` gathers in index order, `a[1::2]` strides, and `a[::-1]` reverses. Slice bounds clip; strings slice by Unicode scalar. `learn -lesson slicing` exercises populated and empty inputs.

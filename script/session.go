@@ -642,6 +642,8 @@ func cloneSessionFlow(f *flowDecl) *flowDecl {
 
 const sessionHelp = `LIP 1.0 interactive help
 Enter LIP expressions, statements, fn/Flow declarations, static Data, exports, and imports.
+Lists support a[-1], a[[2,0,-1]], and a[start:stop:step]; a[::-1] reverses a list.
+Strings support scalar indices and slices by Unicode scalar; slice bounds clip and step cannot be zero.
 Named fn/Flow and pure core functions support |> pipelines. Declare a Flow, then call it by name or through |>.
 Claims collect facts with provenance. Complete reads wait for all contributions; active stores last one cell or Flow invocation.
 Use :begin / :end for a whole script, forward declarations, or Claim declaration/join/read in one cell.
@@ -669,7 +671,7 @@ var sessionBuiltinHelp = map[string]string{
 	"fold":         "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed.",
 	"fail":         "fail(message:string)\nEnd evaluation with E-FAIL.",
 	"concat":       "concat(a:list, b:list) -> list\nReturn a new list concatenating both inputs.",
-	"slice":        "slice(value, start:number, end:number)\nSlice a list or string, excluding end; indices start at 0.",
+	"slice":        "slice(value, start:number?, stop:number? [, step:number?])\nSlice a list or string, excluding stop, just like value[start:stop:step]. Negative bounds are relative to length and clip; null selects defaults. Step defaults to 1 and cannot be zero; slice(value,null,null,-1) reverses.",
 	"keys":         "keys(value:object) -> list\nReturn string keys sorted by UTF-8 bytes.",
 	"has":          "has(value:object, key:string) -> bool\nTest whether the object has this key.",
 	"put":          "put(value:object, key:string, item:any) -> object\nReturn a new object with the field added or replaced.",
@@ -998,7 +1000,7 @@ func sessionHelpFunction(t token, param string) *expression {
 		} else if value.k == Effect {
 			text = fmt.Sprintf("effect %s %q %s\nExternal request; not yet performed. Use perform to execute it.", value.p.contract.Operation.Language, value.p.contract.Operation.Path, value.p.contract.Operation.Member)
 		} else {
-			descriptions := map[Kind]string{Null: "Null value.", Bool: "Boolean true / false.", Number: "Finite binary64 number.", String: "Immutable UTF-8 string; use len / split / slice.", List: "Immutable list; indices start at 0; use len / map / fold / slice.", Object: "Immutable object with string keys; read with .field or [key]; use keys / has / put."}
+			descriptions := map[Kind]string{Null: "Null value.", Bool: "Boolean true / false.", Number: "Finite binary64 number.", String: "Immutable UTF-8 string; scalar indices and slices count Unicode scalars: s[-1], s[::-1]; use len / split / slice.", List: "Immutable list; use a[-1], a[[2,0,-1]], a[start:stop:step], or a[::-1]. Index lists preserve order and duplicates; slice bounds clip; step cannot be zero. Use len / map / fold / slice.", Object: "Immutable object with string keys; read with .field or [key]; use keys / has / put."}
 			text += "\n" + descriptions[value.k]
 		}
 		return evalResult{value: textValue(text)}, nil

@@ -253,7 +253,7 @@ func (a *GoAdapter) referenceTypeInfo(x any, run nativeRun) (info map[string]any
 	v := a.decoded(x)
 	return a.typeInfo(v.Type()).(map[string]any), nil
 }
-func (a *GoAdapter) encode(v reflect.Value, seen map[uintptr]bool) any {
+func (a *GoAdapter) encode(v reflect.Value) any {
 	if !v.IsValid() {
 		return nil
 	}
@@ -261,7 +261,7 @@ func (a *GoAdapter) encode(v reflect.Value, seen map[uintptr]bool) any {
 		if v.IsNil() {
 			return nil
 		}
-		return a.encode(v.Elem(), seen)
+		return a.encode(v.Elem())
 	}
 	if v.Type() == reflect.TypeFor[Value]() {
 		value := v.Interface().(Value)
@@ -286,7 +286,7 @@ func (a *GoAdapter) encode(v reflect.Value, seen map[uintptr]bool) any {
 		if !strings.ContainsAny(s, ".eE") && math.Abs(n) > 9007199254740991 {
 			fail("E-VALUE", "integer outside safe range")
 		}
-		return a.encode(reflect.ValueOf(n), seen)
+		return a.encode(reflect.ValueOf(n))
 	}
 	switch v.Kind() {
 	case reflect.Bool:
@@ -503,7 +503,7 @@ func (a *GoAdapter) member(v reflect.Value, name string) reflect.Value {
 	fail("E-OPERATION", "no exported member "+name)
 	return reflect.Value{}
 }
-func (a *GoAdapter) snapshot(v reflect.Value, seen map[uintptr]bool) any {
+func (a *GoAdapter) snapshot(v reflect.Value, seen map[visitKey]bool) any {
 	if !v.IsValid() {
 		return nil
 	}
@@ -512,24 +512,24 @@ func (a *GoAdapter) snapshot(v reflect.Value, seen map[uintptr]bool) any {
 			return nil
 		}
 		if v.Kind() == reflect.Pointer {
-			p := v.Pointer()
-			if seen[p] {
+			key := visitKey{typ: v.Type(), ptr: v.Pointer()}
+			if seen[key] {
 				fail("E-VALUE", "cyclic native object")
 			}
-			seen[p] = true
-			defer delete(seen, p)
+			seen[key] = true
+			defer delete(seen, key)
 		}
 		return a.snapshot(v.Elem(), seen)
 	}
 	switch v.Kind() {
 	case reflect.Slice, reflect.Array:
 		if v.Kind() == reflect.Slice {
-			p := v.Pointer()
-			if seen[p] {
+			key := visitKey{typ: v.Type(), ptr: v.Pointer(), length: v.Len()}
+			if seen[key] {
 				fail("E-VALUE", "cyclic native list")
 			}
-			seen[p] = true
-			defer delete(seen, p)
+			seen[key] = true
+			defer delete(seen, key)
 		}
 		xs := make([]any, v.Len())
 		for i := range xs {
@@ -540,12 +540,12 @@ func (a *GoAdapter) snapshot(v reflect.Value, seen map[uintptr]bool) any {
 		if v.Type().Key().Kind() != reflect.String {
 			fail("E-VALUE", "Data map requires string keys")
 		}
-		p := uintptr(v.UnsafePointer())
-		if seen[p] {
+		key := visitKey{typ: v.Type(), ptr: uintptr(v.UnsafePointer())}
+		if seen[key] {
 			fail("E-VALUE", "cyclic native map")
 		}
-		seen[p] = true
-		defer delete(seen, p)
+		seen[key] = true
+		defer delete(seen, key)
 		m := map[string]any{}
 		iter := v.MapRange()
 		for iter.Next() {
@@ -564,7 +564,7 @@ func (a *GoAdapter) snapshot(v reflect.Value, seen map[uintptr]bool) any {
 		}
 		return m
 	}
-	encoded := a.encode(v, seen)
+	encoded := a.encode(v)
 	if ref, ok := encoded.(map[string]any); ok && ref[nativeReferenceKey] != nil {
 		fail("E-VALUE", "object needs an explicit Data conversion")
 	}
@@ -602,27 +602,74 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 			}
 		}
 		r.Args = r.Args[1:]
-		if r.Action == "index" {
-			if len(r.Args) != 1 {
-				fail("E-ARITY", "index needs one key")
+		if r.Action == "index" || r.Action == "slice" {
+			want := 1
+			if r.Action == "slice" {
+				want = 3
+			}
+			if len(r.Args) != want {
+				fail("E-ARITY", "invalid native indexing arguments")
 			}
 			for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
 				v = v.Elem()
 			}
-			if v.Kind() == reflect.Map {
-				return a.encode(v.MapIndex(a.convert(r.Args[0], v.Type().Key())), map[uintptr]bool{})
+			if r.Action == "index" && v.Kind() == reflect.Map {
+				return a.encode(v.MapIndex(a.convert(r.Args[0], v.Type().Key())))
 			}
 			if v.Kind() != reflect.Slice && v.Kind() != reflect.Array && v.Kind() != reflect.String {
-				fail("E-TYPE", "native value cannot be indexed")
+				fail("E-TYPE", "native value cannot be indexed or sliced")
 			}
-			i, ok := r.Args[0].(float64)
-			if !ok || math.Trunc(i) != i || i < 0 || i >= float64(v.Len()) {
-				fail("E-INDEX", "index out of range")
+			parts := make([]Value, len(r.Args))
+			for i, arg := range r.Args {
+				x, err := FromNative(arg)
+				if err != nil {
+					fail("E-TYPE", err.Error())
+				}
+				parts[i] = x
 			}
-			return a.encode(v.Index(int(i)), map[uintptr]bool{})
+			check := func(err error) {
+				if err != nil {
+					d := err.(*Diagnostic)
+					fail(d.Code, d.Message)
+				}
+			}
+			if v.Kind() == reflect.String {
+				var out Value
+				var err error
+				if r.Action == "index" {
+					out, err = indexValue(textValue(v.String()), parts[0], nil, nil)
+				} else {
+					out, err = sliceValue(textValue(v.String()), parts, nil, nil)
+				}
+				check(err)
+				return out.s
+			}
+			if r.Action == "index" && parts[0].k != List {
+				i, err := relativeIndex(parts[0], v.Len())
+				check(err)
+				return a.encode(v.Index(i))
+			}
+			var selected reflect.Value
+			if r.Action == "index" {
+				indices := parts[0].l
+				selected = reflect.MakeSlice(reflect.SliceOf(v.Type().Elem()), len(indices), len(indices))
+				for j, index := range indices {
+					i, err := relativeIndex(index, v.Len())
+					check(err)
+					selected.Index(j).Set(v.Index(i))
+				}
+			} else {
+				start, step, count, err := slicePlan(v.Len(), parts)
+				check(err)
+				selected = reflect.MakeSlice(reflect.SliceOf(v.Type().Elem()), int(count), int(count))
+				for j, i := int64(0), start; j < count; j, i = j+1, i+step {
+					selected.Index(int(j)).Set(v.Index(int(i)))
+				}
+			}
+			return a.encode(selected)
 		}
 		if r.Action == "snapshot" {
-			return a.snapshot(v, map[uintptr]bool{})
+			return a.snapshot(v, map[visitKey]bool{})
 		}
 		if r.Action == "length" {
 			switch v.Kind() {
@@ -717,14 +764,14 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 		if len(r.Args) == 1 {
 			v = a.convert(r.Args[0], typ)
 		}
-		return a.encode(v, map[uintptr]bool{})
+		return a.encode(v)
 	}
 	v, ok := value.(reflect.Value)
 	if !ok {
 		v = reflect.ValueOf(value)
 	}
 	if r.Action == "get" {
-		return a.encode(v, map[uintptr]bool{})
+		return a.encode(v)
 	}
 	if v.Kind() != reflect.Func || v.IsNil() {
 		if s, ok := value.(string); ok && strings.HasPrefix(s, "generic ") {
@@ -772,11 +819,11 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 		return nil
 	}
 	if len(out) == 1 {
-		return a.encode(out[0], map[uintptr]bool{})
+		return a.encode(out[0])
 	}
 	xs := make([]any, len(out))
 	for i, x := range out {
-		xs[i] = a.encode(x, map[uintptr]bool{})
+		xs[i] = a.encode(x)
 	}
 	return xs
 }

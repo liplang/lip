@@ -4,7 +4,7 @@
 
 这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
 
-第一次接触可运行 `./lipc learn`，跟随 18 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；多入口示例带 `-entry`，输入用 `-input` 或 `-entry-input`。
+第一次接触可运行 `./lipc learn`，跟随 19 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；多入口示例带 `-entry`，输入用 `-input` 或 `-entry-input`。
 
 REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
@@ -27,7 +27,7 @@ REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道�
 | [01_hello](basics/01_hello.lip) | Flow 入口、返回注解、最终结果 | `"Hello, LIP!"` |
 | [02_bindings](basics/02_bindings.lip) | 不可变绑定，用新名字表达新结果 | `subtotal=36, total=31` |
 | [03_arithmetic](basics/03_arithmetic.lip) | 优先级、幂、对数、除法、整商、取模、逻辑运算 | `2**3=8, 8*/2=3` |
-| [04_containers](basics/04_containers.lip) | list/object、索引、has/keys/put/concat | 原对象 role 仍为 `reader` |
+| [04_containers](basics/04_containers.lip) | list/object、负索引、索引列表、切片、has/keys/put/concat | 原对象 role 仍为 `reader` |
 | [05_strings_numbers](basics/05_strings_numbers.lip) | Unicode、slice/split、数字解析、string 排序 | `score=0.8, middle="𐀀"` |
 | [22_multiline_strings](basics/22_multiline_strings.lip) | 三引号、缩进、转义与物理换行 | HTML 与 prompt 均为普通 string |
 
@@ -152,3 +152,5 @@ make compile SOURCE=examples/advanced/26_flows.lip ENTRY=Main OUTPUT=.build/flow
 生成程序固定入口和模块快照，不再接收 `.lip` 文件；直接接受 `-input` / `-entry-input` / `-entry-output` / `-parallel` 等运行参数。`make compile` 可传 ENTRY、PROJECT 和 HOST；输入与输出封装规则见 [README](../README.md#语言核心与程序结构)。
 
 `make examples` 会输出各个示例的验收结果；`make clean` 删除编译产物与缓存。
+
+`a[-1]` 取末项，`a[[2,0,-1]]` 按列表顺序取值，`a[1::2]` 间隔取值，`a[::-1]` 反转。切片边界裁剪；字符串按 Unicode 标量切片。`learn -lesson slicing` 用非空与空输入练习这些操作。

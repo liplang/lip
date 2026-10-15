@@ -121,6 +121,11 @@ const nativeReferenceKey = "$lip.native"
 
 type nativeRunKey struct{}
 type nativeSessionKey struct{}
+type nativeDataBudgetKey struct{}
+type nativeDataBudget struct {
+	reserve func(int64) error
+	tick    func() error
+}
 type nativeRun struct{ scope, owner, id string }
 
 func newNativeOwner() (string, error) {
@@ -834,25 +839,33 @@ func (n *NativeLibraries) dataAccess(ctx context.Context, action, member string,
 			return Result(x)
 		}
 	}
-	if action == "index" && len(args) == 2 {
-		if v.k == Object {
-			if key, ok := args[1].(string); ok {
-				if x, ok := v.o[key]; ok {
-					return Result(x)
-				}
+	if action == "index" && len(args) == 2 || action == "slice" && len(args) == 4 {
+		parts := make([]Value, len(args)-1)
+		for i, arg := range args[1:] {
+			parts[i], err = FromNative(arg)
+			if err != nil {
+				return Rejected("E-TYPE", err.Error())
 			}
 		}
-		if v.k == List {
-			if i, ok := args[1].(float64); ok && i >= 0 && i < float64(len(v.l)) && i == float64(int(i)) {
-				return Result(v.l[int(i)])
-			}
+		var out Value
+		budget, _ := ctx.Value(nativeDataBudgetKey{}).(nativeDataBudget)
+		if budget.tick == nil {
+			budget.tick = ctx.Err
 		}
-		if v.k == String {
-			rs := []rune(v.s)
-			if i, ok := args[1].(float64); ok && i >= 0 && i < float64(len(rs)) && i == float64(int(i)) {
-				return Result(textValue(string(rs[int(i)])))
-			}
+		if action == "index" {
+			out, err = indexValue(v, parts[0], budget.reserve, budget.tick)
+		} else {
+			out, err = sliceValue(v, parts, budget.reserve, budget.tick)
 		}
+		if err != nil {
+			if d, ok := err.(*Diagnostic); ok {
+				response := Rejected(d.Code, d.Message)
+				response.boundaryFault = true
+				return response
+			}
+			return Rejected("E-VALUE", err.Error())
+		}
+		return Result(out)
 	}
 	return Rejected("E-TYPE", "value has no native member "+key)
 }

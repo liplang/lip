@@ -386,6 +386,7 @@ func FuzzCompileAndRun(f *testing.F) {
 		`flow Main()->void{for {}}`,
 		`flow Main()->any{return match null {number=>1,_=>null}}`,
 		"flow Main()->string{return \"\"\"\ntext\n\"\"\"}",
+		`flow Main()->list{return range(5)[::-1][[0,-1,0]]}`, `flow Main()->string{return "a𐀀b"[::2]}`, `flow Main()->list{return [0][:::]}`, `flow Main()->list{return [0][1:`,
 		`flow Main()->number{return [}`, `fn f(`, "\xff", "", "# comment\r\n",
 	} {
 		f.Add(source)
@@ -980,6 +981,72 @@ func TestLoopSourceFlowAndBodyPositions(t *testing.T) {
 		}
 		if len(selector) != 1 || len(source) != 3 || len(body) != 2 || source[0] != selector[0] || body[0] != selector[0] || source[1].Site >= body[1].Site {
 			t.Fatal("selector invocation prefix was confused with iteration zero", report.Nodes)
+		}
+	}
+}
+
+func TestIndexAndSliceSyntaxAndComposition(t *testing.T) {
+	for expr, want := range map[string]string{
+		`range(100)[range(22)]`:              `[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]`,
+		`range(100)[2:10:2]`:                 `[2,4,6,8]`,
+		`range(10)[8:2:-2]`:                  `[8,6,4]`,
+		`range(5)[:]`:                        `[0,1,2,3,4]`,
+		`range(5)[::]`:                       `[0,1,2,3,4]`,
+		`range(5)[1::]`:                      `[1,2,3,4]`,
+		`range(5)[:3:]`:                      `[0,1,2]`,
+		`range(5)[null:null:null]`:           `[0,1,2,3,4]`,
+		`range(5)[-5]`:                       `0`,
+		`range(5)[-1:-6:-1][1:][[0,-1,0]]`:   `[3,0,3]`,
+		`"a𐀀é"[::-1]`:                       `"́e𐀀a"`,
+		`slice(range(5),-3,99)`:              `[2,3,4]`,
+		`{f=slice;f(range(5),null,null,-2)}`: `[4,2,0]`,
+		`{f=[fn(x:number)->number{x+1},fn(x:number)->number{x*2}];selected=f[::-1][[0,1,0]];map(selected,fn(g:function)->number{g(3)})}`: `[6,4,6]`,
+		`for x in range(5)[::-2] with acc=[] {next concat(acc,[x])}`:                                                                     `[4,2,0]`,
+		`if false {[0][::0]} else {7}`: `7`,
+	} {
+		report := runSource(t, "flow Main()->any{return "+expr+"}", Host{}, Options{})
+		if got := display(t, report.Output); got != want {
+			t.Fatalf("%s: %s, want %s", expr, got, want)
+		}
+	}
+	for _, expr := range []string{`[0][]`, `[0][:::]`, `[0][1,2]`, `[0][1:2:3:4]`, `[0][:,]`, `[0][1:`} {
+		if _, err := Compile("flow Main()->any{return "+expr+"}", Host{}); err == nil {
+			t.Fatal("malformed index accepted", expr)
+		}
+	}
+	for _, expr := range []string{`[0][true]`, `[0][[false]]`, `"a"[[0]]`, `{}[:]`, `[0][:"x"]`, `slice([0],false,1)`, `slice([0],0,1,"x")`} {
+		_, err := Compile("flow Main()->any{return "+expr+"}", Host{})
+		if err == nil || err.(*Diagnostic).Code != "E-TYPE" {
+			t.Fatal(expr, err)
+		}
+	}
+	// Operand order is observable through an existing registered read operation.
+	var calls []int
+	host := testHost(func(_ context.Context, r Request) Response {
+		n, _ := r.Positional[0].Float()
+		calls = append(calls, int(n))
+		return Result(r.Positional[0])
+	})
+	source := `import python "example.worker" as w
+flow Main()->list {return {perform effect w.read(9);range(5)}[{perform effect w.read(1);1}:{perform effect w.read(4);4}:{perform effect w.read(2);2}]}`
+	report := runSource(t, source, host, Options{Parallelism: 1})
+	if display(t, report.Output) != "[1,3]" || len(calls) != 4 || calls[0] != 9 || calls[1] != 1 || calls[2] != 4 || calls[3] != 2 {
+		t.Fatal(report, calls)
+	}
+	calls = nil
+	source = `import python "example.worker" as w
+flow Main()->any{return [0][fail("stop"):perform effect w.read(1):perform effect w.read(2)]}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Run(context.Background(), nil, Options{}); err == nil || err.(*Diagnostic).Code != "E-FAIL" || len(calls) != 0 {
+		t.Fatal(err, calls)
+	}
+	for _, expr := range []string{`[p][::-1][0]`, `[p][[0]][0]`, `slice([p],null,null,-1)[0]`} {
+		source = `import python "example.worker" as w;flow Main()->void {p=effect w.read(1);q=` + expr + `;for x in [0] parallel {perform q}}`
+		if _, err = Compile(source, host); err == nil || err.(*Diagnostic).Code != "E-PARALLEL" || len(calls) != 0 {
+			t.Fatal("projection strengthened Ops", expr, err, calls)
 		}
 	}
 }

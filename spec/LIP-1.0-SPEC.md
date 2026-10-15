@@ -158,7 +158,8 @@ power      ::= power_base ["**" unary]
 power_base ::= perform | proposal | postfix
 postfix    ::= primary suffix*
 suffix     ::= "(" [arguments [","]] ")" | "." id
-             | "[" expr "]"
+             | "[" (expr | slice_spec) "]"
+slice_spec ::= [expr] ":" [expr] [":" [expr]]
 arguments  ::= positional_args ["," named_args] | named_args
 positional_args ::= expr ("," expr)*
 named_args ::= named_arg ("," named_arg)*
@@ -509,9 +510,48 @@ E-NUMBER。这里“整数指数”指存储的 binary64 值精确为整数，�
 
 number 不区分整数和浮点数类型；结果 3 与 3.0 是同一个 binary64 值，规范 JSON 输出为 `3`。
 
-list/string 的索引为安全非负整数，string 索引按 Unicode 标量值；object 索引为 string
-键，`.name` 等价于该键查找。越界、缺键、类型不符报 Error。安全整数的绝对值不超过
-`2^53-1`；Host 原生整数超出范围时必须拒绝，或按显式 schema 编码为 string/bytes。
+安全整数的绝对值不超过 `2^53-1`；Host 原生整数超出范围时必须拒绝，或按显式 schema
+编码为 string/bytes。list/string 的单值索引 `v[i]` 接受安全整数。设长度为 n，负 i
+只调整一次为 n+i；调整后的索引必须位于 [0,n)，否则 `E-INDEX`。string 按 Unicode
+标量值计数，不按字素簇，不做正规化。object 的索引仍为 string 键，`.name` 等价于
+该键查找；缺键报 `E-INDEX`，索引或接收值类型不符报 `E-TYPE`。
+
+list a 还接受索引列表 `a[indices]`：indices 的每项必须为安全整数，逐项遵循单值负索引
+规则，返回按索引顺序排列的新 list，保留重复。任一索引非法则整个表达式失败；不隐含
+布尔掩码、递归展开或多维索引。空索引列表返回空 list，空源列表同样如此。string 不接受
+索引列表。例如 `a=range(5)` 时，`a[[3,-1,3,0]]` 为 `[3,4,3,0]`，
+`a[range(3)]` 为 `[0,1,2]`。
+
+list/string 的切片写作 `v[start:stop]` 或 `v[start:stop:step]`，返回同类型值，
+不包含 stop。各分量均可省略，显式 null 等同省略。非 null 分量必须为安全整数：
+类型不符报 `E-TYPE`，非整数或超安全范围报 `E-INDEX`。step 默认 1，零报 `E-VALUE`。
+边界以精确整数运算按以下规则归一化：
+
+- step 为正时，省略 start/stop 分别取 0/n。显式负边界加 n 一次，再分别裁剪到 [0,n]。
+- step 为负时，省略 start/stop 分别取 n−1/−1。显式负边界加 n 一次，再分别裁剪到
+  [−1,n−1]。因此省略 stop 与显式 −1 不同，后者在裁剪前表示最后一项。
+- 从归一化 start 开始按 step 递进；正步长在索引 < stop 时选取，负步长在索引 > stop
+  时选取。方向不符返回空 list/string。切片边界越界会裁剪，空源同样适用；单值和列表
+  索引仍严格检查越界。
+
+接收值和给出的索引/边界表达式从左到右各求值一次（接收值、start、stop、step），
+遇到错误即停止。新 list 在分配前检查长度预算，超出报 `E-BUDGET`，不发布部分结果。
+这些操作保留不可变值，包括 function/effect 元素，不调用它们。投影、索引列表与切片的
+规范 Ops 均保持 Unknown（第 5 节）。所有执行路径上的核心 Data 遵循以上规则；不透明
+Host 资源按其注册的原生索引协议访问。
+
+| 表达式 | 结果 |
+|---|---|
+| `range(5)[-1]` | `4` |
+| `range(5)[::-1]` | `[4,3,2,1,0]` |
+| `range(5)[1:5:2]` | `[1,3]` |
+| `range(5)[99:-99:-2]` | `[4,2,0]` |
+| `range(5)[:-1:-1]` / `range(5)[:null:-1]` | `[]` / `[4,3,2,1,0]` |
+| `"a𐀀b"[::-1]` | `"b𐀀a"` |
+| `[][:]` / `""[::-1]` | `[]` / `""` |
+| `[0][-2]` / `[0][[0,1]]` / `[0][0.5]` | E-INDEX |
+| `[0][true]` / `"a"[[0]]` / `[0][:"x"]` | E-TYPE |
+| `[0][::0]` | E-VALUE |
 
 ### 3.1. 核心纯函数表（1.0）
 
@@ -526,7 +566,7 @@ list/string 的索引为安全非负整数，string 索引按 Unicode 标量值�
 | fold(xs,seed,f) | 3 | list、V、纯二元 function → V；严格左折叠，空 list 返回 seed |
 | fail(message) | 1 | string → E-FAIL，没有成功值 |
 | concat(a,b) | 2 | 两个 list → 顺序拼接的新 list；append 用 concat(a,[v]) |
-| slice(v,start,end) | 3 | list/string、安全整数 → 同类型半开片段；string 按 Unicode 标量 |
+| slice(v,start,stop) / slice(v,start,stop,step) | 3/4 | 与方括号切片同规则；null 表示省略分量 |
 | keys(o) | 1 | object → UTF-8 bytes 排序的 string list |
 | has(o,k) | 2 | object、string → bool；缺键返回 false |
 | put(o,k,v) | 3 | object、string、V → 增加/替换该键的新 object |
@@ -540,8 +580,8 @@ list/string 的索引为安全非负整数，string 索引按 Unicode 标量值�
 与 list literal 一样保留元素顺序。range 在分配前检查长度预算。
 len 的返回数必须是安全整数，超过范围须明确失败；不得舍入成错误长度。range 使用
 精确整数计算其长度和元素，再转成 number，不用浮点循环判断制造重复/漏项。
-slice 的 start/end 为安全非负整数，须满足 `0≤start≤end≤len(v)`，否则 `E-INDEX`，
-不截断、不使用负索引。has/put 不接受非 string 键；缺键 has 返回 false，put 添加字段。
+slice 与上述方括号切片完全同义，支持负边界、裁剪、null 省略和可选非零 step。
+`slice(v,null,null,-1)` 等于 `v[::-1]`。has/put 不接受非 string 键；缺键 has 返回 false，put 添加字段。
 split 的 separator 为空时报 `E-VALUE`；`split("",",")` 为 `[""]`，
 `split("a,,b,",",")` 为 `["a","","b",""]`。这些操作按声明 arity 检查，没有隐藏参数。
 parse_number 接受整段 ASCII 文本：可选一个 `+`/`-`，随后必须恰为第 2 节 number 词法。
@@ -720,7 +760,7 @@ Ops 是 compiler 的辅助信息，不是 effect[Ops] 源类型，取非空有�
 | 已分析 binding 的引用、括号 | 保留该值的 Ops；闭包捕获值也只保留已有信息 |
 | if/match 的结果 | 所有候选结果集合并；任一 Unknown 则 Unknown，不按常量条件删分支 |
 | value_block 的结果 | 在顺序局部环境中分析尾表达式 |
-| list/object 的索引或字段投影 | Unknown，包括字面量容器投影 |
+| list/object 的索引、索引列表、切片或字段投影 | Unknown，包括字面量容器投影 |
 | fn/核心/高阶函数调用的返回值、carry 结果 | Unknown，不分析函数返回或跨轮状态 |
 | 无以上信息的参数/输入/any 值 | Unknown；any 注解本身不抹去已有 binding 信息 |
 
@@ -2142,6 +2182,10 @@ flow Main() -> number {
 
 | 输入/固定环境 | 预期判定 | 层/模式 |
 |---|---|---|
+| `range(5)[[-1,0,-1]]` / `range(5)[::-2]` | `[4,0,4]` / `[4,2,0]` | core 求值及生成程序 |
+| `range(5)[:-1:-1]` / `slice(range(5),null,null,-1)` | `[]` / `[4,3,2,1,0]` | core 求值及生成程序 |
+| `[0][[0,1]]` / `[0][::0]` | E-INDEX / E-VALUE，无部分结果 | core 求值及生成程序 |
+| function/effect list 经索引列表、切片再投影 | 原值保留；Ops 仍为 Unknown，不能放行 parallel | core 静态/动态 |
 | `{ len([0]); }` / `{ len([0]); null }` | 分别为 1 / null，末尾分号是 padding | core 求值 |
 | `if false { 1 / 0 } else { 7 }` | 7；无 E-NUMBER，未选分支不消耗执行预算 | core 求值/不同 Ready 次序 |
 | `flow Main()->number { if false { x=1/0 }; return 7 }` | x 为 unselected_gate；无根错误，F 为空，不截断，输出 7 | core 调度 |

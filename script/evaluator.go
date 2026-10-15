@@ -226,38 +226,22 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 				break
 			}
 		}
-		if x.k == Object {
-			if index.k != String {
-				err = diagnostic("E-TYPE", "object index requires string")
-				break
-			}
-			var ok bool
-			r.value, ok = x.o[index.s]
-			if !ok {
-				err = diagnostic("E-INDEX", "missing key "+index.s)
-			}
-		} else if x.k == List || x.k == String {
-			var i int
-			i, err = nonnegativeIndex(index)
+		r.value, err = indexValue(x, index, v.run.reserveElements, func() error { return v.step(e.tok) })
+	case "slice":
+		var x Value
+		x, err = get(e.x)
+		if err != nil {
+			break
+		}
+		bounds := make([]Value, len(e.args))
+		for i, arg := range e.args {
+			bounds[i], err = get(arg.expr)
 			if err != nil {
 				break
 			}
-			if x.k == List {
-				if i >= len(x.l) {
-					err = diagnostic("E-INDEX", "index out of bounds")
-				} else {
-					r.value = x.l[i]
-				}
-			} else {
-				rs := []rune(x.s)
-				if i >= len(rs) {
-					err = diagnostic("E-INDEX", "index out of bounds")
-				} else {
-					r.value = textValue(string(rs[i]))
-				}
-			}
-		} else {
-			err = diagnostic("E-TYPE", "value cannot be indexed")
+		}
+		if err == nil {
+			r.value, err = sliceValue(x, bounds, v.run.reserveElements, func() error { return v.step(e.tok) })
 		}
 	case "fn":
 		var captures *environment
@@ -389,7 +373,12 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		}
 		_, err = bindContract(contract, pos, named)
 		if err == nil {
-			r.value = Value{k: Effect, p: &proposal{contract: contract, positional: pos, named: named, nativeResult: e.nativeResult}}
+			p := &proposal{contract: contract, positional: pos, named: named, nativeResult: e.nativeResult}
+			if e.name == "claim.snapshot" {
+				p.snapshotRun = v.run.opts.RunID
+				p.snapshotPrefix = v.node.instance.prefix.Copy()
+			}
+			r.value = Value{k: Effect, p: p}
 		}
 	case "perform":
 		var p Value
@@ -749,15 +738,6 @@ func argumentOrder(fn *function, args []argument) ([]int, error) {
 	}
 	return order, nil
 }
-func nonnegativeIndex(x Value) (int, error) {
-	if x.k != Number {
-		return 0, diagnostic("E-TYPE", "index requires number")
-	}
-	if x.n < 0 || x.n > 9007199254740991 || math.Trunc(x.n) != x.n || x.n > float64(int(^uint(0)>>1)) {
-		return 0, diagnostic("E-INDEX", "index must be a safe nonnegative integer")
-	}
-	return int(x.n), nil
-}
 func (v *evaluator) builtin(name string, xs []Value) (Value, error) {
 	wrong := func() (Value, error) { return Value{}, diagnostic("E-TYPE", "invalid "+name+" arguments") }
 	switch name {
@@ -832,34 +812,7 @@ func (v *evaluator) builtin(name string, xs []Value) (Value, error) {
 		}
 		return ListValue(out...), nil
 	case "slice":
-		start, err := nonnegativeIndex(xs[1])
-		if err != nil {
-			return Value{}, err
-		}
-		end, err := nonnegativeIndex(xs[2])
-		if err != nil {
-			return Value{}, err
-		}
-		if end < start {
-			return Value{}, diagnostic("E-INDEX", "reversed slice")
-		}
-		if xs[0].k == List {
-			if end > len(xs[0].l) {
-				return Value{}, diagnostic("E-INDEX", "slice out of bounds")
-			}
-			if err := v.run.reserveElements(int64(end - start)); err != nil {
-				return Value{}, err
-			}
-			return ListValue(xs[0].l[start:end]...), nil
-		}
-		if xs[0].k == String {
-			rs := []rune(xs[0].s)
-			if end > len(rs) {
-				return Value{}, diagnostic("E-INDEX", "slice out of bounds")
-			}
-			return textValue(string(rs[start:end])), nil
-		}
-		return wrong()
+		return sliceValue(xs[0], xs[1:], v.run.reserveElements, func() error { return v.step(v.node.stmt.tok) })
 	case "parse_number":
 		if xs[0].k != String {
 			return wrong()

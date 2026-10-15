@@ -1,4 +1,6 @@
-# Lists preserve order and use zero-based indices. Objects have string keys.
+# Lists preserve order; zero-based and negative indices select one item.
+# An index list preserves order and duplicates. Slices clip bounds and exclude stop.
+# [start:stop:step] allows omitted bounds; [::-1] reverses. Objects have string keys.
 # .name and ["name"] read object fields; missing keys are errors.
 # put / concat return new containers; the inputs retain their values.
 flow Containers() -> object {
@@ -7,6 +9,10 @@ flow Containers() -> object {
     updated = put(person, "role", "writer")
     return {
         first: person.name,
+        last: names[-1],
+        selected: names[[-1,0,-1]],
+        reversed: names[::-1],
+        every_other: range(8)[1::2],
         original_role: person["role"],
         updated: updated,
         names: concat(names, ["Sam"]),

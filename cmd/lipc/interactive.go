@@ -365,6 +365,15 @@ var course = []lesson{
 		cases:    []lessonCase{{`{"user":{"name":"Ada"},"scores":[0.8,0.9]}`, `{"first":0.8,"name":"Ada"}`}, {`{"user":{"name":"Lin"},"scores":[1]}`, `{"first":1,"name":"Lin"}`}},
 	},
 	{
+		id:       "slicing",
+		title:    "Index lists and Python-style slices",
+		task:     "Return {picked, reverse, stride, text}: select xs at indices, reverse xs, take xs from index 1 in steps of 2, and reverse label.",
+		template: "flow Select(xs:list, indices:list, label:string) -> object { return __ANSWER__ }",
+		solution: "{picked:xs[indices], reverse:xs[::-1], stride:xs[1::2], text:label[::-1]}",
+		hint:     "a[-1] is the last element. a[[2,0,-1]] preserves index order and duplicates. a[start:stop:step] excludes stop and clips bounds; omitted bounds depend on step. Strings count Unicode scalars. slice(a,null,null,-1) also reverses.",
+		cases:    []lessonCase{{`{"xs":[0,1,2,3,4],"indices":[-1,0,-1],"label":"a𐀀b"}`, `{"picked":[4,0,4],"reverse":[4,3,2,1,0],"stride":[1,3],"text":"b𐀀a"}`}, {`{"xs":[],"indices":[],"label":""}`, `{"picked":[],"reverse":[],"stride":[],"text":""}`}},
+	},
+	{
 		id:       "conditions",
 		title:    "Conditional expressions",
 		task:     "Return ready when score is at least 0.8, otherwise retry.",

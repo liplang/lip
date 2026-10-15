@@ -978,6 +978,69 @@ func TestNativeCyclesAndLossyIntegersRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestGoDataSharedSlicesAndInvalidFieldNames(t *testing.T) {
+	for _, test := range []struct{ mode, want string }{
+		{"prefix", `[7,[7]]`}, {"empty", `[[]]`}, {"shared", `[[7],[7]]`},
+	} {
+		value, err := FromNative(sharedNativeValue(test.mode))
+		if err != nil || display(t, value) != test.want {
+			t.Fatalf("%s: %v, %v; want %s", test.mode, value, err, test.want)
+		}
+	}
+	for _, mode := range []string{"slice_cycle", "map_cycle", "mixed_cycle", "pointer_cycle"} {
+		if _, err := FromNative(sharedNativeValue(mode)); err == nil {
+			t.Fatal("accepted cyclic Data", mode)
+		}
+	}
+	invalid := struct {
+		Value int `json:"\xff"`
+	}{7}
+	if _, err := FromNative(invalid); err == nil {
+		t.Fatal("invalid UTF-8 struct key became a successful null")
+	}
+	var calls atomic.Int64
+	c := Contract{Operation: Operation{Language: "go", Path: "shared", Member: "read"}, Version: "1",
+		Params: []Parameter{{Name: "mode", Schema: Schema{Type: "string"}}}, Result: Schema{Type: "any"}, Effect: WriteEffect}
+	var err error
+	c.Invoke, err = GoHandler(c, func(mode string) any {
+		calls.Add(1)
+		if mode == "invalid" {
+			return invalid
+		}
+		return sharedNativeValue(mode)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Compile(`import go "shared";flow Main(mode:string)->any{return perform effect shared.read(mode)}`, Host{Contracts: []Contract{c}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ mode, want string }{
+		{"prefix", `[7,[7]]`}, {"empty", `[[]]`}, {"invalid", ""}, {"slice_cycle", ""},
+	} {
+		journal := NewMemoryJournal()
+		before := calls.Load()
+		for i := 0; i < 2; i++ {
+			report, err := p.Run(context.Background(), map[string]Value{"mode": textValue(test.mode)}, Options{RunID: test.mode, Journal: journal})
+			if test.want != "" {
+				if err != nil || display(t, report.Output) != test.want {
+					t.Fatal(test.mode, report, err)
+				}
+			} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-VALUE" || report.EntryOutput != nil {
+				t.Fatal("conversion failure published success or uncertainty", test.mode, report, err)
+			}
+			if calls.Load() != before+1 {
+				t.Fatal("terminal conversion result repeated the provider", test.mode, calls.Load(), before)
+			}
+		}
+		if records := journal.Records(); len(records) != 1 || records[0].KnownFault != (test.want == "") || !records[0].Response.KnownCompleted {
+			t.Fatal("conversion lost the completed provider fact", test.mode, records)
+		}
+	}
+}
+
 func mathNaN() float64 { var zero float64; return zero / zero }
 func TestFunctionCapturesSnapshotNotMutableInput(t *testing.T) {
 	fields := map[string]Value{"score": number(1)}

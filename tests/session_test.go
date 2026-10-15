@@ -330,6 +330,62 @@ func FuzzSessionTransactions(f *testing.F) {
 	})
 }
 
+func TestSessionSnapshotProposalLifetime(t *testing.T) {
+	var authorizations atomic.Int64
+	s, err := NewSession(Host{Authorize: func(context.Context, Request) error {
+		authorizations.Add(1)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eval := func(source string) CellResult {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result, err := s.Eval(ctx, source, Options{Parallelism: 7})
+		if err != nil {
+			t.Fatal(source, err)
+		}
+		return result
+	}
+	// Construction neither observes the store nor invokes Host authorization.
+	result := eval(`facts=claim();p=effect claim.snapshot("facts");read=fn()->effect{p};facts <+ 7;copy=perform p;[r.value for r in facts]`)
+	if display(t, result.Value) != `[7]` || len(result.Report.Journal.Records()) != 1 || authorizations.Load() != 1 {
+		t.Fatal(result)
+	}
+	for _, source := range []string{`uncommitted=perform p`, `perform read()`, `perform [p][0]`, `flow Read()->list{return perform p};Read()`} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		result, err := s.Eval(ctx, source, Options{Parallelism: 7})
+		cancel()
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-RESOURCE" || d.Phase != "runtime" || d.Line == 0 || len(d.Position) == 0 || result.Report.EntryOutput != nil {
+			t.Fatalf("expired snapshot: %+v, %v", result, err)
+		}
+		if _, committed := s.Values()["uncommitted"]; committed {
+			t.Fatal("failed snapshot cell committed a binding")
+		}
+		if records := result.Report.Journal.Records(); len(records) != 1 || records[0].KnownFault || records[0].Response.Outcome != RejectedOutcome || records[0].Response.Error.Code != "E-RESOURCE" {
+			t.Fatal("expired snapshot was not an admission rejection", records)
+		}
+		if authorizations.Load() != 1 {
+			t.Fatal("expired snapshot reached Host authorization")
+		}
+		eval(`1+2`)
+	}
+	if err := s.Delete("facts"); err != nil {
+		t.Fatal(err)
+	}
+	// Reusing the public name cannot retarget the old request to a new store.
+	eval(`facts=claim();facts <+ 9;fresh=perform effect claim.snapshot("facts");[r.value for r in facts]`)
+	if _, err := s.Eval(context.Background(), `perform p`, Options{}); err == nil {
+		t.Fatal("old request observed the replacement store")
+	}
+	if got := display(t, eval(`[r.value for r in facts]`).Value); got != `[9]` {
+		t.Fatal("new Claim snapshot lost its fixed Data", got)
+	}
+}
+
 func TestSessionDeleteReleasesUncapturedValues(t *testing.T) {
 	s, err := NewSession(Host{})
 	if err != nil {
@@ -671,12 +727,12 @@ def nonfinite():
 }
 
 func TestCellContinuationUsesCoreGrammar(t *testing.T) {
-	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else", "flow sqrt(x:number)->number", "export fn add(x:number)->number {", "LIMIT:object={", "import lip", "x=\"\"\"\n:help\n", `"""quote ""`} {
+	for _, source := range []string{"[1,\n", "range(5)[::", "range(5)[1:\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else", "flow sqrt(x:number)->number", "export fn add(x:number)->number {", "LIMIT:object={", "import lip", "x=\"\"\"\n:help\n", `"""quote ""`} {
 		if !CellIncomplete(source) {
 			t.Fatalf("unfinished cell considered complete: %q", source)
 		}
 	}
-	for _, source := range []string{`"["`, "[1,2]\n", "[1)\n", `"bad`, "1 + )", "if true {1} else {2}", "# comment\n", "\"\"\"done\n\"\"\"", `"""bad\x`, `"""\u{d800}`} {
+	for _, source := range []string{`"["`, `range(5)[::-1]`, `range(5)[:::]`, "[1,2]\n", "[1)\n", `"bad`, "1 + )", "if true {1} else {2}", "# comment\n", "\"\"\"done\n\"\"\"", `"""bad\x`, `"""\u{d800}`} {
 		if CellIncomplete(source) {
 			t.Fatalf("complete/malformed cell requested more input: %q", source)
 		}
@@ -709,6 +765,12 @@ func TestInteractiveCLI(t *testing.T) {
 		}
 		return stdout.String(), stderr.String()
 	}
+	t.Run("repl-index-and-slice", func(t *testing.T) {
+		stdout, stderr := run("a=range(6)\nb=range(3)\na[b]\na[-1]\na[::-1]\na[\n1:5:2\n]\nbad=a[::0]\na[-1]\nhelp(slice)\n:quit\n", "repl")
+		if !strings.HasPrefix(stdout, "[0,1,2,3,4,5]\n[0,1,2]\n[0,1,2]\n5\n[5,4,3,2,1,0]\n[1,3]\n5\n") || !strings.Contains(stdout, "null selects defaults") || !strings.Contains(stderr, "E-VALUE") {
+			t.Fatal(stdout, stderr)
+		}
+	})
 	t.Run("repl", func(t *testing.T) {
 		stdout, stderr := run("x=2\nfn twice(n:number)->number {\n n*2\n}\ntwice(x)\nif true {\n x+1\n} else {0}\nx=9\nx\n:quit\n", "repl")
 		if stdout != "2\n4\n3\n2\n" || !strings.Contains(stderr, "E-DUPLICATE") {
@@ -974,6 +1036,7 @@ flow Canceled()->number {return 0}
 	t.Run("v1-lessons", func(t *testing.T) {
 		for _, test := range []struct{ id, answer string }{
 			{"entries", "n+OFFSET"},
+			{"slicing", "{picked:xs[indices],reverse:xs[::-1],stride:xs[1::2],text:label[::-1]}"},
 			{"flows", "n |>Double |>adjust(delta=3)"},
 			{"modules", "{total:n |>pricing.Adjust,base:pricing.BASE}"},
 		} {
@@ -1549,5 +1612,53 @@ func TestSessionFlowNamesRespectPrelude(t *testing.T) {
 	text, _ := result.Value.Text()
 	if err != nil || !strings.Contains(text, "binary64") {
 		t.Fatal("saved tooling environment changed", result, err)
+	}
+}
+
+func TestSessionIndexAndSlice(t *testing.T) {
+	s, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, test := range []struct{ source, want string }{
+		{`a=range(100)`, ""},
+		{`b=range(12)`, `[0,1,2,3,4,5,6,7,8,9,10,11]`},
+		{`a[b]`, `[0,1,2,3,4,5,6,7,8,9,10,11]`},
+		{`a[range(22)]`, `[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21]`},
+		{`a[-1]`, `99`},
+		{`a[2:12:2]`, `[2,4,6,8,10]`},
+		{`rev=a[::-1]`, ""},
+		{`rev[[0,-1,0]]`, `[99,0,99]`},
+		{`fn select(xs:list,idx:list)->list {xs[idx][::-1]}`, ""},
+		{`select(a,[0,-1,0])`, `[0,99,0]`},
+		{`fns=[fn(x:number)->number{x+1},fn(x:number)->number{x*2}]`, ""},
+		{`selected=fns[::-1][[0,1,0]]`, ""},
+		{`map(selected,fn(f:function)->number{f(3)})`, `[6,4,6]`},
+		{"a[\n :\n : -25\n]", `[99,74,49,24]`},
+	} {
+		nativeCell(t, s, test.source, test.want)
+	}
+	for _, source := range []string{`bad=a[[0,100]]`, `bad=a[::0]`, `bad=a[0.5:]`, `bad=a[[true]]`} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err == nil {
+			t.Fatal("invalid index accepted", source)
+		}
+		if _, ok := s.Values()["bad"]; ok {
+			t.Fatal("failed index committed binding")
+		}
+		nativeCell(t, s, `a[-1]`, `99`)
+	}
+	if got := s.Complete("sli"); len(got) != 1 || got[0] != "slice" {
+		t.Fatal(got)
+	}
+	for _, source := range []string{`help()`, `help(slice)`, `help(a)`} {
+		result, err := s.Eval(context.Background(), source, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		help, _ := result.Value.Text()
+		if !strings.Contains(help, "step") {
+			t.Fatal("outdated slice help", source, help)
+		}
 	}
 }

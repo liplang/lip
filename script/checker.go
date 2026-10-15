@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "slice": {3}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}}
+var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "slice": {3, 4}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}}
 
 type bindingInfo struct {
 	info    analysis
@@ -562,11 +562,34 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			y := sub(e.y)
 			if x.typ == "object" {
 				c.require(e.tok, y, "string")
-			} else if x.typ == "list" || x.typ == "string" {
+			} else if x.typ == "list" {
+				if y.typ != "any" && y.typ != "number" && y.typ != "list" {
+					c.error(e.tok, "E-TYPE", "list index requires number or list")
+				}
+				if y.typ == "list" {
+					a.typ = "list"
+					if e.y.tag == "list" {
+						for _, item := range e.y.elems {
+							c.require(item.tok, item.info, "number")
+						}
+					}
+				}
+			} else if x.typ == "string" {
 				c.require(e.tok, y, "number")
+				a.typ = "string"
 			}
 		}
 		a.unknown = true
+	case "slice":
+		x := sub(e.x)
+		if x.typ != "any" && x.typ != "list" && x.typ != "string" {
+			c.error(e.tok, "E-TYPE", "slice requires list or string")
+		}
+		for _, arg := range e.args {
+			y := sub(arg.expr)
+			c.assignType(arg.expr.tok, y.typ, "number?")
+		}
+		a.typ, a.unknown = x.typ, true
 	case "fn":
 		return c.function(e, env)
 	case "block":
@@ -744,6 +767,10 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 						a.typ = "list"
 					case "put":
 						a.typ = "object"
+					case "slice":
+						if len(e.args) > 0 {
+							a.typ = e.args[0].expr.info.typ
+						}
 					}
 				} else if binding.fn != nil {
 					c.checkArity(e, "", binding.fn, env)
@@ -871,7 +898,7 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 }
 
 func (c *checker) builtinTypes(e *expression, name string) {
-	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "concat": {"list", "list"}, "slice": {"any", "number", "number"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}}
+	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "concat": {"list", "list"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}}
 	if name == "len" || name == "slice" {
 		typ := e.args[0].expr.info.typ
 		if typ != "any" && typ != "string" && typ != "list" && (name == "slice" || typ != "object") {
@@ -880,6 +907,11 @@ func (c *checker) builtinTypes(e *expression, name string) {
 	}
 	if name == "str" && (e.args[0].expr.info.typ == "function" || e.args[0].expr.info.typ == "effect") {
 		c.error(e.tok, "E-TYPE", "str requires Data")
+	}
+	if name == "slice" {
+		for _, arg := range e.args[1:] {
+			c.assignType(arg.expr.tok, arg.expr.info.typ, "number?")
+		}
 	}
 	for i, typ := range types[name] {
 		if name == "range" {

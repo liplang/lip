@@ -112,7 +112,8 @@ power      ::= power_base ["**" unary]
 power_base ::= perform | proposal | postfix
 postfix    ::= primary suffix*
 suffix     ::= "(" [arguments [","]] ")" | "." id
-             | "[" expr "]"
+             | "[" (expr | slice_spec) "]"
+slice_spec ::= [expr] ":" [expr] [":" [expr]]
 arguments  ::= positional_args ["," named_args] | named_args
 positional_args ::= expr ("," expr)*
 named_args ::= named_arg ("," named_arg)*
@@ -262,7 +263,7 @@ All values are immutable. Constructors/operators evaluate operands left to right
 
 Data is a finite acyclic value tree: lists preserve order, objects have unique keys and canonical UTF-8 key order. Native mutable objects must be copied to Data or represented by declared Host references, never directly shared. Equality is typed and structural: null equals only null, and bool never equals number; fn/effect are not comparable even inside containers. Field/index access creates no implicit binding. Stop operand evaluation after an error.
 
-Basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. Division by zero/nonfinite results are E-NUMBER. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`; indexing requires safe nonnegative integers. String indexing counts Unicode scalars; object indices are strings and `.name` is equivalent lookup. Bounds/missing-key/type violations are errors. Host integers outside the safe range require rejection or explicit string/bytes schema encoding.
+Basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. Division by zero/nonfinite results are E-NUMBER. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`. Host integers outside this range require rejection or explicit string/bytes schema encoding.
 
 `a ** b` is real exponentiation; `a */ b` is real logarithm to base b. Both require numbers (E-TYPE otherwise). `0 ** 0 = 1`; zero to a negative power and negative bases to nonintegral powers are E-NUMBER. Integral exponent means the stored binary64 is exactly integral, without the safe-index limit. Log requires a>0, b>0, b!=1; `1 */ b = 0` and `a */ a = 1`. Overflow is E-NUMBER; subnormals/underflow to zero are allowed, with zero normalization. Both MUST use §16.5's fixed binary64 algorithm, not platform/version-dependent pow/log. They approximate real operations without correctly-rounded guarantees; mathematically equivalent expressions need not be bit-identical. Other numerical functions/complex values belong to libraries.
 
@@ -280,6 +281,31 @@ Basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reasso
 
 There is one number type: 3 and 3.0 are identical and display as `3`.
 
+List/string scalar indexing `v[i]` requires a safe integer. With length n, a negative i is adjusted once to n+i; the resulting index MUST be in [0,n), otherwise E-INDEX. Strings count Unicode scalars, without grapheme clustering or normalization. Object indices remain string keys; `.name` is equivalent lookup. Missing keys are E-INDEX; wrong index/receiver types are E-TYPE.
+
+For a list a, `a[indices]` also accepts a list of safe integers. It returns a new list in index order, preserving duplicates, and applies scalar negative-index rules to every element. Any invalid index fails the whole expression; there is no boolean mask, recursive flattening, or multidimensional indexing. An empty index list returns an empty list even for an empty source. Strings do not accept index lists. For `a=range(5)`, `a[[3,-1,3,0]]` is `[3,4,3,0]`, and `a[range(3)]` is `[0,1,2]`.
+
+List/string slicing uses `v[start:stop]` or `v[start:stop:step]`, returning the same type with stop excluded. Each component may be omitted; explicit null means the same omission. Non-null components MUST be safe integers (wrong type E-TYPE, fractional/unsafe integer E-INDEX). Step defaults to 1; zero is E-VALUE. Bounds are normalized as follows, using exact integer arithmetic:
+
+- For positive step, omitted start/stop are 0/n. Add n once to explicit negative bounds, then clamp each to [0,n].
+- For negative step, omitted start/stop are n−1/−1. Add n once to explicit negative bounds, then clamp each to [−1,n−1]. An omitted stop therefore differs from explicit −1, which denotes the last element before clamping.
+- Starting at normalized start, select successive indices separated by step while index < stop for positive step or index > stop for negative step. A direction mismatch returns an empty list/string. Bounds outside the source are clipped, including empty sources; scalar/gather indices remain strict.
+
+The receiver and supplied index/bound expressions evaluate exactly once, left to right (receiver, start, stop, step), stopping at the first error. Result allocation is checked against the list budget before allocation (E-BUDGET); no partial result is published. These operations preserve immutable values, including function/effect elements, without invoking them. Projections, gathers, and slices retain Unknown normative Ops (§5). Core Data follows these rules on all execution paths; opaque Host resources use their registered native indexing protocols.
+
+| Expression | Result |
+|---|---|
+| `range(5)[-1]` | `4` |
+| `range(5)[::-1]` | `[4,3,2,1,0]` |
+| `range(5)[1:5:2]` | `[1,3]` |
+| `range(5)[99:-99:-2]` | `[4,2,0]` |
+| `range(5)[:-1:-1]` / `range(5)[:null:-1]` | `[]` / `[4,3,2,1,0]` |
+| `"a𐀀b"[::-1]` | `"b𐀀a"` |
+| `[][:]` / `""[::-1]` | `[]` / `""` |
+| `[0][-2]` / `[0][[0,1]]` / `[0][0.5]` | E-INDEX |
+| `[0][true]` / `"a"[[0]]` / `[0][:"x"]` | E-TYPE |
+| `[0][::0]` | E-VALUE |
+
 ### 3.1. Core pure functions (1.0)
 
 These are the complete non-overridable core functions. They accept V, return new values, and never mutate inputs.
@@ -293,7 +319,7 @@ These are the complete non-overridable core functions. They accept V, return new
 | fold(xs,seed,f) | 3 | list, V, pure binary function → strict left fold; empty list returns seed |
 | fail(message) | 1 | string → E-FAIL, no successful value |
 | concat(a,b) | 2 | Two lists → concatenation; append is concat(a,[v]) |
-| slice(v,start,end) | 3 | list/string, safe integer bounds → same-type half-open slice; strings count scalars |
+| slice(v,start,stop) / slice(v,start,stop,step) | 3/4 | Same rules as bracket slicing; null denotes an omitted component |
 | keys(o) | 1 | object → string list sorted by UTF-8 bytes |
 | has(o,k) | 2 | object, string → bool; missing key is false |
 | put(o,k,v) | 3 | object, string, V → object with the key added/replaced |
@@ -302,7 +328,7 @@ These are the complete non-overridable core functions. They accept V, return new
 
 Core functions reject named arguments and check declared arity statically when known and dynamically through function values. They may be passed as pure function values. map calls f(element); fold calls f(accumulator,element), using §5's callable/arity/type checks even on empty inputs when statically known. Unguarded comprehensions are ordered map; guards follow §6.2. Flow comprehensions containing perform run sequentially like list literals. range checks size budget before allocation and computes length/elements with exact integers before converting to number, without floating-point loops. len MUST return a safe integer or explicitly fail, never round an incorrect length.
 
-slice requires `0≤start≤end≤len(v)` with safe nonnegative integer bounds; otherwise E-INDEX, without clamping/negative indices. has/put require string keys. Empty split separator is E-VALUE; `split("",",")=[""]` and `split("a,,b,",",")=["a","","b",""]`. There are no hidden parameters.
+slice uses exactly the bracket slicing rules above, including negative bounds, clipping, nullable components, and a nonzero optional step. `slice(v,null,null,-1)` equals `v[::-1]`. has/put require string keys. Empty split separator is E-VALUE; `split("",",")=[""]` and `split("a,,b,",",")=["a","","b",""]`. There are no hidden parameters.
 
 parse_number accepts an optional ASCII sign followed by exactly §2's number token. Reject whitespace, leading zeroes, hex, NaN/Infinity, and trailing text. Invalid text/overflow is E-VALUE; wrong type E-TYPE. Rounding, subnormals, underflow, and zero normalization match literals, not permissive Host parsers. `parse_number(str(n)) == n` holds for every core number.
 
@@ -400,7 +426,7 @@ Ops is compiler information, not a writable effect[Ops] type. Implementations MU
 | Analyzed binding reference / parentheses | Preserve existing Ops, including captured values |
 | if/match result | Union all candidates; any Unknown yields Unknown; no constant-guard pruning |
 | value block | Analyze tail in sequential local environment |
-| list/object index or field projection | Unknown, including literal containers |
+| list/object index, gather, slice, or field projection | Unknown, including literal containers |
 | fn/core/higher-order result or carry result | Unknown; no function-return/cross-iteration analysis |
 | Other parameter/input/any | Unknown; an any annotation alone does not erase existing binding information |
 
@@ -1132,6 +1158,10 @@ For each independent row below, reset bindings/journal. worker aliases `import p
 
 | Input / environment | Required result | Profile |
 |---|---|---|
+| `range(5)[[-1,0,-1]]` / `range(5)[::-2]` | `[4,0,4]` / `[4,2,0]` | core evaluation/generated |
+| `range(5)[:-1:-1]` / `slice(range(5),null,null,-1)` | `[]` / `[4,3,2,1,0]` | core evaluation/generated |
+| `[0][[0,1]]` / `[0][::0]` | E-INDEX / E-VALUE, no partial result | core evaluation/generated |
+| Gather/slice then project a function/effect list | Preserve values and Unknown Ops; cannot authorize parallel | core static/dynamic |
 | `{len([0]);}` / `{len([0]);null}` | 1 / null; terminal semicolon is padding | core |
 | `if false {1/0} else {7}` | 7, no E-NUMBER or execution budget for unselected branch | core, varied Ready order |
 | `flow Main()->number {if false {x=1/0};return 7}` | x is unselected_gate, no root/F/cut, output 7 | core scheduling |

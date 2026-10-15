@@ -1725,6 +1725,12 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 			record.Response = Rejected("E-SCHEMA", err.Error())
 			return record
 		}
+		if p.contract.Operation == (Operation{"lip", "claim", "snapshot"}) &&
+			(p.snapshotRun != r.opts.RunID || comparePosition(p.snapshotPrefix, v.node.instance.prefix) != 0) {
+			record.admission = true
+			record.Response = Rejected("E-RESOURCE", "Claim snapshot proposal belongs to another run or Flow instance")
+			return record
+		}
 		if err := v.ctx.Err(); err != nil {
 			return reject(err)
 		}
@@ -1767,6 +1773,11 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 		if p.contract.Operation == (Operation{"lip", "claim", "snapshot"}) {
 			bound, _ := bindContract(p.contract, p.positional, p.named)
 			store := v.node.instance.stores[bound[0].s]
+			if store == nil {
+				record.admission = true
+				record.Response = Rejected("E-RESOURCE", "Claim snapshot store is no longer available")
+				return record
+			}
 			value, e := store.read()
 			if e != nil {
 				record.admission = true
@@ -1777,7 +1788,13 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 			return record
 		}
 		r.calls.Add(1)
-		response := invokeSafely(v.ctx, p.contract, request)
+		callContext := v.ctx
+		if p.contract.Version == "lip-native-1" && p.contract.Operation.Language == "host" && p.contract.Operation.Path == "lip.native" {
+			// Data hidden behind conservative native provenance still uses
+			// this evaluation's allocation, instruction, and cancel budgets.
+			callContext = context.WithValue(callContext, nativeDataBudgetKey{}, nativeDataBudget{r.reserveElements, func() error { return v.step(t) }})
+		}
+		response := invokeSafely(callContext, p.contract, request)
 		if response.Outcome == RejectedOutcome && response.KnownCompleted && response.Error != nil && (response.Error.Code == "E-SCHEMA" || response.Error.Code == "E-VALUE") {
 			record.KnownFault = true
 		}

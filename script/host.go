@@ -38,7 +38,7 @@ func validSchema(s Schema, seen map[visitKey]bool) bool {
 		return false
 	}
 	if s.Items != nil {
-		key := visitKey{reflect.TypeOf(s.Items), reflect.ValueOf(s.Items).Pointer()}
+		key := visitKey{typ: reflect.TypeOf(s.Items), ptr: reflect.ValueOf(s.Items).Pointer()}
 		if seen[key] {
 			return false
 		}
@@ -49,7 +49,7 @@ func validSchema(s Schema, seen map[visitKey]bool) bool {
 		delete(seen, key)
 	}
 	if len(s.Fields) > 0 {
-		key := visitKey{reflect.TypeOf(s.Fields), uintptr(reflect.ValueOf(s.Fields).UnsafePointer())}
+		key := visitKey{typ: reflect.TypeOf(s.Fields), ptr: uintptr(reflect.ValueOf(s.Fields).UnsafePointer())}
 		if seen[key] {
 			return false
 		}

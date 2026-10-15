@@ -104,6 +104,7 @@ def execute(request):
         if action == "length": return len(value)
         if action == "string": return str(value)
         if action == "index": return value[args[0]]
+        if action == "slice": return value[slice(*args)]
         if action == "get": return attributes(value, member.removeprefix("get."))
         if action in ("call", "prepare"):
             if member != action: value = attributes(value, member.removeprefix(action+"."))

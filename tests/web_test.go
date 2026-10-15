@@ -684,3 +684,26 @@ func TestHTTPExplicitMethodsAndEscapedPath(t *testing.T) {
 		t.Fatal("methodless route accepted")
 	}
 }
+
+func TestHTTPIndexAndSlice(t *testing.T) {
+	p := webProgram(t, `flow Main(request:object)->object {
+  xs=request.json.xs
+  return {status:200,json:{selected:xs[request.json.indices],reverse:xs[::-1],text:request.json.label[::-1]}}
+ }`, Host{})
+	handler, err := NewHTTPHandler(p, HTTPOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ body, want string }{
+		{`{"xs":[0,1,2,3,4],"indices":[-1,0,-1],"label":"a𐀀b"}`, `{"reverse":[4,3,2,1,0],"selected":[4,0,4],"text":"b𐀀a"}`},
+		{`{"xs":[],"indices":[],"label":""}`, `{"reverse":[],"selected":[],"text":""}`},
+	} {
+		req := httptest.NewRequest("POST", "/", strings.NewReader(test.body))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		if response.Code != 200 || strings.TrimSpace(response.Body.String()) != test.want {
+			t.Fatal(response.Code, response.Body.String())
+		}
+	}
+}

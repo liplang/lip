@@ -104,6 +104,178 @@ func (v Value) IsData() bool {
 	}
 	return true
 }
+
+// Index arithmetic stays in int64 until bounds have been checked. LIP safe
+// integers fit exactly, including on platforms whose Go int is only 32 bits.
+func indexInteger(x Value) (int64, error) {
+	if x.k != Number {
+		return 0, diagnostic("E-TYPE", "index requires number")
+	}
+	if math.IsNaN(x.n) || math.IsInf(x.n, 0) || math.Abs(x.n) > 9007199254740991 || math.Trunc(x.n) != x.n {
+		return 0, diagnostic("E-INDEX", "index must be a safe integer")
+	}
+	return int64(x.n), nil
+}
+func relativeIndex(x Value, length int) (int, error) {
+	i, err := indexInteger(x)
+	if err != nil {
+		return 0, err
+	}
+	if i < 0 {
+		i += int64(length)
+	}
+	if i < 0 || i >= int64(length) {
+		return 0, diagnostic("E-INDEX", "index out of bounds")
+	}
+	return int(i), nil
+}
+
+// Null bounds denote omissions. In particular, omitted reverse stop is -1,
+// whereas explicit -1 is first made relative to length.
+func slicePlan(length int, bounds []Value) (start, step, count int64, err error) {
+	var parts [3]int64
+	for i, x := range bounds {
+		if x.k != Null {
+			parts[i], err = indexInteger(x)
+			if err != nil {
+				return
+			}
+		}
+	}
+	step = 1
+	if len(bounds) == 3 && bounds[2].k != Null {
+		step = parts[2]
+	}
+	if step == 0 {
+		err = diagnostic("E-VALUE", "slice step cannot be zero")
+		return
+	}
+	n := int64(length)
+	low, high := int64(0), n
+	start, stop := int64(0), n
+	if step < 0 {
+		low, high = -1, n-1
+		start, stop = n-1, -1
+	}
+	for i, target := range []*int64{&start, &stop} {
+		if bounds[i].k == Null {
+			continue
+		}
+		b := parts[i]
+		if b < 0 {
+			b += n
+		}
+		if b < low {
+			b = low
+		}
+		if b > high {
+			b = high
+		}
+		*target = b
+	}
+	if step > 0 && start < stop {
+		count = (stop-start-1)/step + 1
+	} else if step < 0 && start > stop {
+		count = (start-stop-1)/(-step) + 1
+	}
+	return start, step, count, nil
+}
+
+// Shared by core evaluation and native Data projection. Optional callbacks
+// enforce the evaluator's allocation/step budget or the Host's cancellation.
+func indexValue(x, index Value, reserve func(int64) error, tick func() error) (Value, error) {
+	if x.k == Object {
+		if index.k != String {
+			return Value{}, diagnostic("E-TYPE", "object index requires string")
+		}
+		out, ok := x.o[index.s]
+		if !ok {
+			return Value{}, diagnostic("E-INDEX", "missing key "+index.s)
+		}
+		return out, nil
+	}
+	if x.k != List && x.k != String {
+		return Value{}, diagnostic("E-TYPE", "value cannot be indexed")
+	}
+	if x.k == List && index.k == List {
+		if reserve != nil {
+			if err := reserve(int64(len(index.l))); err != nil {
+				return Value{}, err
+			}
+		}
+		out := make([]Value, len(index.l))
+		for j, element := range index.l {
+			if tick != nil {
+				if err := tick(); err != nil {
+					return Value{}, err
+				}
+			}
+			i, err := relativeIndex(element, len(x.l))
+			if err != nil {
+				return Value{}, err
+			}
+			out[j] = x.l[i]
+		}
+		return Value{k: List, l: out}, nil
+	}
+	length := len(x.l)
+	var rs []rune
+	if x.k == String {
+		rs = []rune(x.s)
+		length = len(rs)
+	}
+	i, err := relativeIndex(index, length)
+	if err != nil {
+		return Value{}, err
+	}
+	if x.k == String {
+		return textValue(string(rs[i])), nil
+	}
+	return x.l[i], nil
+}
+func sliceValue(x Value, bounds []Value, reserve func(int64) error, tick func() error) (Value, error) {
+	if x.k != List && x.k != String {
+		return Value{}, diagnostic("E-TYPE", "slice requires list or string")
+	}
+	length := len(x.l)
+	var rs []rune
+	if x.k == String {
+		rs = []rune(x.s)
+		length = len(rs)
+	}
+	start, step, count, err := slicePlan(length, bounds)
+	if err != nil {
+		return Value{}, err
+	}
+	var out []Value
+	var text []rune
+	if x.k == List {
+		if reserve != nil {
+			if err := reserve(count); err != nil {
+				return Value{}, err
+			}
+		}
+		out = make([]Value, int(count))
+	} else {
+		text = make([]rune, int(count))
+	}
+	for j, i := int64(0), start; j < count; j, i = j+1, i+step {
+		if tick != nil {
+			if err := tick(); err != nil {
+				return Value{}, err
+			}
+		}
+		if x.k == List {
+			out[j] = x.l[i]
+		} else {
+			text[j] = rs[i]
+		}
+	}
+	if x.k == String {
+		return textValue(string(text)), nil
+	}
+	return Value{k: List, l: out}, nil
+}
 func (v Value) Native() (any, error) {
 	if !v.IsData() {
 		return nil, diagnostic("E-VALUE", "value is not Data")

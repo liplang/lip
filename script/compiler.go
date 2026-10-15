@@ -354,6 +354,9 @@ type proposal struct {
 	contract     Contract
 	positional   []Value
 	named        map[string]Value
+	// Snapshot requests retain identity only, never the live store or its graph.
+	snapshotRun    string
+	snapshotPrefix Position
 }
 
 type parser struct {
@@ -1038,10 +1041,24 @@ func (p *parser) postfix() *expression {
 		case "[":
 			p.take()
 			p.soft++
-			index := p.expr(0)
+			index := &expression{tag: "lit", tok: t}
+			if p.peek().kind != ":" {
+				index = p.expr(0)
+			}
+			if p.accept(":") {
+				bounds := []argument{{expr: index}, {expr: &expression{tag: "lit", tok: t}}, {expr: &expression{tag: "lit", tok: t}}}
+				if p.peek().kind != ":" && p.peek().kind != "]" {
+					bounds[1].expr = p.expr(0)
+				}
+				if p.accept(":") && p.peek().kind != "]" {
+					bounds[2].expr = p.expr(0)
+				}
+				e = &expression{tag: "slice", tok: t, x: e, args: bounds}
+			} else {
+				e = &expression{tag: "index", tok: t, x: e, y: index}
+			}
 			p.need("]")
 			p.soft--
-			e = &expression{tag: "index", tok: t, x: e, y: index}
 		default:
 			return e
 		}

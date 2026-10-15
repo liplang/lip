@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"fmt"
 	. "lip/script"
 	"os"
 	"os/exec"
@@ -32,6 +33,128 @@ func nativeCell(t *testing.T, s *Session, source, want string) Value {
 type bridgeCounter struct{ Value int }
 
 func (c *bridgeCounter) Add(n int) int { c.Value += n; return c.Value }
+
+type sharedNativeLeaf struct{ Value int }
+type sharedNativeRoot struct {
+	Leaf  sharedNativeLeaf
+	Alias *sharedNativeLeaf
+}
+
+func sharedNativeValue(mode string) any {
+	switch mode {
+	case "prefix":
+		xs := []any{7, nil}
+		xs[1] = xs[:1]
+		return xs
+	case "empty":
+		xs := make([]any, 1)
+		xs[0] = xs[:0]
+		return xs
+	case "shared":
+		leaf := []int{7}
+		return []any{leaf, leaf}
+	case "typed":
+		root := &sharedNativeRoot{Leaf: sharedNativeLeaf{7}}
+		root.Alias = &root.Leaf
+		return root
+	case "slice_cycle":
+		xs := make([]any, 1)
+		xs[0] = xs
+		return xs
+	case "map_cycle":
+		m := map[string]any{}
+		m["self"] = m
+		return m
+	case "mixed_cycle":
+		xs := make([]any, 1)
+		m := map[string]any{"list": xs}
+		xs[0] = m
+		return m
+	case "pointer_cycle":
+		var x any
+		x = &x
+		return &x
+	}
+	return nil
+}
+
+func TestNativeSharedDataSnapshots(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	var calls atomic.Int64
+	host.Native.Go.RegisterPackage("application/shared", map[string]any{"Value": func(mode string) any {
+		calls.Add(1)
+		return sharedNativeValue(mode)
+	}})
+	source := `import go "application/shared" as shared
+flow Main(mode:string)->any {
+ return if mode=="skip" {7} else {native_data(shared.Value(mode))}
+}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+type sharedNativeLeaf struct{Value int}
+type sharedNativeRoot struct{Leaf sharedNativeLeaf; Alias *sharedNativeLeaf}
+func sharedNativeValue(mode string) any {
+ switch mode {
+ case "prefix": xs:=[]any{7,nil};xs[1]=xs[:1];return xs
+ case "empty": xs:=make([]any,1);xs[0]=xs[:0];return xs
+ case "shared": leaf:=[]int{7};return []any{leaf,leaf}
+ case "typed": root:=&sharedNativeRoot{Leaf:sharedNativeLeaf{7}};root.Alias=&root.Leaf;return root
+ case "slice_cycle": xs:=make([]any,1);xs[0]=xs;return xs
+ case "map_cycle": m:=map[string]any{};m["self"]=m;return m
+ case "mixed_cycle": xs:=make([]any,1);m:=map[string]any{"list":xs};xs[0]=m;return m
+ case "pointer_cycle": var x any;x=&x;return &x
+ };return nil
+}
+func generatedHost()(Host,error){host:=NewNativeHost(Host{});host.Native.Go.RegisterPackage("application/shared",map[string]any{"Value":sharedNativeValue});return host,nil}
+`})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, source, "")
+	for _, test := range []struct{ mode, want string }{
+		{"skip", `7`}, {"prefix", `[7,[7]]`}, {"empty", `[[]]`}, {"shared", `[[7],[7]]`},
+		{"typed", `{"Alias":{"Value":7},"Leaf":{"Value":7}}`},
+		{"slice_cycle", ""}, {"map_cycle", ""}, {"mixed_cycle", ""}, {"pointer_cycle", ""},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			input := `{"mode":"` + test.mode + `"}`
+			for _, parallel := range []int{1, 7} {
+				before := calls.Load()
+				report, runErr := p.Run(context.Background(), map[string]Value{"mode": textValue(test.mode)}, Options{Parallelism: parallel})
+				stdout, stderr, nativeErr := runNative(t, executable, "-input", input, "-parallel", fmt.Sprint(parallel))
+				if test.want != "" {
+					if runErr != nil || nativeErr != nil || display(t, report.Output) != test.want || strings.TrimSpace(stdout) != test.want {
+						t.Fatal(report, runErr, stdout, stderr, nativeErr)
+					}
+				} else if d, ok := runErr.(*Diagnostic); !ok || d.Code != "E-VALUE" || report.EntryOutput != nil || nativeErr == nil || stdout != "" || !strings.Contains(stderr, runErr.Error()) {
+					t.Fatal("snapshot conversion boundary mismatch", report, runErr, stdout, stderr, nativeErr)
+				}
+				if test.mode == "skip" && calls.Load() != before {
+					t.Fatal("unselected snapshot called provider")
+				}
+			}
+			cell := `Main("` + test.mode + `")`
+			if test.want != "" {
+				nativeCell(t, s, cell, test.want)
+			} else {
+				result, err := s.Eval(context.Background(), `uncommitted=`+cell, Options{})
+				if d, ok := err.(*Diagnostic); !ok || d.Code != "E-VALUE" || result.HasValue || result.Report.EntryOutput != nil {
+					t.Fatal("invalid session snapshot", result, err)
+				}
+				if _, committed := s.Values()["uncommitted"]; committed {
+					t.Fatal("failed snapshot committed its binding")
+				}
+				nativeCell(t, s, `Main("prefix")`, `[7,[7]]`)
+			}
+		})
+	}
+}
 
 func TestNativeRunOwnershipAndFailedCellCleanup(t *testing.T) {
 	host := NewNativeHost(Host{})
@@ -1077,4 +1200,89 @@ func TestNativePipelineStagesRemainStatic(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("stage validation executed a native callable")
 	}
+}
+
+func TestNativeIndexAndSliceComposition(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python 3 required for native slice parity")
+	}
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	var calls atomic.Int64
+	host.Native.Go.RegisterPackage("application/sequence", map[string]any{"Values": func() []int { calls.Add(1); return []int{0, 1, 2, 3, 4} }})
+	source := `import go "application/sequence" as seq
+import python "array" as py
+import python "builtins" as bi
+BASE:list=[0,1,2,3]
+INDICES:list=[0,0,0]
+flow Main(mode:string)->any {
+ return if mode=="skip" {7} else {
+  xs=seq.Values()
+  match mode {
+   "go"=>{last:xs[-1],gather:native_data(xs[[-1,0,-1]]),reverse:native_data(xs[::-1]),stride:native_data(slice(xs,null,null,-2)),nested:native_data([xs][::-1][[0]][0][1:4:2])},
+   "pure"=>{f=fn()->number{[xs,7][::-1][0]};g=fn()->number{[xs,8][[1]][0]};h=fn()->number{slice([xs,9],1,null)[0]};[f(),g(),h()]},
+   "dynamic"=>{indices=range(1);selected=[xs][indices];native_data(selected[0][::-1])},
+   "python"=>{a=py.array("i",[0,1,2,3,4]);{last:a[-1],reverse:native_data(a[::-1]),stride:native_data(a[99:-99:-2]),gather:bi.list(range(5))[[-1,0,-1]],unicode:bi.str("a𐀀b")[::-1]}},
+   "bounds"=>xs[-6],
+   "budget_gather"=>bi.list(BASE)[INDICES],
+   "budget_slice"=>bi.list(BASE)[:],
+   _=>native_data(xs[:])
+  }
+ }
+}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+func generatedHost()(Host,error){host:=NewNativeHost(Host{});host.Native.Go.RegisterPackage("application/sequence",map[string]any{"Values":func() []int{return []int{0,1,2,3,4}}});return host,nil}`})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, source, "")
+	for _, test := range []struct{ mode, want string }{
+		{"skip", "7"},
+		{"go", `{"gather":[4,0,4],"last":4,"nested":[1,3],"reverse":[4,3,2,1,0],"stride":[4,2,0]}`},
+		{"pure", `[7,8,9]`},
+		{"dynamic", `[4,3,2,1,0]`},
+		{"python", `{"gather":[4,0,4],"last":4,"reverse":[4,3,2,1,0],"stride":[4,2,0],"unicode":"b𐀀a"}`},
+		{"copy", `[0,1,2,3,4]`},
+	} {
+		before := calls.Load()
+		r, err := p.Run(context.Background(), map[string]Value{"mode": textValue(test.mode)}, Options{Parallelism: 4})
+		stdout, stderr, nativeErr := runNative(t, executable, "-input", `{"mode":"`+test.mode+`"}`)
+		if err != nil || nativeErr != nil || display(t, r.Output) != test.want || strings.TrimSpace(stdout) != test.want {
+			t.Fatal(test.mode, r, err, stdout, stderr, nativeErr)
+		}
+		nativeCell(t, s, `Main("`+test.mode+`")`, test.want)
+		if test.mode == "skip" && calls.Load() != before {
+			t.Fatal("unselected sequence called provider")
+		}
+	}
+	for _, mode := range []string{"budget_gather", "budget_slice"} {
+		_, err := p.Run(context.Background(), map[string]Value{"mode": textValue(mode)}, Options{MaxElements: 2})
+		stdout, stderr, nativeErr := runNative(t, executable, "-input", `{"mode":"`+mode+`"}`, "-elements", "2")
+		if err == nil || err.(*Diagnostic).Code != "E-BUDGET" || nativeErr == nil || stdout != "" || !strings.Contains(stderr, err.Error()) {
+			t.Fatal(mode, err, stdout, stderr, nativeErr)
+		}
+		if _, err := s.Eval(context.Background(), `bad=Main("`+mode+`")`, Options{MaxElements: 2}); err == nil || err.(*Diagnostic).Code != "E-BUDGET" {
+			t.Fatal(mode, err)
+		}
+	}
+	before := calls.Load()
+	if _, err := Compile(`import go "application/sequence" as seq;flow Main()->any{return slice(seq.Values(),start=0,stop=1)}`, host); err == nil || err.(*Diagnostic).Code != "E-ARITY" || calls.Load() != before {
+		t.Fatal("named slice args escaped static checking", err)
+	}
+
+	nativeCell(t, s, `saved=seq.Values()`, "")
+	nativeCell(t, s, `view=saved[::-2]`, "")
+	nativeCell(t, s, `native_data(view)`, `[4,2,0]`)
+	nativeCell(t, s, `native_data(saved)`, `[0,1,2,3,4]`)
+	nativeCell(t, s, `view[-1]`, `0`)
+	if _, err := s.Eval(context.Background(), `bad=saved[-6]`, Options{}); err == nil || err.(*Diagnostic).Code != "E-INDEX" {
+		t.Fatal(err)
+	}
+	nativeCell(t, s, `view[-1]`, `0`)
 }

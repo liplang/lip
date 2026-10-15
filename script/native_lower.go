@@ -11,6 +11,44 @@ import (
 // independent of normative proposal Ops and never makes a perform concurrent.
 func nativeShapePointer(s nativeShape) *nativeShape { return &s }
 
+func nativeIndexLiteral(e *expression) (Value, bool) {
+	if e.tag == "lit" {
+		return e.value, true
+	}
+	if e.tag == "unary" && (e.name == "-" || e.name == "+") {
+		if x, ok := nativeIndexLiteral(e.x); ok && x.k == Number {
+			if e.name == "-" {
+				x.n = -x.n
+			}
+			return x, true
+		}
+	}
+	return Value{}, false
+}
+
+func nativeSliceShape(receiver nativeShape, args []argument) nativeShape {
+	if receiver.items != nil {
+		bounds := make([]Value, len(args))
+		known := true
+		for i, arg := range args {
+			var ok bool
+			bounds[i], ok = nativeIndexLiteral(arg.expr)
+			known = known && ok
+		}
+		if known {
+			start, step, count, err := slicePlan(len(receiver.items), bounds)
+			if err == nil {
+				out := nativeShape{items: make([]nativeShape, int(count))}
+				for j, i := int64(0), start; j < count; j, i = j+1, i+step {
+					out.items[j] = receiver.items[i]
+				}
+				return out
+			}
+		}
+	}
+	return nativeShape{item: nativeShapePointer(receiver.element())}
+}
+
 func (s nativeShape) element() nativeShape {
 	out := nativeShape{native: s.native}
 	if s.item != nil {
@@ -645,7 +683,24 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			}
 			foreign[e] = out
 		case "call":
-			if isNative(e.x, local) {
+			if e.x.tag == "id" && e.x.name == "slice" && (len(e.args) == 3 || len(e.args) == 4) {
+				for _, arg := range e.args {
+					if arg.name != "" {
+						// Keep the ordinary builtin call so the checker rejects
+						// named arguments before any receiver/provider can run.
+						return
+					}
+				}
+				if isNative(e.args[0].expr, local) {
+					args := append([]argument(nil), e.args...)
+					if len(args) == 3 {
+						args = append(args, argument{expr: &expression{tag: "lit", tok: e.tok}})
+					}
+					perform(e, add(Operation{"host", "lip.native", "slice"}, "slice"), args)
+				} else {
+					foreign[e] = nativeSliceShape(shape(e.args[0].expr, local), e.args[1:])
+				}
+			} else if isNative(e.x, local) {
 				callee := prepare(e.x.tok, add(Operation{"host", "lip.native", "prepare"}, "prepare"), e.x, e.args)
 				perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
 			} else {
@@ -667,13 +722,34 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				perform(e, add(Operation{"host", "lip.native", "index"}, "index"), []argument{{expr: e.x}, {expr: e.y}})
 			} else {
 				receiver := shape(e.x, local)
-				if e.y.tag == "lit" && e.y.value.k == String {
-					foreign[e] = receiver.fields[e.y.value.s]
-				} else if e.y.tag == "lit" && e.y.value.k == Number && e.y.value.n >= 0 && e.y.value.n < float64(len(receiver.items)) && e.y.value.n == float64(int(e.y.value.n)) {
-					foreign[e] = receiver.items[int(e.y.value.n)]
+				index, known := nativeIndexLiteral(e.y)
+				if known && index.k == String {
+					foreign[e] = receiver.fields[index.s]
+				} else if i, err := relativeIndex(index, len(receiver.items)); known && err == nil {
+					foreign[e] = receiver.items[i]
+				} else if e.y.tag == "list" {
+					out := nativeShape{items: make([]nativeShape, len(e.y.elems))}
+					for j, element := range e.y.elems {
+						index, known := nativeIndexLiteral(element)
+						if i, err := relativeIndex(index, len(receiver.items)); known && err == nil {
+							out.items[j] = receiver.items[i]
+						} else {
+							out.items[j] = receiver.element()
+						}
+					}
+					foreign[e] = out
 				} else {
-					foreign[e] = receiver.element()
+					// A dynamic index can select either an element or a list of
+					// elements. Preserve both possibilities for later projection.
+					item := receiver.element()
+					foreign[e] = mergeNativeShape(item, nativeShape{item: nativeShapePointer(item)})
 				}
+			}
+		case "slice":
+			if isNative(e.x, local) {
+				perform(e, add(Operation{"host", "lip.native", "slice"}, "slice"), append([]argument{{expr: e.x}}, e.args...))
+			} else {
+				foreign[e] = nativeSliceShape(shape(e.x, local), e.args)
 			}
 		}
 	}

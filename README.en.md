@@ -125,7 +125,7 @@ Under the specification's conditions—fixed inputs and external responses, fair
 
 ### One program, from exploration to a Go executable
 
-The REPL, 18 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
+The REPL, 19 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
 
 These LIP 1.0 mechanisms are implemented in an executable compiler and runtime. Tests build and run generated programs, comparing outputs, errors, identities, and call boundaries. Composition tests combine modules, closures, loops, child graphs, and pipelines at worker limits 1, 2, 4, 7, 1238, and 73295. [Implementation and validation](IMPLEMENTATION.en.md) maps specification sections to concrete tests.
 
@@ -390,7 +390,24 @@ The REPL and learn share an editor:
 
 Open brackets, braces, and triple-quoted strings support multiline input; otherwise use a trailing `\`. The editor supports bracketed paste, Chinese text, and common combining characters. Raw mode applies only during editing and is restored before provider calls; pipes use plain text. Terminal interfaces support Linux, macOS/BSD, and VT-enabled Windows consoles; current platform validation is Linux.
 
-The 18 lessons cover values and arithmetic, functions, entries, child Flows/pipelines, modules, control structures, Claims, and tools. Enter an answer to validate it; `:hint` gives guidance, `:demo` runs the example, and `:next` advances. `:edit` / `:submit` edits and submits a complete program. Lessons check multiple inputs; module sources are bundled for learning away from the repository. Progress is saved only when requested:
+Lists support negative scalar indices, index lists, and Python-style slices. String indices and slices count Unicode scalars:
+
+```text
+a = range(100)
+a[-1]             # 99
+a[range(4)]       # [0,1,2,3]
+a[[3,-1,3]]       # [3,99,3]
+a[2:10:2]         # [2,4,6,8]
+a[::-1]           # [99,98,...,0]
+"a𐀀b"[::-1]     # "b𐀀a"
+slice(a,null,null,-1)  # Same as a[::-1]
+```
+
+Scalar/gather indices reject out-of-bounds access. Slices clip bounds, exclude stop, and reject zero step.
+Omitted bounds and null are equivalent; with negative step, omitted stop differs from explicit -1.
+Index lists preserve order and duplicates. Try `./lipc learn -lesson slicing` or `help(slice)` in the REPL.
+
+The 19 lessons cover values and arithmetic, functions, entries, child Flows/pipelines, modules, control structures, Claims, and tools. Enter an answer to validate it; `:hint` gives guidance, `:demo` runs the example, and `:next` advances. `:edit` / `:submit` edits and submits a complete program. Lessons check multiple inputs; module sources are bundled for learning away from the repository. Progress is saved only when requested:
 
 ```sh
 ./lipc learn -progress /path/to/progress.json
