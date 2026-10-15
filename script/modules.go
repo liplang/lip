@@ -56,6 +56,12 @@ func sourceHash(text string) string {
 // identity boundary; an empty root uses the entry file's physical directory.
 // Every path component below that root must match exactly and be nonsymlink.
 func LoadSourceSet(filename, projectRoot string) (SourceSet, error) {
+	return loadSourceSet(filename, projectRoot, nil, nil, nil)
+}
+
+// Interactive roots supply parsed syntax and reuse already frozen dependencies.
+// Only newly imported files are read, before checking or executing the cell.
+func loadSourceSet(filename, projectRoot string, supplied *syntax, frozen map[string]Source, physical map[string]os.FileInfo) (SourceSet, error) {
 	absolute, err := filepath.Abs(filename)
 	if err != nil {
 		return SourceSet{}, err
@@ -91,79 +97,100 @@ func LoadSourceSet(filename, projectRoot string) (SourceSet, error) {
 		return SourceSet{}, diagnostic("E-MODULE", err.Error())
 	}
 	defer root.Close()
-	physical := map[string]os.FileInfo{}
+	if physical == nil {
+		physical = map[string]os.FileInfo{}
+	}
 	size := 0
+	for id, source := range frozen {
+		set.Sources[id] = source
+		size += len(source.Text)
+	}
+	if supplied != nil {
+		set.Sources[set.Root] = Source{Version: "local", Text: supplied.source}
+		size += len(supplied.source)
+	}
+	if size > maxSourceBytes || len(set.Sources) > maxSourceFiles {
+		return SourceSet{}, diagnostic("E-BUDGET", "source budget exhausted")
+	}
+	visited := map[string]bool{}
 	var load func(string) error
 	load = func(id string) error {
-		if _, ok := set.Sources[id]; ok {
+		if visited[id] {
 			return nil
 		}
-		if len(set.Sources) >= maxSourceFiles {
-			return diagnostic("E-BUDGET", "source file budget exhausted")
-		}
-		current := "."
-		var checked os.FileInfo
-		for _, part := range strings.Split(id, "/") {
-			entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(current))
+		visited[id] = true
+		if _, frozen := set.Sources[id]; !frozen {
+			if len(set.Sources) >= maxSourceFiles {
+				return diagnostic("E-BUDGET", "source file budget exhausted")
+			}
+			current := "."
+			var checked os.FileInfo
+			for _, part := range strings.Split(id, "/") {
+				entries, err := fs.ReadDir(root.FS(), filepath.ToSlash(current))
+				if err != nil {
+					return diagnostic("E-MODULE", err.Error())
+				}
+				exact := false
+				for _, entry := range entries {
+					if entry.Name() == part {
+						exact = true
+						break
+					}
+				}
+				if !exact {
+					return diagnostic("E-MODULE", "source path does not match exactly: "+id)
+				}
+				current = filepath.Join(current, part)
+				info, err := root.Lstat(current)
+				if err != nil {
+					return diagnostic("E-MODULE", err.Error())
+				}
+				if info.Mode()&os.ModeSymlink != 0 {
+					return diagnostic("E-MODULE", "symlink in source path: "+id)
+				}
+				checked = info
+			}
+			if checked == nil || !checked.Mode().IsRegular() {
+				return diagnostic("E-MODULE", "source must be a regular file: "+id)
+			}
+			file, err := root.Open(current)
 			if err != nil {
 				return diagnostic("E-MODULE", err.Error())
 			}
-			exact := false
-			for _, entry := range entries {
-				if entry.Name() == part {
-					exact = true
-					break
+			info, err := file.Stat()
+			if err != nil || !info.Mode().IsRegular() || !os.SameFile(checked, info) {
+				file.Close()
+				return diagnostic("E-MODULE", "source must be a regular file: "+id)
+			}
+			for old, prior := range physical {
+				if os.SameFile(info, prior) {
+					file.Close()
+					return diagnostic("E-MODULE", "duplicate physical source: "+old+" and "+id)
 				}
 			}
-			if !exact {
-				return diagnostic("E-MODULE", "source path does not match exactly: "+id)
+			if info.Size() > int64(maxSourceBytes-size) {
+				file.Close()
+				return diagnostic("E-BUDGET", "source byte budget exhausted")
 			}
-			current = filepath.Join(current, part)
-			info, err := root.Lstat(current)
+			data, err := io.ReadAll(io.LimitReader(file, int64(maxSourceBytes-size)+1))
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
 			if err != nil {
 				return diagnostic("E-MODULE", err.Error())
 			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return diagnostic("E-MODULE", "symlink in source path: "+id)
+			size += len(data)
+			if size > maxSourceBytes {
+				return diagnostic("E-BUDGET", "source byte budget exhausted")
 			}
-			checked = info
+			physical[id] = info
+			set.Sources[id] = Source{Version: "local", Text: string(data)}
 		}
-		if checked == nil || !checked.Mode().IsRegular() {
-			return diagnostic("E-MODULE", "source must be a regular file: "+id)
+		syntax := supplied
+		var err error
+		if id != set.Root || supplied == nil {
+			syntax, err = parse(set.Sources[id].Text)
 		}
-		file, err := root.Open(current)
-		if err != nil {
-			return diagnostic("E-MODULE", err.Error())
-		}
-		info, err := file.Stat()
-		if err != nil || !info.Mode().IsRegular() || !os.SameFile(checked, info) {
-			file.Close()
-			return diagnostic("E-MODULE", "source must be a regular file: "+id)
-		}
-		for old, prior := range physical {
-			if os.SameFile(info, prior) {
-				file.Close()
-				return diagnostic("E-MODULE", "duplicate physical source: "+old+" and "+id)
-			}
-		}
-		if info.Size() > int64(maxSourceBytes-size) {
-			file.Close()
-			return diagnostic("E-BUDGET", "source byte budget exhausted")
-		}
-		data, err := io.ReadAll(io.LimitReader(file, int64(maxSourceBytes-size)+1))
-		if closeErr := file.Close(); err == nil {
-			err = closeErr
-		}
-		if err != nil {
-			return diagnostic("E-MODULE", err.Error())
-		}
-		size += len(data)
-		if size > maxSourceBytes {
-			return diagnostic("E-BUDGET", "source byte budget exhausted")
-		}
-		physical[id] = info
-		set.Sources[id] = Source{Version: "local", Text: string(data)}
-		syntax, err := parse(string(data))
 		if err != nil {
 			if d, ok := err.(*Diagnostic); ok {
 				d.SourceID = id
@@ -189,7 +216,8 @@ func LoadSourceSet(filename, projectRoot string) (SourceSet, error) {
 	return set, nil
 }
 
-func CompileSourceSet(set SourceSet, host Host, options CompileOptions) (*Program, error) {
+func CompileSourceSet(set SourceSet, host Host, options CompileOptions) (program *Program, err error) {
+	defer func() { err = diagnosticPhase(err, "static") }()
 	syntax, build, err := linkSources(set, options.Entry, host.Native != nil)
 	if err != nil {
 		return nil, err
@@ -200,6 +228,10 @@ func CompileSourceSet(set SourceSet, host Host, options CompileOptions) (*Progra
 // Linking changes internal names only. Tokens keep their original source and
 // global ordinal, and lexical bindings never fall back to module declarations.
 func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Value, error) {
+	return linkSourceSyntax(set, entry, nativeHelpers, nil, nil)
+}
+
+func linkSourceSyntax(set SourceSet, entry string, nativeHelpers bool, supplied *syntax, saved map[string]bool) (*syntax, Value, error) {
 	if !validSourceID(set.Root) || len(set.Sources) == 0 || len(set.Sources) > maxSourceFiles {
 		return nil, Value{}, diagnostic("E-MODULE", "invalid source set")
 	}
@@ -243,7 +275,11 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 		if size > maxSourceBytes {
 			return nil, Value{}, diagnostic("E-BUDGET", "source byte budget exhausted")
 		}
-		s, err := parse(text)
+		s := supplied
+		var err error
+		if id != set.Root || supplied == nil {
+			s, err = parse(text)
+		}
 		if err != nil {
 			if d, ok := err.(*Diagnostic); ok {
 				d.SourceID = id
@@ -276,6 +312,10 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 		prefix := ""
 		if id != set.Root {
 			prefix = "$m" + strconv.Itoa(i) + "_"
+			if supplied != nil {
+				// Stable names preserve captured module closures as imports grow.
+				prefix = "$m" + sourceHash(id) + "_"
+			}
 		}
 		for name := range s.functions {
 			qualified[id][name] = prefix + name
@@ -314,8 +354,10 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 	if root == nil {
 		return nil, Value{}, diagnostic("E-MODULE", "root source is missing")
 	}
-	if err := root.selectEntry(entry); err != nil {
-		return nil, Value{}, err
+	if supplied == nil {
+		if err := root.selectEntry(entry); err != nil {
+			return nil, Value{}, err
+		}
 	}
 	visited, active := map[string]bool{}, map[string]bool{}
 	var visit func(string) error
@@ -394,24 +436,31 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 				old := im.alias
 				if id != set.Root {
 					im.alias = "$i" + strconv.Itoa(i) + "_" + old
+					if supplied != nil {
+						im.alias = "$i" + sourceHash(id) + "_" + old
+					}
 				}
 				native[old] = im.alias
 				imports = append(imports, im)
 			}
 		}
 		r := moduleRenamer{names: qualified[id], aliases: aliases, native: native, modules: modules, qualified: qualified, dependency: id != set.Root, nativeHelpers: nativeHelpers}
+		bound := map[string]bool{}
+		if id == set.Root {
+			bound = copyBound(saved)
+		}
 		for _, f := range s.functions {
-			r.expr(f, map[string]bool{})
+			r.expr(f, copyBound(bound))
 		}
 		for _, f := range s.flows {
-			bound := map[string]bool{}
+			local := copyBound(bound)
 			for _, param := range f.params {
-				r.bind(bound, param.name, param.tok)
+				r.bind(local, param.name, param.tok)
 			}
-			r.block(f.body, bound)
+			r.block(f.body, local)
 		}
-		if len(s.flows) == 0 && s.body != nil {
-			r.block(s.body, map[string]bool{})
+		if (len(s.flows) == 0 || s.cell) && s.body != nil {
+			r.block(s.body, copyBound(bound))
 		}
 		if r.err != nil {
 			return nil, Value{}, r.err
@@ -427,7 +476,7 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 			data[qualified[id][name]] = d
 		}
 	}
-	if len(root.flows) == 0 && len(flows) > 0 {
+	if !root.cell && len(root.flows) == 0 && len(flows) > 0 {
 		root.flowName = "$entry"
 		flows[root.flowName] = &flowDecl{name: root.flowName, result: root.result, body: root.body}
 	}
@@ -437,6 +486,7 @@ func linkSources(set SourceSet, entry string, nativeHelpers bool) (*syntax, Valu
 
 type moduleRenamer struct {
 	names, native, aliases map[string]string
+	stores                 map[string]bool
 	qualified              map[string]map[string]string
 	modules                map[string]*syntax
 	err                    error
@@ -445,6 +495,9 @@ type moduleRenamer struct {
 }
 
 func (r *moduleRenamer) bind(bound map[string]bool, name string, t token) {
+	if r.stores[name] {
+		r.err = at(diagnostic("E-SHADOW-CLAIM", "Claim name cannot be shadowed"), t)
+	}
 	if r.native[name] != "" || r.aliases[name] != "" {
 		r.err = at(diagnostic("E-RESERVED", "import alias cannot be rebound"), t)
 	}
@@ -503,11 +556,21 @@ func (r *moduleRenamer) expr(e *expression, bound map[string]bool) {
 		return
 	}
 	if e.tag == "proposal" {
+		if e.name == "claim.snapshot" && len(e.args) > 0 {
+			arg := e.args[0].expr
+			if arg.tag == "lit" && arg.value.k == String && !bound[arg.value.s] {
+				if name := r.names[arg.value.s]; name != "" {
+					arg.value = textValue(name)
+				}
+			}
+		}
 		parts := strings.SplitN(e.name, ".", 2)
 		if len(parts) == 2 {
-			if alias := r.native[parts[0]]; alias != "" {
+			if alias := r.native[parts[0]]; alias != "" && !bound[parts[0]] {
 				e.name = alias + "." + parts[1]
-			} else if r.dependency && e.name != "claim.snapshot" {
+			} else if name := r.names[parts[0]]; name != "" && !bound[parts[0]] {
+				e.name = name + "." + parts[1]
+			} else if r.dependency && e.name != "claim.snapshot" && !(r.nativeHelpers && bound[parts[0]]) {
 				r.err = at(diagnostic("E-OPERATION", "operation requires imported alias and member"), e.tok)
 			}
 		}
@@ -589,6 +652,11 @@ func (r *moduleRenamer) block(b *block, bound map[string]bool) {
 }
 func (r *moduleRenamer) stmt(s *statement, bound map[string]bool) {
 	r.expr(s.expr, bound)
+	if s.tag == "join" && !bound[s.name] {
+		if name := r.names[s.name]; name != "" {
+			s.name = name
+		}
+	}
 	local := copyBound(bound)
 	if s.tag == "for" && s.name != "" {
 		r.bind(local, s.name, s.tok)

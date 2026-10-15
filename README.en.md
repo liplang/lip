@@ -1,6 +1,6 @@
 # LIP 1.0
 
-[简体中文](README.md) | [English](README.en.md)
+[English](README.en.md) | [简体中文](README.md)
 
 Current version: **1.0**.
 
@@ -10,7 +10,9 @@ LIP is a small language for composable computation, parallel analysis, and tool 
 
 The focus is a solid computational core. Math, files, networking, databases, and models come through the **Go / Python ecosystems**. Interactive exploration and generated Go share the same value, dependency, identity, and call rules. LIP fits programs that break down tasks, collect evidence, call tools, and produce an explicit conclusion.
 
-[Language specification](spec/LIP-1.0-SPEC.md) · [Example tutorial](examples/README.md) · [Implementation and validation](IMPLEMENTATION.md)
+[Language specification](spec/LIP-1.0-SPEC.en.md) · [Example tutorial](examples/README.en.md) · [Implementation and validation](IMPLEMENTATION.en.md)
+
+Practical checks cover a CRUD website, SQLite queries, pandas ETL, scikit-learn regression/classification, NumPy linear algebra, and SciPy integration/optimization. The [linear model example](examples/advanced/27_linear_model.lip) demonstrates training, prediction, and error measurement with the pure core. Websites use explicit Host contracts for storage and templates; scientific libraries use the Go/Python bridge in scripts and the REPL. See the implementation guide for tested paths and current limits.
 
 ## One program, the whole model
 
@@ -87,6 +89,10 @@ Thus `[5,3,4]` preserves input position; neither numeric order nor completion ti
 
 `-parallel 4` allows at most four active leaf evaluations across the entire run. Parent and child graphs share one scheduler and budget. Containers waiting for children yield their worker slots so the scheduler can execute child nodes. Set the limit to `1`, and the same program still completes with the same result.
 
+`-parallel N` accepts any positive Go `int`; it does not preallocate N workers or N event slots. Zero uses one in ordinary runs; negative values are rejected. The REPL defaults to four and `:run` inherits its selected limit unless overridden. Eligible work starts on demand, subject to shared resource permits, deadlines, and graph/instruction budgets. A larger limit increases possible overlap, not CPU cores or provider capacity; generic native operations retain their conservative Unknown contract.
+
+Completed branch scopes, loop iterations, and child Flows release local graph payloads before the whole run ends. A pipeline transfers its immutable Data result to the caller while child-local scratch data becomes eligible for Go GC. Shared results, closure captures, Claims, journal records, and REPL bindings remain alive while needed. This is scope cleanup, not exact last-use analysis for every binding or constant-memory execution: graph history and journals still grow with work.
+
 ## What makes LIP distinctive
 
 ### Values and work each have a clear expression
@@ -94,6 +100,10 @@ Thus `[5,3,4]` preserves input position; neither numeric order nor completion ti
 A `fn` is a pure function capturing immutable values, suitable for transformations, validation, recursion, and reduction. A `flow` is a reusable graph template for dependencies, branches, loops, and external calls. Bindings connect results. A successful child Flow means its entire selected subgraph has completed, including work beyond the return expression. Receiving the result also establishes that the stage has finished.
 
 Pure functions support proper tail calls, including direct, mutual, and indirect recursion. Flows repeat work with explicit loops. Local expressions and arguments evaluate from left to right; independent graph nodes follow dependencies and operation contracts. Program structure explains both sequence and concurrency.
+
+The runtime defaults to **10,000 simultaneously active non-tail function calls per leaf evaluation**. `lipc run`, `lipc repl`, `lipc serve`, and generated executables accept `-frames N` to change this budget; `0` selects the default and negative values are rejected. The Go API uses `Options.MaxFrames`. Tail calls reuse frames, so this is not a limit on total recursive calls; instruction/time budgets still apply. Exhaustion returns `E-BUDGET` with the source position and limit, without publishing a successful result. The REPL keeps previous successful bindings and accepts the next cell; `:run` inherits the REPL frame budget unless overridden.
+
+Resource failure does not automatically return `null`, `0`, or an empty container: these could violate the return type or falsely report a completed calculation. An application needing a fallback should define its error response at the Host boundary. Larger frame budgets need sufficient memory; the runtime does not infer available RAM or promise recovery from an operating-system out-of-memory kill.
 
 ### Claim gives parallel collection a completion boundary, provenance, and order
 
@@ -111,13 +121,13 @@ Direct Go/Python library calls lower to this protocol too. Interactive convenien
 
 Loop iterations, child Flows, contributions, and calls derive identities from source positions and dynamic paths. These identities connect diagnostics, Claim provenance, and call records without numbering work by arrival or completion. Modules are frozen into one source snapshot at build time; source contents, versions, and dependency resolution determine its build identity.
 
-Under the specification's conditions—fixed inputs and external responses, fair and finite termination, no live snapshot, and no cancellation or budget interference—legal schedules produce the same successful result or primary error. Claim order and structural identities make those results inspectable. See [specification §13](spec/LIP-1.0-SPEC.md#13-确定性与保证边界) for the complete conditions.
+Under the specification's conditions—fixed inputs and external responses, fair and finite termination, no live snapshot, and no cancellation or budget interference—legal schedules produce the same successful result or primary error. Claim order and structural identities make those results inspectable. See [specification §13](spec/LIP-1.0-SPEC.en.md#13-determinism-and-guarantee-boundaries) for the complete conditions.
 
 ### One program, from exploration to a Go executable
 
 The REPL, 18 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
 
-These LIP 1.0 mechanisms are implemented in an executable compiler and runtime. Tests build and run generated programs, comparing outputs, errors, identities, and call boundaries. Composition tests combine modules, closures, loops, child graphs, and pipelines at worker limits 1, 2, and 4. [Implementation and validation](IMPLEMENTATION.md) maps specification sections to concrete tests.
+These LIP 1.0 mechanisms are implemented in an executable compiler and runtime. Tests build and run generated programs, comparing outputs, errors, identities, and call boundaries. Composition tests combine modules, closures, loops, child graphs, and pipelines at worker limits 1, 2, 4, 7, 1238, and 73295. [Implementation and validation](IMPLEMENTATION.en.md) maps specification sections to concrete tests.
 
 ## Getting started
 
@@ -158,7 +168,7 @@ Bindings are immutable; inner scopes can shadow ordinary names. Values include n
 | Structured stages | `x |> Adjust |> Finish` |
 | External request and execution | `request=effect op(args)`, `perform request` |
 
-Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; domain errors and non-finite results raise `E-NUMBER`. See the [tutorial](examples/README.md) for numerical, string, and control-structure examples.
+Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; domain errors and non-finite results raise `E-NUMBER`. See the [tutorial](examples/README.en.md) for numerical, string, and control-structure examples.
 
 ### Entry points and successful results
 
@@ -228,6 +238,16 @@ In [8]: math.sqrt(9)
 
 Direct calls, methods, and attribute reads lower to ordinary `perform effect` before checking. Constructing an `effect` only saves the request. Generic operations are Unknown and follow write restrictions. Explicit registrations take precedence; `parallel` admits only operations declared Concurrent ReadOnly.
 
+Use explicit requests when a native object arrives through a Flow parameter:
+
+```lip
+flow Predict(model:object,rows:list)->list {
+    return native_data(perform effect model.predict(rows))
+}
+```
+
+`effect receiver.method(...)` uses the receiver's lexical binding, including saved REPL values and parameters in imported LIP modules. Nested members such as `effect library.linalg.solve(matrix,rhs)` also work. Constructing the request performs no member lookup or native call; `perform` applies the normal authorization and resource checks. Deleting or rebinding the public name preserves the receiver already captured by a saved request.
+
 The [teaching Host](script/adapters.go) demonstrates parallel reads and sequential writes through explicit contracts:
 
 ```sh
@@ -268,7 +288,7 @@ In [3]: m.At(1,0)
 3
 ```
 
-With an existing `go.mod`, configure dependencies directly. Imports and completion neither execute library initialization nor install dependencies. Go export discovery uses the toolchain; Python loads modules on the first actual operation. Automatic Go adapters require the Go toolchain, CGO, and Go plugin support (Linux, macOS, FreeBSD). Generic Go functions are instantiated from actual argument types; register application-specific types and instances that cannot be inferred explicitly.
+With an existing `go.mod`, configure dependencies directly. Imports and completion neither execute library initialization nor install dependencies. Go export discovery uses the toolchain; Python loads modules on the first actual operation. The automatic Go development bridge used by the REPL and interpreted files requires the Go toolchain, CGO, and Go plugin support (Linux, macOS, FreeBSD). Generated executables statically link automatic package exports and generic instances inferred at build time; their calls need neither the Go toolchain nor plugin loading. When a generic call has argument types that remain unknown at build time, supply concrete instances through trusted Host registration source. Interactive generic calls can infer instances from actual values.
 
 Python uses a persistent worker and a separate protocol channel, retaining modules and objects in the current environment:
 
@@ -298,7 +318,7 @@ Module attributes, submodules, classes, methods, named arguments, and native fun
 
 Go numbers are checked against target integer ranges; string-to-`[]byte` conversion uses UTF-8. Safe integral Python arguments become int; other numbers become float. Take snapshots or encode bytes to cross Go/Python runtimes. Non-finite numbers and cyclic objects cannot become Data. A trailing error among multiple Go results is the failure channel; a sole error result remains a native resource, with nil as null. Native function references can be passed within a runtime; language pure functions need an application adapter to serve as native callbacks. The `native_data` / `native_release` helpers follow lexical name resolution; local declarations take precedence.
 
-The Host owns workers, objects, and permissions. Closing or resetting invalidates existing references. Cancellation or lost communication never automatically repeats an external action. Native libraries have their process or worker's OS permissions; applications supply deployment isolation when needed.
+The Host owns workers, objects, and permissions. Native references record scope, owner, and generation. File-run handles expire at run completion; failed cells release newly created handles, while successful cells retain handles reachable through saved values, closures, proposals, or their result. Saved session handles remain valid until explicit release, reset, or close. An invalid or foreign handle raises `E-RESOURCE`. Closing or resetting invalidates existing references. Embedding Hosts can acquire run leases with `Host.BeginRun` and release them with `RunLease.End`; cleanup follows settlement of started operations on success, failure, cancellation, and budget termination. `Report.CleanupErrors` preserves cleanup faults separately from node errors. Cancellation or lost communication never automatically repeats an external action. Native libraries have their process or worker's OS permissions; applications supply deployment isolation when needed.
 
 ## Interactive computation and learning
 
@@ -310,7 +330,9 @@ The Host owns workers, objects, and permissions. Closing or resetting invalidate
 ./lipc learn -lesson modules
 ```
 
-The REPL retains values, pure functions, and closures from successful cells. Historical actions run once. Failed cells commit no new bindings; external actions already performed remain. Each cell is an independent run. Named functions can serve as pipeline stages across cells:
+Normal CLI prompts, interactive help, lessons, and example comments use English. Documentation is maintained in linked Chinese and English editions.
+
+The REPL retains values, fn/Flow declarations, and closures from successful cells. Historical actions run once. Failed cells commit no new bindings; external actions already performed remain. Each cell is an independent run. Named functions can serve as pipeline stages across cells:
 
 ```text
 In [1]: x = 6
@@ -320,7 +342,28 @@ In [3]: x |> twice
 12
 ```
 
-Complete Flows, static Data declarations, and LIP modules use the file path through `:run`:
+Flow declarations, static Data, exports, LIP imports, Claims, and the script statement syntax also work in the REPL. Declaring a Flow checks and saves it; invoke it explicitly with arguments:
+
+```text
+In [4]: import python "math" as math
+In [5]: flow sqr(x:number)->number { return perform effect math.sqrt(x) }
+In [6]: 12 |> sqr
+3.4641016151377544
+In [7]: sqr(12)
+3.4641016151377544
+```
+
+`:del name` or `:del var1,var2` removes names from the session namespace, whatever they refer to. The names disappear from lookup, `:vars`, and completion and can be rebound to any allowed value or declaration. The whole deletion is validated first: malformed or missing names leave all bindings unchanged. Existing closures and Flows retain their original captured values, callees, and import meanings when a name is reused. Unreachable saved values/Flows are released; still-referenced data remains alive. Deletion does not repeat actions, unload cached modules, close native resources, or erase history. Use the resource's explicit close/release operation for its lifecycle, or `:reset` to clear the whole session.
+
+```text
+:del x,twice
+x = "a reused name"
+fn twice(n:number)->number { n+n }
+```
+
+For a whole script, forward references between declarations, or a top-level Claim with its producers and reads, enter `:begin`, paste the source, then enter `:end`. Bracketed terminal paste also submits several lines as one cell. An `if` statement without `else` waits for a possible `else` on the following line; a blank line or another statement submits it. Statement forms support void Flow calls; value forms display their result. Active Claims belong to one cell or Flow invocation; the session retains only their completed Data snapshots, so put joins and reads in the same cell or Flow.
+
+`import lip "./lib/pricing.lip" as pricing` resolves within `lipc repl -project DIR` (default: the current directory). Imports freeze the complete source closure before execution and keep it until `:reset`; existing closures keep their defining environment. Completion does not run imported code. To run an independent file with explicit entry/input options, use `:run`:
 
 ```text
 :run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
@@ -353,6 +396,21 @@ The 18 lessons cover values and arithmetic, functions, entries, child Flows/pipe
 ./lipc learn -progress /path/to/progress.json
 ```
 
+### Why does fmt.Print show a number?
+
+Go's `fmt.Print`, `fmt.Printf`, and `fmt.Println` return `(bytesWritten, error)`. The Go adapter turns a non-nil trailing error into a LIP error and returns the remaining count. The REPL displays the final expression or binding value, so it displays that count as well:
+
+```text
+In [1]: import go "fmt"
+In [2]: fmt.Print("hello")
+hello5
+In [3]: fmt.Println("hello")
+hello
+6
+```
+
+`Print` adds no newline, so its text and the REPL's result appear together. `Println` writes a newline and includes it in its count. This is a UTF-8 **byte count**: two three-byte characters return 6, even though `len` of that string is 2. Binding the result also displays it; a trailing semicolon is padding and does not suppress it. To use printing only for its side effect within a cell, write `for unused in [0] { fmt.Print("hello") }`; the loop has no displayed result, and the call still runs once. Ordinary calls continue to return the byte count for programs that use it.
+
 ## Generating Go programs
 
 ```sh
@@ -366,7 +424,7 @@ go build -o .build/hello .build/hello.go
 # "Hello, LIP!"
 ```
 
-Generated programs fix the entry and source snapshot and accept `-input`, `-entry-input`, `-entry-output`, `-parallel`, `-steps`, and `-elements`. They verify Host contracts at startup. Pure core programs and the Go portion of the teaching Host use only the standard library. Python operations require their runtime environment; automatic Go adapters still require the toolchain, CGO, and plugins.
+Generated programs fix the entry and source snapshot and accept `-input`, `-entry-input`, `-entry-output`, `-parallel`, `-frames`, `-steps`, and `-elements`. They verify Host contracts at startup. Pure core programs and the Go portion of the teaching Host use only the standard library. Python operations require their runtime environment; Go packages are linked at build time, so deployed calls need no toolchain or plugin support.
 
 Use the Makefile for project-local caches:
 
@@ -402,9 +460,9 @@ Configure multiple routes with `./lipc serve -routes routes.json`. Source paths 
 
 Routes use explicit-method ServeMux patterns; compilation and conflict checks happen before listening. HEAD matches only explicit HEAD routes, and a 405 Allow header lists only configured methods. For `/{x}` matching `/a%2Fb`, path is `/a/b`, raw_path is `/a%2Fb`, and params.x is `a/b`. Runs, Claims, records, budgets, and cancellation are isolated per request; responses commit after validation succeeds.
 
-Defaults are 30 seconds, 1 MiB each for request/response bodies, 8 MiB each for canonical Data, and 64 concurrent requests across routes. CLI options are `-timeout`, `-concurrent`, `-body-bytes`, `-response-bytes`, `-parallel`, `-steps`, and `-elements`; zero selects defaults. Embedded configuration also provides `HTTPOptions.MaxDataBytes`.
+Defaults are 30 seconds, 1 MiB each for request/response bodies, 8 MiB each for canonical Data, and 64 concurrent requests across routes. CLI options are `-timeout`, `-concurrent`, `-body-bytes`, `-response-bytes`, `-parallel`, `-frames`, `-steps`, and `-elements`; zero selects defaults. Embedded configuration also provides `HTTPOptions.MaxDataBytes`.
 
-`serve` uses pure core or explicit teaching contracts with `-host demo`. Embed through `NewHTTPHandler` / `NewHTTPMux` and application authentication middleware. Authorization and operations receive the same context; applications own Hosts and connection pools. `HTTPOptions.OnError` receives server diagnostics while public errors use fixed categories. HTTP uses explicit Host operations; the generic native bridge currently serves files, sessions, and generated programs. See [specification §12.1](spec/LIP-1.0-SPEC.md#121-可选-http-host-接入).
+`serve` uses pure core or explicit teaching contracts with `-host demo`. Embed through `NewHTTPHandler` / `NewHTTPMux` and application authentication middleware. Authorization and operations receive the same context; applications own Hosts and connection pools. `HTTPOptions.OnError` receives server diagnostics while public errors use fixed categories. HTTP uses explicit Host operations; the generic native bridge currently serves files, sessions, and generated programs. See [specification §12.1](spec/LIP-1.0-SPEC.en.md#121-optional-http-host-integration).
 
 ## Embedding and build identity
 
@@ -438,6 +496,8 @@ Explicit contracts use `Host.Contracts`, with `GoHandler` / `PythonHandler` adap
 
 ## Development and validation
 
+Maintain paired Chinese/English documentation and use English for code, comments, and user-facing messages. See the [development guide](DEVELOPMENT.en.md).
+
 ```sh
 make test       # Core, lessons, examples, interaction, actual generated Go programs.
 make race       # Race detection on both execution paths.
@@ -446,7 +506,7 @@ make examples   # Inspect example validation results.
 make clean      # Remove artifacts and project-local caches.
 ```
 
-Numerical and encoding checks use fixed specification vectors. Scheduling tests check overlap, prerequisites, Claim completion, and primary errors; Host tests check admission, resources, and replay. Tests verify error locations and zero additional calls as well as successful output. Environment-dependent tests state prerequisites and skips explicitly. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for coverage and validation results.
+Numerical and encoding checks use fixed specification vectors. Scheduling tests check overlap, prerequisites, Claim completion, and primary errors; Host tests check admission, resources, and replay. Tests verify error locations and zero additional calls as well as successful output. Environment-dependent tests state prerequisites and skips explicitly. See [IMPLEMENTATION.md](IMPLEMENTATION.en.md) for coverage and validation results.
 
 ```text
 cmd/lipc/  CLI, REPL, bundled lessons, HTTP

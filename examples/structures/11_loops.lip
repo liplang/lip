@@ -1,6 +1,6 @@
-# 普通 for 用于逐项执行语句，不把绑定传给下一轮。
-# continue 跳过当前轮后续语句；break 结束这个普通循环。
-# Claim 只能在 Flow 顶层声明，<+ 追加事实，不覆盖已有记录。
+# An ordinary for executes statements per item; bindings do not carry between iterations.
+# continue skips the rest of an iteration; break ends the nearest ordinary loop.
+# Declare Claims only at Flow top level; <+ appends facts without overwriting records.
 flow Loops() -> list {
     facts = claim()
     for x in [1, 2, 3, 4, 5] {
@@ -8,7 +8,7 @@ flow Loops() -> list {
         if x == 4 { break }
         facts <+ x
     }
-    # 直接读取 facts 等待所有被选中的 writer 结束，得到完整快照。
-    # 每项包含 value 以及 run_id / position / id；这里仅投影业务值。
+    # Reading facts waits for all selected writers and returns a complete snapshot.
+    # Records contain value, run_id, position, and id; here we project only business values.
     return [row.value for row in facts]
 }

@@ -369,6 +369,25 @@ type Host struct {
 	Authorize    func(context.Context, Request) error
 	Resources    *ResourcePool
 	Capabilities map[string]bool
+	// BeginRun acquires application-defined run leases after input validation.
+	// End runs once after all started operations settle, including on failure or
+	// cancellation. It must release technical ownership, not compensate writes.
+	BeginRun func(context.Context, RunInfo) (RunLease, error)
+}
+
+type RunInfo struct {
+	RunID   string
+	Session bool
+}
+type RunLease struct {
+	// A nil Context preserves the caller's context.
+	Context context.Context
+	End     func(context.Context, RunEnd) error
+}
+type RunEnd struct {
+	RunInfo
+	Error   error
+	Journal *MemoryJournal
 }
 
 func cloneSchema(s Schema) Schema {

@@ -1,6 +1,6 @@
-# 运行：lipc run -host demo 本文件
-# 每一轮读取上一轮的记录值，提出下一次请求；EvalPath 区分每轮 CallID。
-# 这里用 Python 标准库模拟逐步提高分数，不要求接入真实模型服务。
+# Run: lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
+# Each iteration uses the previous recorded result for its next request; EvalPath distinguishes CallIDs.
+# The Python standard library simulates improving scores; no model service is required.
 import python "statistics" as stats
 flow RecordedIteration() -> object {
     answer = for with s = {score: 0, rounds: 0} {

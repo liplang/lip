@@ -23,15 +23,31 @@ const (
 	Cancelled
 )
 
+// DefaultMaxFrames bounds simultaneously active non-tail function calls per
+// leaf evaluation. Proper tail calls reuse a frame and do not consume more.
+const DefaultMaxFrames = 10000
+
+// Event storage is independent of the configured admission limit. A bounded
+// mailbox provides backpressure; only actual work creates goroutines.
+const schedulerEventBuffer = 64
+
+// Amortize graph bookkeeping across a bounded batch, independently of mailbox
+// capacity and user parallelism. A smaller mailbox still bounds queued values.
+const schedulerEventBatch = 1024
+
 type Options struct {
-	RunID       string
+	RunID string
+	// Parallelism limits active leaf evaluations. Zero uses one; negative values
+	// are configuration errors. Any positive int is accepted without preallocation.
 	Parallelism int
 	MaxSteps    int64
 	MaxElements int64
 	MaxNodes    int
-	MaxFrames   int
-	Journal     *MemoryJournal
-	After       []After
+	// MaxFrames selects the non-tail call budget. Zero uses DefaultMaxFrames;
+	// positive values override it. Negative values are configuration errors.
+	MaxFrames int
+	Journal   *MemoryJournal
+	After     []After
 }
 
 // After adds a completion dependency between nodes, regions, or static sites.
@@ -58,6 +74,8 @@ type Report struct {
 	Journal     *MemoryJournal
 	Nodes       []NodeRecord
 	Steps       int64
+	// CleanupErrors preserve Host cleanup faults separately from node errors.
+	CleanupErrors []*Diagnostic
 }
 type NodeRecord struct {
 	Position   Position
@@ -90,7 +108,7 @@ func compileSyntax(s *syntax, host Host, build Value) (*Program, error) {
 	}
 	host.Capabilities = capabilities
 	var err error
-	host, err = lowerNative(context.Background(), s, host, nil)
+	host, err = lowerNative(context.Background(), s, host, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -183,18 +201,24 @@ func (p *Program) run(ctx context.Context, inputs map[string]Value, opts Options
 	return p.runBound(ctx, bound, opts, saved)
 }
 
-func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Options, saved map[string]Value) (Report, error) {
+func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Options, saved map[string]Value) (report Report, err error) {
 	if ctx == nil {
 		return Report{}, diagnostic("E-VALUE", "nil context")
 	}
 	if err := ctx.Err(); err != nil {
 		return Report{}, err
 	}
-	if opts.Parallelism <= 0 {
+	if opts.MaxFrames < 0 {
+		return Report{}, diagnostic("E-VALUE", "non-tail call frame budget must be nonnegative")
+	}
+	if opts.Parallelism < 0 {
+		return Report{}, diagnostic("E-VALUE", "parallelism must be nonnegative")
+	}
+	if opts.Parallelism == 0 {
 		opts.Parallelism = 1
 	}
 	if opts.MaxFrames == 0 {
-		opts.MaxFrames = 10000
+		opts.MaxFrames = DefaultMaxFrames
 	}
 	if opts.RunID == "" {
 		var id [16]byte
@@ -206,7 +230,58 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 	if opts.Journal == nil {
 		opts.Journal = NewMemoryJournal()
 	}
-	r := &runState{program: p, ctx: ctx, opts: opts, journal: opts.Journal, stores: map[string]*claimStore{}, events: make(chan nodeEvent, opts.Parallelism), keep: map[*node]bool{}, required: map[*region]bool{}}
+	info := RunInfo{RunID: opts.RunID, Session: saved != nil}
+	var native nativeRun
+	if p.host.Native != nil {
+		native, err = newNativeRun(ctx, opts.RunID, saved != nil)
+		if err != nil {
+			return Report{}, err
+		}
+	}
+	lease := RunLease{}
+	if p.host.BeginRun != nil {
+		lease, err = p.host.BeginRun(ctx, info)
+		if err != nil {
+			return Report{}, diagnosticPhase(err, "host")
+		}
+		if lease.Context != nil {
+			// Preserve caller cancellation even when a Host provides a separate
+			// context for lease metadata. A lease cannot outlive its root run.
+			leased, cancel := context.WithCancel(lease.Context)
+			stop := context.AfterFunc(ctx, cancel)
+			defer func() { stop(); cancel() }()
+			ctx = leased
+		}
+	}
+	if p.host.Native != nil {
+		ctx = context.WithValue(ctx, nativeRunKey{}, native)
+	}
+	defer func() {
+		if lease.End != nil {
+			if cleanup := lease.End(context.WithoutCancel(ctx), RunEnd{RunInfo: info, Error: err, Journal: opts.Journal}); cleanup != nil {
+				d := at(cleanup, token{site: -1})
+				d.Phase = "host"
+				report.CleanupErrors = append(report.CleanupErrors, d)
+			}
+		}
+		if p.host.Native != nil {
+			keep := []Value{}
+			if saved != nil && err == nil && len(report.CleanupErrors) == 0 {
+				keep = append(keep, report.Output)
+				for _, value := range saved {
+					keep = append(keep, value)
+				}
+			}
+			if cleanup := p.host.Native.endRun(native, keep); cleanup != nil {
+				report.CleanupErrors = append(report.CleanupErrors, at(cleanup, token{site: -1}))
+			}
+		}
+		if len(report.CleanupErrors) > 0 && err == nil {
+			err = report.CleanupErrors[0]
+			report.Output, report.EntryOutput = Value{}, nil
+		}
+	}()
+	r := &runState{program: p, ctx: ctx, opts: opts, journal: opts.Journal, stores: map[string]*claimStore{}, events: make(chan nodeEvent, schedulerEventBuffer), keep: map[*node]bool{}, required: map[*region]bool{}}
 	env := newEnvironment(nil)
 	for name := range builtinArity {
 		env.values[name] = Value{k: Function, f: &function{builtin: name}}
@@ -218,7 +293,22 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 		env.values[name] = declaration.value
 	}
 	for name, e := range p.syntax.functions {
-		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env}}
+		if _, retained := saved[name]; p.syntax.cell && retained {
+			continue
+		}
+		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env, nativeResult: e.nativeResult}}
+	}
+	// Install every function before freezing captures so mutual recursion keeps
+	// the original function identities without retaining unrelated globals.
+	for name, e := range p.syntax.functions {
+		if _, retained := saved[name]; p.syntax.cell && retained {
+			continue
+		}
+		captures, err := env.frozen(freeNames(e))
+		if err != nil {
+			return Report{}, at(err, e.tok)
+		}
+		env.values[name].f.captures = captures
 	}
 	entryEnv := newEnvironment(env)
 	for name, value := range inputs {
@@ -262,7 +352,7 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 		}
 		return Report{}, diagnostic("E-GRAPH-CYCLE", "combined dependency cycle")
 	}
-	report := r.schedule()
+	report = r.schedule()
 	if report.Error != nil {
 		return report, report.Error
 	}
@@ -270,15 +360,22 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 		return report, ctx.Err()
 	}
 	if saved != nil {
+		for name := range p.syntax.data {
+			saved[name] = env.values[name]
+		}
 		for name := range p.syntax.functions {
 			saved[name] = env.values[name]
+		}
+		// A cell's live stores end with its run. Retain only completed Data.
+		for name, store := range r.stores {
+			saved[name] = store.snapshot()
 		}
 		for _, work := range r.root.children {
 			if n := work.node; n != nil && n.status == Completed {
 				if n.stmt.tag == "bind" {
 					saved[n.stmt.name] = n.value
 				}
-				if n.stmt.tag == "bind" || n.stmt.tag == "eval" {
+				if (n.stmt.tag == "bind" || n.stmt.tag == "eval") && p.syntax.result == "void" {
 					report.Output = n.value
 				}
 			}
@@ -381,6 +478,8 @@ type region struct {
 	loop                 *region
 	next                 *big.Int
 	source               Value
+	sourceLen            int
+	released             bool
 	expanded, stopped    bool
 	active               int
 	hasCalls, hasBarrier bool
@@ -410,29 +509,33 @@ type nodeEvent struct {
 	flow        *flowRequest
 }
 type runState struct {
-	permits      int
-	program      *Program
-	env          *environment
-	entry        *flowInstance
-	ctx          context.Context
-	opts         Options
-	journal      *MemoryJournal
-	root         *region
-	nodes        []*node
-	regions      []*region
-	stores       map[string]*claimStore
-	events       chan nodeEvent
-	steps        atomic.Int64
-	calls        atomic.Int64
-	main         *Diagnostic
-	keep         map[*node]bool
-	required     map[*region]bool
-	running      int
-	buildErr     error
-	readySeq     uint64
-	templates    map[int]*nodeTemplate
-	afterRules   []afterRule
-	afterTargets []*afterTarget
+	permits        int
+	program        *Program
+	env            *environment
+	entry          *flowInstance
+	ctx            context.Context
+	opts           Options
+	journal        *MemoryJournal
+	root           *region
+	nodes          []*node
+	regions        []*region
+	effectNodes    []*node
+	barrierNodes   []*node
+	callRegions    []*region
+	barrierRegions []*region
+	stores         map[string]*claimStore
+	events         chan nodeEvent
+	steps          atomic.Int64
+	calls          atomic.Int64
+	main           *Diagnostic
+	keep           map[*node]bool
+	required       map[*region]bool
+	running        int
+	buildErr       error
+	readySeq       uint64
+	templates      map[int]*nodeTemplate
+	afterRules     []afterRule
+	afterTargets   []*afterTarget
 }
 
 var errorCut = errors.New("internal error cut")
@@ -541,6 +644,17 @@ func hasControl(s *statement) bool {
 func (r *runState) buildBlock(b *block, env *environment, prefix Position, parent, loop *region) {
 	controls := []dependency{}
 	for _, s := range b.items {
+		if r.buildErr != nil {
+			return
+		}
+		needed := 1
+		if s.tag == "for" || s.tag == "if" || s.tag == "match" {
+			needed++
+		}
+		if r.opts.MaxNodes > 0 && needed > r.opts.MaxNodes-len(r.nodes)-len(r.regions) {
+			r.buildErr = at(diagnostic("E-BUDGET", "graph node budget exhausted"), s.tok)
+			return
+		}
 		pos := append(prefix.Copy(), Pair{s.tok.site, "0"})
 		n := &node{instance: parent.instance, pos: pos, stmt: s, env: env, parent: parent, status: Pending, concurrent: true}
 		if s.expr != nil {
@@ -559,16 +673,22 @@ func (r *runState) buildBlock(b *block, env *environment, prefix Position, paren
 			n.deps = append(n.deps, dependency{node: parent.instance.stores[s.name].declaration})
 		}
 		r.nodes = append(r.nodes, n)
-		if r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) > r.opts.MaxNodes {
-			r.buildErr = at(diagnostic("E-BUDGET", "graph node budget exhausted"), s.tok)
+		if n.effect != PureEffect {
+			r.effectNodes = append(r.effectNodes, n)
+			if n.effect != ReadOnlyEffect || !n.concurrent {
+				r.barrierNodes = append(r.barrierNodes, n)
+			}
 		}
 		work := dependency{node: n}
 		if s.tag == "for" || s.tag == "if" || s.tag == "match" {
 			calls, barrier, writers := staticSummary(s)
 			g := &region{kind: s.tag, stmt: s, entry: n, instance: parent.instance, parent: parent, status: Running, env: env, prefix: prefix.Copy(), loop: loop, next: new(big.Int), hasCalls: calls, hasBarrier: barrier, writers: writers}
 			r.regions = append(r.regions, g)
-			if r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) > r.opts.MaxNodes {
-				r.buildErr = at(diagnostic("E-BUDGET", "graph instance budget exhausted"), s.tok)
+			if g.hasCalls {
+				r.callRegions = append(r.callRegions, g)
+				if g.hasBarrier {
+					r.barrierRegions = append(r.barrierRegions, g)
+				}
 			}
 			work = dependency{region: g}
 		}
@@ -724,6 +844,13 @@ func freeNames(e *expression) map[string]bool {
 			}
 			return
 		}
+		if x.tag == "pipe" {
+			expr(x.x)
+			bound["$pipe"]++
+			expr(x.y)
+			bound["$pipe"]--
+			return
+		}
 		if x.tag == "carry" {
 			expr(x.x)
 			expr(x.y)
@@ -814,28 +941,31 @@ func freeNames(e *expression) map[string]bool {
 	return names
 }
 func (r *runState) effectiveDeps(n *node) []dependency {
-	deps := append([]dependency(nil), n.deps...)
 	if n.effect == PureEffect {
-		return deps
+		return n.deps
 	}
 	barrier := n.effect != ReadOnlyEffect || !n.concurrent
-	for _, other := range r.nodes {
-		if other == n || nodeAncestor(other, n) || other.effect == PureEffect || comparePosition(other.pos, n.pos) >= 0 {
+	nodes, regions := r.barrierNodes, r.barrierRegions
+	if barrier {
+		nodes, regions = r.effectNodes, r.callRegions
+	}
+	var order []dependency
+	for _, other := range nodes {
+		if other == n || nodeAncestor(other, n) || comparePosition(other.pos, n.pos) >= 0 {
 			continue
 		}
-		if barrier || other.effect != ReadOnlyEffect || !other.concurrent {
-			deps = append(deps, dependency{node: other, kind: "order"})
-		}
+		order = append(order, dependency{node: other, kind: "order"})
 	}
-	for _, g := range r.regions {
-		if g.entry == nil || !g.hasCalls || isAncestor(g, n.parent) || comparePosition(g.entry.pos, n.pos) >= 0 {
+	for _, g := range regions {
+		if isAncestor(g, n.parent) || comparePosition(g.entry.pos, n.pos) >= 0 {
 			continue
 		}
-		if barrier || g.hasBarrier {
-			deps = append(deps, dependency{region: g, kind: "order"})
-		}
+		order = append(order, dependency{region: g, kind: "order"})
 	}
-	return deps
+	if len(order) == 0 {
+		return n.deps
+	}
+	return append(append([]dependency(nil), n.deps...), order...)
 }
 func isAncestor(a, b *region) bool {
 	for b != nil {
@@ -905,11 +1035,11 @@ func (r *runState) hasCycle() bool {
 }
 func terminal(s Status) bool { return s >= Completed }
 func (r *runState) recomputeKeep() {
-	r.keep = map[*node]bool{}
-	r.required = map[*region]bool{}
 	if r.main == nil {
 		return
 	}
+	r.keep = map[*node]bool{}
+	r.required = map[*region]bool{}
 	var nodeKeep func(*node)
 	var workKeep func(dependency)
 	workKeep = func(d dependency) {
@@ -952,6 +1082,7 @@ func (r *runState) recomputeKeep() {
 }
 func (r *runState) allowed(n *node) bool { return r.main == nil || r.keep[n] }
 func (r *runState) schedule() Report {
+	var candidates []*node
 	for {
 		r.recomputeKeep()
 		progress := r.updateRegions()
@@ -964,6 +1095,7 @@ func (r *runState) schedule() Report {
 			r.main = d
 		}
 		r.recomputeKeep()
+		candidates = candidates[:0]
 		for _, n := range r.nodes {
 			if n.status == Running {
 				n.cut.Store(!r.allowed(n))
@@ -971,10 +1103,13 @@ func (r *runState) schedule() Report {
 					n.permitCancel()
 				}
 			}
+			if n.status == Pending || n.status == Running && n.parked {
+				candidates = append(candidates, n)
+			}
 		}
-		sort.SliceStable(r.nodes, func(i, j int) bool { return comparePosition(r.nodes[i].pos, r.nodes[j].pos) < 0 })
+		sort.SliceStable(candidates, func(i, j int) bool { return comparePosition(candidates[i].pos, candidates[j].pos) < 0 })
 		if r.opts.Parallelism > 1 {
-			for _, n := range r.nodes {
+			for _, n := range candidates {
 				if n.status != Pending || !r.allowed(n) || n.ticket != 0 {
 					continue
 				}
@@ -990,8 +1125,8 @@ func (r *runState) schedule() Report {
 					n.ticket = r.readySeq
 				}
 			}
-			sort.SliceStable(r.nodes, func(i, j int) bool {
-				a, b := r.nodes[i].ticket, r.nodes[j].ticket
+			sort.SliceStable(candidates, func(i, j int) bool {
+				a, b := candidates[i].ticket, candidates[j].ticket
 				if a == 0 {
 					return false
 				}
@@ -1001,12 +1136,15 @@ func (r *runState) schedule() Report {
 				return a < b
 			})
 		}
-		for _, n := range r.nodes {
+		for _, n := range candidates {
 			if n.status == Running && n.parked && n.waiting != nil && (terminal(n.waiting.status) || n.permitCancel == nil && (!r.allowed(n) || r.ctx.Err() != nil)) && r.running < r.opts.Parallelism {
 				result := flowResult{value: n.waiting.instance.output}
 				if n.waiting.kind == "permit" {
 					result = n.wake
 					n.wake = flowResult{}
+				} else if terminal(n.waiting.status) {
+					r.releaseRegion(n.waiting)
+					n.waiting.instance.output = Value{}
 				}
 				if r.ctx.Err() != nil {
 					result.err = r.ctx.Err()
@@ -1118,90 +1256,16 @@ func (r *runState) schedule() Report {
 			}(n)
 		}
 		if r.running > 0 || r.permits > 0 {
-			event := <-r.events
-			if event.permitReady {
-				r.permits--
-				n := event.node
-				n.wake = flowResult{release: event.release, err: event.err}
-				n.waiting.status = Completed
-				continue
-			}
-			r.running--
-			n := event.node
-			if event.permit != nil {
-				request := event.permit
-				n.waiting = &region{kind: "permit", status: Running, instance: n.instance, expanded: true}
-				n.resume = request.resume
-				n.parked = true
-				ctx, cancel := context.WithCancel(r.ctx)
-				n.permitCancel = cancel
-				r.permits++
-				go func() {
-					release, err := r.program.host.Resources.acquire(ctx, request.need)
-					r.events <- nodeEvent{node: n, permitReady: true, release: release, err: err}
-				}()
-				continue
-			}
-			if event.flow != nil {
-				request := event.flow
-				budgetError := r.step()
-				if budgetError == nil && r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) >= r.opts.MaxNodes {
-					budgetError = diagnostic("E-BUDGET", "Flow instance budget exhausted")
-				}
-				if budgetError != nil {
-					r.running++
-					request.resume <- flowResult{err: budgetError}
-					continue
-				}
-				if n.called == nil {
-					n.called = map[int]bool{}
-				}
-				n.called[request.prefix[len(request.prefix)-1].Site] = true
-				instance := &flowInstance{result: request.definition.result, name: request.definition.name, prefix: request.prefix, stores: map[string]*claimStore{}}
-				env := newEnvironment(r.env)
-				for name, value := range request.inputs {
-					env.values[name] = value
-				}
-				env.stores = instance.stores
-				for _, stmt := range request.definition.body.items {
-					if stmt.tag == "claim" {
-						instance.stores[stmt.name] = newClaimStore(r.opts.RunID)
-					}
-				}
-				g := &region{kind: "flow", owner: n, instance: instance, parent: n.parent, prefix: request.prefix, status: Running, expanded: true}
-				r.attachRegionAfter(g)
-				r.regions = append(r.regions, g)
-				n.waiting, n.resume, n.parked = g, request.resume, true
-				r.buildBlock(request.definition.body, env, request.prefix, g, nil)
-				if len(r.opts.After) > 0 && r.hasCycle() {
-					r.buildErr = at(diagnostic("E-GRAPH-CYCLE", "cycle after Flow expansion"), n.stmt.tok)
-				}
-				continue
-			}
-			n.value = event.value
-			n.control = event.control
-			if event.err != nil {
-				if event.err == errorCut {
-					n.status, n.cause = Skipped, "error_cut"
-				} else if r.ctx.Err() != nil {
-					n.status, n.cause = Cancelled, "cancelled"
-				} else if d, ok := event.err.(*Diagnostic); ok && len(d.Position) > 0 {
-					n.status, n.cause, n.causeErr = Skipped, "dependency_failure", d
-				} else {
-					n.status = Error
-					n.err = at(event.err, n.stmt.tok)
-					n.err.Position = n.pos.Copy()
-					if r.main == nil || compareErrors(n.err, r.main) < 0 {
-						r.main = n.err
-					}
-				}
-			} else {
-				n.status = Completed
-				if n.stmt.tag == "return" {
-					n.instance.output = n.value
-				}
-				if event.control != "" {
-					r.closeIteration(n, event.control)
+			r.acceptEvent(<-r.events)
+			// Coalesce available completions before reconsidering the graph.
+			// Limit each batch so ready work and cancellation are not starved.
+		drainEvents:
+			for count := 1; count < schedulerEventBatch; count++ {
+				select {
+				case event := <-r.events:
+					r.acceptEvent(event)
+				default:
+					break drainEvents
 				}
 			}
 			continue
@@ -1214,17 +1278,115 @@ func (r *runState) schedule() Report {
 			break
 		}
 	}
-	report := Report{Error: r.main, Journal: r.journal, Steps: r.steps.Load()}
+	sort.SliceStable(r.nodes, func(i, j int) bool { return comparePosition(r.nodes[i].pos, r.nodes[j].pos) < 0 })
+	if r.main != nil {
+		r.main.Phase = "runtime"
+	}
+	report := Report{Error: r.main, Journal: r.journal, Steps: r.steps.Load(), Output: r.entry.output}
 	for _, n := range r.nodes {
-		report.Nodes = append(report.Nodes, NodeRecord{Position: n.pos.Copy(), Status: n.status, Cause: n.cause, Error: cloneDiagnostic(n.err), CauseError: cloneDiagnostic(n.causeErr)})
-		if n.stmt.tag == "return" && n.status == Completed && n.instance == r.entry {
-			report.Output = n.value
+		if n.err != nil {
+			n.err.Phase = "runtime"
 		}
+		report.Nodes = append(report.Nodes, NodeRecord{Position: n.pos.Copy(), Status: n.status, Cause: n.cause, Error: cloneDiagnostic(n.err), CauseError: cloneDiagnostic(n.causeErr)})
 	}
 	if report.Error != nil || r.ctx.Err() != nil {
 		report.Output = Value{}
 	}
 	return report
+}
+func (r *runState) acceptEvent(event nodeEvent) {
+	if event.permitReady {
+		r.permits--
+		n := event.node
+		n.wake = flowResult{release: event.release, err: event.err}
+		n.waiting.status = Completed
+		return
+	}
+	r.running--
+	n := event.node
+	if event.permit != nil {
+		request := event.permit
+		n.waiting = &region{kind: "permit", status: Running, instance: n.instance, expanded: true}
+		n.resume = request.resume
+		n.parked = true
+		ctx, cancel := context.WithCancel(r.ctx)
+		n.permitCancel = cancel
+		r.permits++
+		go func() {
+			release, err := r.program.host.Resources.acquire(ctx, request.need)
+			r.events <- nodeEvent{node: n, permitReady: true, release: release, err: err}
+		}()
+		return
+	}
+	if event.flow != nil {
+		request := event.flow
+		budgetError := r.ctx.Err()
+		if budgetError == nil {
+			budgetError = r.step()
+		}
+		if budgetError == nil && r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) >= r.opts.MaxNodes {
+			budgetError = diagnostic("E-BUDGET", "Flow instance budget exhausted")
+		}
+		if budgetError != nil {
+			r.running++
+			request.resume <- flowResult{err: budgetError}
+			return
+		}
+		if n.called == nil {
+			n.called = map[int]bool{}
+		}
+		n.called[request.prefix[len(request.prefix)-1].Site] = true
+		instance := &flowInstance{result: request.definition.result, name: request.definition.name, prefix: request.prefix, stores: map[string]*claimStore{}}
+		env := newEnvironment(r.env)
+		for name, value := range request.inputs {
+			env.values[name] = value
+		}
+		env.stores = instance.stores
+		for _, stmt := range request.definition.body.items {
+			if stmt.tag == "claim" {
+				instance.stores[stmt.name] = newClaimStore(r.opts.RunID)
+			}
+		}
+		g := &region{kind: "flow", owner: n, instance: instance, parent: n.parent, prefix: request.prefix, status: Running, expanded: true}
+		r.attachRegionAfter(g)
+		r.regions = append(r.regions, g)
+		n.waiting, n.resume, n.parked = g, request.resume, true
+		r.buildBlock(request.definition.body, env, request.prefix, g, nil)
+		if len(r.opts.After) > 0 && r.hasCycle() {
+			r.buildErr = at(diagnostic("E-GRAPH-CYCLE", "cycle after Flow expansion"), n.stmt.tok)
+		}
+		return
+	}
+	n.value = event.value
+	// The completion event transfers ownership back from the evaluator.
+	// Closures have independent frozen captures; no evaluator needs this frame.
+	n.env = nil
+	n.control = event.control
+	if event.err != nil {
+		if event.err == errorCut {
+			n.status, n.cause = Skipped, "error_cut"
+		} else if r.ctx.Err() != nil {
+			n.status, n.cause = Cancelled, "cancelled"
+		} else if d, ok := event.err.(*Diagnostic); ok && len(d.Position) > 0 {
+			n.status, n.cause, n.causeErr = Skipped, "dependency_failure", d
+		} else {
+			n.status = Error
+			n.err = at(event.err, n.stmt.tok)
+			n.err.Phase = "runtime"
+			n.err.Position = n.pos.Copy()
+			if r.main == nil || compareErrors(n.err, r.main) < 0 {
+				r.main = n.err
+			}
+		}
+	} else {
+		n.status = Completed
+		if n.stmt.tag == "return" {
+			n.instance.output = n.value
+		}
+		if event.control != "" {
+			r.closeIteration(n, event.control)
+		}
+	}
 }
 func (r *runState) closeIteration(n *node, control string) {
 	g := n.parent
@@ -1250,8 +1412,9 @@ func (r *runState) closeIteration(n *node, control string) {
 }
 func (r *runState) updateRegions() bool {
 	progress := false
-	for _, g := range append([]*region(nil), r.regions...) {
+	for _, g := range r.regions {
 		if terminal(g.status) {
+			r.releaseRegion(g)
 			continue
 		}
 		if !g.expanded {
@@ -1294,6 +1457,7 @@ func (r *runState) updateRegions() bool {
 				}
 			case "for":
 				g.source = g.entry.value
+				g.sourceLen = len(g.source.l)
 				if s.expr != nil && g.source.k != List {
 					g.entry.status = Error
 					g.entry.err = at(diagnostic("E-TYPE", "for requires list"), s.tok)
@@ -1331,10 +1495,10 @@ func (r *runState) updateRegions() bool {
 			if g.stmt.parallel {
 				limit = r.opts.Parallelism
 				if len(r.afterRules) > 0 {
-					limit = len(g.source.l)
+					limit = g.sourceLen
 				}
 			}
-			for !g.stopped && active < limit && (g.stmt.expr == nil || g.next.IsInt64() && g.next.Int64() < int64(len(g.source.l))) {
+			for !g.stopped && active < limit && (g.stmt.expr == nil || g.next.IsInt64() && g.next.Int64() < int64(g.sourceLen)) {
 				if r.ctx.Err() != nil {
 					g.stopped, g.cause = true, "cancelled"
 					break
@@ -1371,7 +1535,7 @@ func (r *runState) updateRegions() bool {
 				all = false
 				progress = true
 			}
-			finished := g.stopped || g.stmt.expr != nil && g.next.IsInt64() && g.next.Int64() >= int64(len(g.source.l))
+			finished := g.stopped || g.stmt.expr != nil && g.next.IsInt64() && g.next.Int64() >= int64(g.sourceLen)
 			if !finished {
 				all = false
 			}
@@ -1385,6 +1549,7 @@ func (r *runState) updateRegions() bool {
 				g.cause = "dependency_failure"
 			}
 			progress = true
+			r.releaseRegion(g)
 		}
 	}
 	all := true
@@ -1406,6 +1571,60 @@ func (r *runState) updateRegions() bool {
 		progress = true
 	}
 	return progress
+}
+
+// Completed lexical scopes cannot export live bindings or stores. Data results
+// and frozen closure captures own their values independently. Keep graph and
+// range metadata for ordering, After, and diagnostics, but drop local payloads.
+// Never mutate an environment or a Value's backing storage: other scopes may
+// still hold aliases to the same immutable data.
+func (r *runState) releaseRegion(g *region) {
+	if g == r.root || g.released || !terminal(g.status) {
+		return
+	}
+	stack := []*region{g}
+	var scopes []*region
+	var nodes []*node
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		current := stack[last]
+		stack = stack[:last]
+		if current.released {
+			continue
+		}
+		if !terminal(current.status) {
+			return
+		}
+		scopes = append(scopes, current)
+		if current.entry != nil {
+			nodes = append(nodes, current.entry)
+		}
+		for _, work := range current.children {
+			if work.node != nil {
+				nodes = append(nodes, work.node)
+			} else {
+				stack = append(stack, work.region)
+			}
+		}
+	}
+	// Control transfers can mark a region before its active workers drain.
+	for _, n := range nodes {
+		if !terminal(n.status) {
+			return
+		}
+	}
+	for _, n := range nodes {
+		n.env = nil
+		n.value = Value{}
+	}
+	for _, scope := range scopes {
+		scope.env = nil
+		scope.source = Value{}
+		scope.released = true
+	}
+	if g.kind == "flow" {
+		g.instance.stores = nil
+	}
 }
 
 type claimStore struct {
@@ -2121,7 +2340,7 @@ func (r *runState) refreshAfter() {
 					i := len(g.prefix)
 					if positionPrefix(g.prefix, pos) && i < len(pos) && pos[i].Site == g.stmt.tok.site {
 						index, _ := new(big.Int).SetString(pos[i].Index, 10)
-						if index.Cmp(big.NewInt(int64(len(g.source.l)))) >= 0 {
+						if index.Cmp(big.NewInt(int64(g.sourceLen))) >= 0 {
 							r.buildErr = diagnostic("E-AFTER-CYCLE", "After loop index does not exist")
 						}
 					}
@@ -2130,7 +2349,7 @@ func (r *runState) refreshAfter() {
 			if terminal(g.status) {
 				continue
 			}
-			future := !g.expanded || g.kind == "for" && !g.stopped && (g.stmt.expr == nil || !g.next.IsInt64() || g.next.Int64() < int64(len(g.source.l)))
+			future := !g.expanded || g.kind == "for" && !g.stopped && (g.stmt.expr == nil || !g.next.IsInt64() || g.next.Int64() < int64(g.sourceLen))
 			if !future {
 				continue
 			}
@@ -2159,7 +2378,7 @@ func (r *runState) refreshAfter() {
 						}
 						if g.expanded && g.stmt.expr != nil {
 							index, _ := new(big.Int).SetString(pos[i].Index, 10)
-							if index.Cmp(big.NewInt(int64(len(g.source.l)))) >= 0 {
+							if index.Cmp(big.NewInt(int64(g.sourceLen))) >= 0 {
 								r.buildErr = diagnostic("E-AFTER-CYCLE", "After loop index does not exist")
 								continue
 							}

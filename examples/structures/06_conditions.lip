@@ -1,13 +1,13 @@
-# if 有语句和表达式两种用法。
-# 给名字绑定一个条件结果时使用表达式；每个分支的末尾表达式给出值。
-# 分支内的局部名字不会泄漏到分支外。
+# if has statement and expression forms.
+# Use an expression to bind a conditional result; each branch ends with its value.
+# Branch-local names do not escape their branch.
 flow Conditions() -> object {
     score = 0.85
     grade = if score >= 0.8 {
         label = "ready"
         label
     } else { "needs work" }
-    # && / || 短路求值。右侧的除零表达式不会执行。
+    # && / || short-circuit. The division by zero on the right is never evaluated.
     safe = false && (1 / 0 == 1)
     return {grade: grade, safe: safe}
 }

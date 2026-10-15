@@ -1,6 +1,6 @@
-# snapshot 是唯一的即时观察通道，必须经过 effect/perform 并记录结果。
-# 它不等待 writer，与并发任务重叠时可能看到 0 到 3 项。
-# 不含 live snapshot 的固定应答程序有调度无关保证；这里明确放弃该保证。
+# snapshot is the live observation channel; effect/perform records its result.
+# It does not wait for writers and may observe 0 through 3 records during concurrent work.
+# Live observations deliberately give up the schedule-independence guarantee for fixed-response programs.
 flow Snapshots() -> object {
     facts = claim()
     for x in [1, 2, 3] parallel { facts <+ x }

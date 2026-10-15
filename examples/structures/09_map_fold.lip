@@ -1,5 +1,5 @@
-# map 依次转换有限列表，fold 按列表顺序携带一个累积值。
-# 回调必须是 LIP 纯函数；外部调用使用 carry，而非 effectful callback。
+# map transforms a finite list in order; fold carries an accumulator through that order.
+# Callbacks must be pure LIP functions; use carry for external calls.
 fn add(a: number, b: number) -> number { a + b }
 flow ListCalculation() -> object {
     squares = map([1, 2, 3, 4], fn(x: number) -> number { x * x })

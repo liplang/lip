@@ -28,6 +28,7 @@ func serve(ctx context.Context, args []string) error {
 	parallel := flags.Int("parallel", 4, "maximum active leaf evaluations per request (waiting containers yield)")
 	steps := flags.Int64("steps", 1000000, "step budget per request")
 	elements := flags.Int64("elements", 100000, "list budget per request")
+	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget per request (0 uses default)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	handler, err := script.NewHTTPMux(compiled, script.HTTPOptions{
 		Timeout: *timeout, MaxBodyBytes: *bodyLimit, MaxResponseBytes: *responseLimit, MaxConcurrentRequests: *concurrent,
-		Run: script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements},
+		Run: script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxFrames: *frames},
 		OnError: func(r *http.Request, report script.Report, err error) {
 			fmt.Fprintf(os.Stderr, "HTTP %s %q: %v\n", r.Method, r.URL.Path, err)
 		},

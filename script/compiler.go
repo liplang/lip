@@ -65,7 +65,8 @@ func lex(src string) ([]token, error) {
 			for l.i < len(src) && (asciiLetter(src[l.i]) || asciiDigit(src[l.i]) || src[l.i] == '_') {
 				l.advance()
 			}
-			t.text, t.kind = src[start:l.i], "id"
+			// Retained tokens must not pin an entire cell through a substring.
+			t.text, t.kind = strings.Clone(src[start:l.i]), "id"
 			if strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null void ", " "+t.text+" ") {
 				t.kind = t.text
 			}
@@ -102,7 +103,7 @@ func lex(src string) ([]token, error) {
 			if l.i < len(src) && (asciiLetter(src[l.i]) || src[l.i] == '_') {
 				return nil, at(diagnostic("E-LEX", "invalid number suffix"), t)
 			}
-			t.kind, t.text = "number", src[start:l.i]
+			t.kind, t.text = "number", strings.Clone(src[start:l.i])
 			n, e := strconv.ParseFloat(t.text, 64)
 			if e != nil {
 				return nil, at(diagnostic("E-LEX", "number overflow"), t)
@@ -200,7 +201,7 @@ func lex(src string) ([]token, error) {
 				}
 				return nil, at(diagnostic("E-LEX", "unterminated string"), t)
 			}
-			t.kind, t.text, t.value = "string", src[start:l.i], textValue(b.String())
+			t.kind, t.text, t.value = "string", strings.Clone(src[start:l.i]), textValue(b.String())
 		} else {
 			matched := false
 			for _, op := range []string{"<+", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "//", "**", "*/", "|>"} {
@@ -277,6 +278,7 @@ type expression struct {
 	body                  *block
 	arms                  []arm
 	info                  analysis
+	nativeResult          *nativeShape
 }
 type statement struct {
 	native          func(*evaluator, *environment) (string, error)
@@ -313,6 +315,9 @@ type dataDecl struct {
 	tok   token
 }
 type syntax struct {
+	// Build-only lexical origins live outside expression trees so retained
+	// closures do not keep their callers' initializer syntax and literals alive.
+	nativeOrigins    map[*expression]*expression
 	imports          []importDecl
 	functions        map[string]*expression
 	flows            map[string]*flowDecl
@@ -323,6 +328,9 @@ type syntax struct {
 	params           []parameter
 	body             *block
 	source           string
+	// Interactive roots add saved immutable bindings to ordinary checking.
+	cell    bool
+	initial map[string]bindingInfo
 }
 type analysis struct {
 	typ        string
@@ -334,16 +342,18 @@ type analysis struct {
 }
 
 type function struct {
-	params   []parameter
-	typ      string
-	body     *block
-	captures *environment
-	builtin  string
+	nativeResult *nativeShape
+	params       []parameter
+	typ          string
+	body         *block
+	captures     *environment
+	builtin      string
 }
 type proposal struct {
-	contract   Contract
-	positional []Value
-	named      map[string]Value
+	nativeResult *nativeShape
+	contract     Contract
+	positional   []Value
+	named        map[string]Value
 }
 
 type parser struct {
@@ -366,59 +376,18 @@ func parse(source string) (*syntax, error) {
 	}
 	names := map[string]bool{}
 	for p.peek().kind != "eof" && p.err == nil {
-		exported := p.accept("export")
-		if exported {
-			s.declarations = true
+		if p.declaration(s, names) {
+			continue
 		}
-		t := p.peek()
-		name := ""
-		switch {
-		case t.kind == "fn" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == "id":
-			p.take()
-			name = p.need("id").text
-			e := p.function(t)
-			e.name = name
-			s.functions[name] = e
-			p.padding()
-		case t.kind == "flow":
-			s.declarations = true
-			p.take()
-			name = p.need("id").text
-			f := &flowDecl{name: name, tok: t, params: p.params()}
-			p.need("->")
-			f.result = p.typeName(true)
-			f.body = p.block("stmt")
-			s.flows[name] = f
-			p.padding()
-		case t.kind == "id" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == ":":
-			s.declarations = true
-			name = p.take().text
-			p.need(":")
-			typ := p.typeName(false)
-			p.need("=")
-			value := p.staticData()
-			s.data[name] = dataDecl{typ: typ, value: value, tok: t}
-			p.declarationEnd()
-		default:
-			if s.declarations || exported {
-				p.fail(t, "declaration files cannot contain top-level statements")
-				break
-			}
-			s.body = &block{}
-			for p.peek().kind != "eof" && p.err == nil {
-				s.body.items = append(s.body.items, p.stmt())
-				if p.peek().kind != "eof" {
-					p.separator()
-				}
-			}
+		if s.declarations {
+			p.fail(p.peek(), "declaration files cannot contain top-level statements")
+			break
 		}
-		if name != "" {
-			if names[name] && p.err == nil {
-				p.err = at(diagnostic("E-DUPLICATE", "duplicate declaration "+name), t)
-			}
-			names[name] = true
-			if exported {
-				s.exports[name] = true
+		s.body = &block{}
+		for p.peek().kind != "eof" && p.err == nil {
+			s.body.items = append(s.body.items, p.stmt())
+			if p.peek().kind != "eof" {
+				p.separator()
 			}
 		}
 	}
@@ -427,6 +396,61 @@ func parse(source string) (*syntax, error) {
 		return nil, p.err
 	}
 	return s, nil
+}
+
+// declaration is shared by files and interactive cells.
+func (p *parser) declaration(s *syntax, names map[string]bool) bool {
+	exported := p.accept("export")
+	if exported {
+		s.declarations = true
+	}
+	t := p.peek()
+	name := ""
+	switch {
+	case t.kind == "fn" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == "id":
+		p.take()
+		name = p.need("id").text
+		e := p.function(t)
+		e.name = name
+		s.functions[name] = e
+		p.padding()
+	case t.kind == "flow":
+		s.declarations = true
+		p.take()
+		name = p.need("id").text
+		f := &flowDecl{name: name, tok: t, params: p.params()}
+		p.need("->")
+		f.result = p.typeName(true)
+		f.body = p.block("stmt")
+		s.flows[name] = f
+		p.padding()
+	case t.kind == "id" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == ":":
+		s.declarations = true
+		name = p.take().text
+		p.need(":")
+		typ := p.typeName(false)
+		p.need("=")
+		value := p.staticData()
+		s.data[name] = dataDecl{typ: typ, value: value, tok: t}
+		p.declarationEnd()
+	default:
+		if exported {
+			p.fail(t, "export requires a declaration")
+			return true
+		}
+		return false
+	}
+
+	if name != "" {
+		if names[name] && p.err == nil {
+			p.err = at(diagnostic("E-DUPLICATE", "duplicate declaration "+name), t)
+		}
+		names[name] = true
+		if exported {
+			s.exports[name] = true
+		}
+	}
+	return true
 }
 
 // Selection only fixes the root instance. Other declarations are checked too.

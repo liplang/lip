@@ -1,5 +1,5 @@
-# 多个结论独立贡献证据，再用完整快照生成缺失证据报告。
-# 没有 live snapshot，汇聚结果与合法调度次序无关。
+# Independent conclusions contribute evidence; a complete snapshot produces the missing-evidence report.
+# Without live snapshots, the collected result is independent of legal schedule order.
 flow Evidence() -> object {
     facts = claim()
     for conclusion in ["a", "b", "c"] parallel {

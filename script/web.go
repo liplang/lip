@@ -71,7 +71,7 @@ func normalizeHTTPOptions(o HTTPOptions) (HTTPOptions, error) {
 		o.Run.MaxNodes = 100000
 	}
 	if o.Run.MaxFrames == 0 {
-		o.Run.MaxFrames = 10000
+		o.Run.MaxFrames = DefaultMaxFrames
 	}
 	o.Run.After = append([]After(nil), o.Run.After...)
 	return o, nil

@@ -1,5 +1,7 @@
 # LIP 1.0 语言规范：小计算核心与统一调用边界
 
+[English](LIP-1.0-SPEC.en.md) | [简体中文](LIP-1.0-SPEC.md)
+
 版本：1.0 定稿。日期：2026-10-15。
 
 ## 0. 范围、术语与阅读约定
@@ -608,6 +610,11 @@ flow Main(n: number) -> number {
 常量空间。Host 可以设置已公布的内存、指令数、时间和输出大小预算。预算耗尽报
 `E-BUDGET`；取消报 Cancelled。语义不限制次数不等于承诺无限物理资源。执行机必须在
 循环/递归安全点检查取消；并行模式下，不得因长纯计算长期占用所有执行机会。
+
+预算耗尽是执行失败，不是函数返回值。实现不得按返回类型自动补成 null、0、false、
+空字符串、空 list 或空 object；即使返回注解允许 null 或 any 也一样。Host 可以按
+明确约定的应用策略将诊断映射为错误或降级响应，但不能把失败的执行当作成功的
+EntryOutput。
 
 ## 5. 类型和纯求值
 
@@ -1384,6 +1391,12 @@ adapter，或通过持久 Python worker 解析模块与对象，不限制包名�
 签名/arity 检查先于实参求值；无法获得原生签名时由实际调用检查，adapter 须说明这一
 限制。仅构造 effect 不执行这些原生检查或加载代码。
 
+在这一配置中，显式 `effect receiver.member(args)` 可使用任意按词法绑定的 receiver，
+包括导入模块中函数/Flow 的参数和已保存的会话值。配置将其降为携带 receiver 与成员
+路径的原生请求，不要求静态已知的原生来源。嵌套成员路径仅在 perform 时解析，构造
+proposal 不解析成员。公开名字被解绑或复用时，已保存请求仍保留捕获的 receiver。
+普通对象调用保持核心纯调用语义，除非因已知原生来源而被转换。
+
 这一配置可把 import alias 的值用法降为取模块资源引用的 perform，核心中的 alias
 仍只用于 operation 解析。import/补全不执行包初始化；Go 导出发现允许使用工具链与
 module resolver，Python importlib 在首次授权的实际操作时运行。CLI、交互会话与生成
@@ -1981,7 +1994,7 @@ positional/named 是第 10 节 Request 的实参字段。
 JoinID_wire = ["join", run_id, [[decimal(anchor), decimal(index)], ...]]
 CallID_wire = ["call", run_id, PositionPairs, EvalPathPairs, decimal(perform_site)]
 JoinDigest = lowerhex(SHA256(C(JoinID_wire)))
-CallDigest = lowerhex(SHA256(C(CallID_wire)))   # 可选的索引摘要
+CallDigest = lowerhex(SHA256(C(CallID_wire)))   # optional indexing digest
 ArgFingerprint = lowerhex(SHA256(C([positional, named])))
 ```
 
@@ -2462,14 +2475,21 @@ DependencyLock 和多源 revision；身份偏移按根来源优先，来源表�
 After wire 支持动态 node、flow/loop/branch region 和静态完成集合；动态展开、错误
 前置闭包与 Go 后端使用同一套运行时。覆盖与验收命令见仓库 IMPLEMENTATION.md。
 
+运行时接受 `int` 范围内任意正整数叶子额度，不按额度预分配 worker，使用有界事件存储并共享资源许可。完成的词法作用域释放局部数据引用，同时保留返回 Data、冻结捕获与 After/诊断元数据。这是作用域清理而非精确最后使用分析，图历史和 journal 仍随工作量增长。非尾调用默认每个叶子 10,000 个活跃帧，可由 `Options.MaxFrames` 或 `-frames` 调整；耗尽报告 E-BUDGET，不构造虚假的成功值。
+
 HTTP CLI 支持显式入口和模块快照，路由清单可逐项选择 entry。方法、405/Allow 由 Host
 分派，HEAD 不回退 GET；raw_path 使用 EscapedPath，保留编码斜杠。入口转换、响应验证、
 请求隔离与取消沿用核心边界。HTTP 仅接受显式 Host 合约，未接入请求级通用 Native
-bridge；仓库仅提供内存调用记录，不声明 durable profile。REPL cell 保留成功的值和
-纯函数，具名管道可跨 cell 使用；完整 Flow、静态 Data 和模块使用 :run，支持入口、
-输入和项目根参数。learn 的入口、Flow/管道和模块课使用同一编译路径，模块来源内置。
+bridge；仓库仅提供内存调用记录，不声明 durable profile。REPL 支持脚本声明与语句，
+保留成功的值、fn/Flow 定义和闭包，具名调用与管道可跨 cell 使用。静态 Data、export、
+冻结的 LIP 导入与 cell 内 Claim 复用编译器与运行时；:begin/:end 将完整脚本或前向声明
+作为一个 cell 提交。每次 Flow 调用有独立 store，完成后的 Claim Data 快照可以保存。
+:run 独立运行文件，支持入口、输入和项目根参数。learn 的入口、Flow/管道和模块课
+使用同一编译路径，模块来源内置。
 通用原生辅助调用的转换遵守模块与局部词法作用域，管道阶段仍由普通静态目标规则检查。
-运行命令和限制见 README，按规范章节映射的覆盖证据见 IMPLEMENTATION.md。
+运行命令和限制见 [README](../README.md)，按规范章节映射的覆盖证据见 [IMPLEMENTATION.md](../IMPLEMENTATION.md)。
+
+REPL 的 `:del name[,name...]` 按名字解除绑定，与内容种类无关，后续 cell 可复用名字。整批验证先于任何删除；已有闭包与 Flow 保留原引用，解绑不重跑动作、不关闭资源。这是会话工具命令，不是新增 LIP 源语法。
 
 第 16.5 节逐位表可在项目根运行 `go run ./tests/reference_numeric` 重新生成，或运行
 `go run ./tests/reference_numeric -check` 检查。工具直接提取该节参考代码，不调用

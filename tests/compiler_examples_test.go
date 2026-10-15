@@ -26,7 +26,7 @@ var examples = []exampleCase{
 	{path: "basics/03_arithmetic.lip", want: `{"division":3.5,"grouped":20,"inverse_power":0.125,"logarithm":3,"logic":true,"negative_base":9,"negative_power":-9,"power":8,"power_chain":512,"quotient":-2,"remainder":1,"sum":14}`},
 	{path: "basics/04_containers.lip", want: `{"fields":["name","role"],"first":"Ada","has_age":false,"names":["Ada","Lin","Sam"],"original_role":"reader","updated":{"name":"Ada","role":"writer"}}`},
 	{path: "basics/05_strings_numbers.lip", want: `{"display":"score=0.8","length":3,"lexical_order":true,"middle":"𐀀","score":0.8,"words":["red","","blue"]}`},
-	{path: "basics/22_multiline_strings.lip", want: `{"html":"\u000a<main>\u000a  <h1 title=\"欢迎\">你好，LIP!</h1>\u000a</main>\u000a","prompt":"Read \"carefully\".\u000a# This is text, not a comment.\u000a","quotes":"Embedded triple quotes: \"\"\""}`},
+	{path: "basics/22_multiline_strings.lip", want: `{"html":"\u000a<main>\u000a  <h1 title=\"Welcome\">Hello, LIP!</h1>\u000a</main>\u000a","prompt":"Read \"carefully\".\u000a# This is text, not a comment.\u000a","quotes":"Embedded triple quotes: \"\"\""}`},
 	{path: "structures/06_conditions.lip", want: `{"grade":"ready","safe":false}`},
 	{path: "structures/07_match.lip", want: `["empty","nonnegative","other","note","other"]`},
 	{path: "structures/08_functions_closures.lip", want: `{"mapped":[11,12,13],"product":20}`},
@@ -44,6 +44,7 @@ var examples = []exampleCase{
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
 	{path: "advanced/26_flows.lip", entry: "Main", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
+	{path: "advanced/27_linear_model.lip", entry: "Main", want: `{"intercept":1,"mse":0,"predictions":[9,11],"singular_rejected":true,"slope":2}`},
 	{path: "refine.lip", want: `{"rounds":4,"score":0.8}`},
 	{path: "evidence.lip", want: `{"missing":["b","c"]}`},
 }
@@ -302,6 +303,99 @@ func TestGoBackendNumericErrorsAndBudget(t *testing.T) {
 	}
 }
 
+func TestGoBackendNonTailFrameBudget(t *testing.T) {
+	p, err := Compile(frameBudgetSource, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, tt := range frameBudgetCases {
+		t.Run(tt.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"n":%d,"mode":%q}`, tt.n, tt.mode)
+			flags := []string{"-input", input, "-entry-output"}
+			if tt.frames != 0 {
+				flags = append(flags, "-frames", fmt.Sprint(tt.frames))
+			}
+			stdout, stderr, err := runNative(t, executable, flags...)
+			if tt.code == "" {
+				if err != nil || strings.TrimSpace(stdout) != `{"kind":"value","value":`+tt.want+`}` || stderr != "" {
+					t.Fatalf("native result: %v %q %q", err, stdout, stderr)
+				}
+				return
+			}
+			if tt.frames < 0 {
+				if err == nil || stdout != "" || !strings.Contains(stderr, "-frames must be nonnegative") {
+					t.Fatalf("invalid native configuration: %v %q %q", err, stdout, stderr)
+				}
+				return
+			}
+			value, decodeErr := DecodeData([]byte(input))
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			fields, _ := value.Fields()
+			_, wantError := p.Run(context.Background(), fields, Options{MaxFrames: tt.frames, MaxSteps: 2000000})
+			if err == nil || stdout != "" || wantError == nil || strings.TrimSpace(stderr) != wantError.Error() {
+				t.Fatalf("native error: %v %q %q; want %v", err, stdout, stderr, wantError)
+			}
+		})
+	}
+}
+
+func TestGoBackendArbitraryParallelism(t *testing.T) {
+	host := Host{Contracts: []Contract{{
+		Operation: Operation{Language: "host", Path: "probe", Member: "read"}, Version: "1",
+		Params: []Parameter{{Name: "x", Schema: Schema{Type: "number"}}, {Name: "target", Schema: Schema{Type: "number"}}, {Name: "limit", Schema: Schema{Type: "number"}}},
+		Result: Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true,
+		Invoke: func(_ context.Context, request Request) Response { return Result(request.Positional[0]) },
+	}}}
+	p, err := Compile(`import host "probe"
+flow Main(n:number,target:number,limit:number)->number {
+ facts=claim()
+ for x in range(n) parallel {value=perform effect probe.read(x,target,limit); facts <+ value}
+ return fold([row.value for row in facts],0,fn(acc:number,x:number)->number{acc+x})
+}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import("context";"sync/atomic")
+func generatedHost()(Host,error){
+ var active,arrivals atomic.Int64
+ release:=make(chan struct{})
+ return Host{Contracts:[]Contract{{
+  Operation:Operation{Language:"host",Path:"probe",Member:"read"},Version:"1",
+  Params:[]Parameter{{Name:"x",Schema:Schema{Type:"number"}},{Name:"target",Schema:Schema{Type:"number"}},{Name:"limit",Schema:Schema{Type:"number"}}},
+  Result:Schema{Type:"number"},Effect:ReadOnlyEffect,Concurrent:true,
+  Invoke:func(ctx context.Context,request Request)Response{
+   current:=active.Add(1);defer active.Add(-1)
+   if current>int64(request.Positional[2].n){return Rejected("limit","active provider limit exceeded")}
+   if arrivals.Add(1)==int64(request.Positional[1].n){close(release)}
+   select{case <-release:return Result(request.Positional[0]);case <-ctx.Done():return Uncertain("overlap target not reached")}
+  },
+ }}},nil
+}
+`})
+	for _, limit := range []int{3, 7, 17, 1238, 73295, int(^uint(0) >> 1)} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			items := min(limit, 1301)
+			if limit < 100 {
+				items = limit + 5
+			}
+			target := min(items, limit)
+			input := fmt.Sprintf(`{"n":%d,"target":%d,"limit":%d}`, items, target, target)
+			stdout, stderr, err := runNative(t, executable, "-parallel", fmt.Sprint(limit), "-input", input)
+			want := fmt.Sprint(items * (items - 1) / 2)
+			if err != nil || stderr != "" || strings.TrimSpace(stdout) != want {
+				t.Fatalf("limit %d: %q %q %v; want %s", limit, stdout, stderr, err, want)
+			}
+		})
+	}
+	if stdout, stderr, err := runNative(t, executable, "-parallel", "-1"); err == nil || stdout != "" || !strings.Contains(stderr, "-parallel must be nonnegative") {
+		t.Fatalf("invalid parallelism: %q %q %v", stdout, stderr, err)
+	}
+}
+
 func TestGoBackendPowerLogarithm(t *testing.T) {
 	p, err := Compile(`flow Main(a:any,b:any,kind:string)->number {
  return if kind == "power" { a ** b } else { a */ b }
@@ -484,6 +578,8 @@ flow Main(mode:string)->any {
   "empty" => [x |>left.Work for x in []],
   "skip" => if false {left.Fail()} else {null},
   "void" => null,
+  "alias" => [{n:1}] |>left.Keep,
+  "closure_pipeline" => {direct:(fn(xs:list)->number{xs |>len})([1,2]),captured:right.make_pipeline(3)(4),nested:map([1,2],fn(x:number)->number{x |>decorate(delta=x |>decorate(delta=1))})},
   "input" => left.Accept({f:fn()->number{1}}),
   "output" => left.BadReturn(),
   "stage_input" => 1 |>right.take(config={f:fn()->number{1}}),
@@ -493,12 +589,14 @@ flow Main(mode:string)->any {
 		"left.lip": {Version: "1", Text: `import lip "./shared.lip" as base
 export flow Work(x:number)->number {facts=claim();facts <+ base.echo(x);return (x |>base.scale)+len(facts)}
 export flow Empty(x:number)->void{}
+export flow Keep(x:list)->object {data=x;capture=fn()->list{data};facts=claim();for i in [0] {facts <+ capture()};return {data:data,snapshot:[row.value for row in facts]}}
 export flow Accept(x:object)->object{return x}
 export flow BadReturn()->object{return {f:fn()->number{1}}}
 export flow Fail()->number{return fail("module child")}`},
 		"right.lip": {Version: "1", Text: `import lip "./shared.lip" as base
 export flow Items()->list{return [1,2]}
 export fn make(x:number)->function{fn(y:number)->number{base.scale(x+y)}}
+export fn make_pipeline(x:number)->function{fn(y:number)->number{x+y |>base.scale}}
 export fn take(x:number,config:object)->number{fail("body must not run")}`},
 		"shared.lip": {Version: "1", Text: `export BASE:number=2
 export fn echo(facts:number)->number{facts}
@@ -513,13 +611,15 @@ export fn scale(x:number)->number{x |>double}`},
 	for _, test := range []struct{ mode, want, code string }{
 		{"ok", `{"checked":3,"closure":14,"facts":[3,5],"own":100,"shadow":11,"values":[4,6]}`, ""},
 		{"empty", "[]", ""}, {"skip", "null", ""}, {"void", "null", ""},
+		{"alias", `{"data":[{"n":1}],"snapshot":[[{"n":1}]]}`, ""},
+		{"closure_pipeline", `{"captured":14,"direct":2,"nested":[3,5]}`, ""},
 		{"input", "", "E-SCHEMA"}, {"output", "", "E-SCHEMA"}, {"stage_input", "", "E-SCHEMA"}, {"error", "", "E-FAIL"},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			input := `{"mode":"` + test.mode + `"}`
 			value, _ := DecodeData([]byte(input))
 			fields, _ := value.Fields()
-			for _, parallel := range []int{1, 2, 4} {
+			for _, parallel := range []int{1, 2, 4, 7, 1238, 73295} {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				report, runErr := p.Run(ctx, fields, Options{Parallelism: parallel, RunID: "composition"})
 				cancel()

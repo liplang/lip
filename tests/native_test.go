@@ -33,6 +33,208 @@ type bridgeCounter struct{ Value int }
 
 func (c *bridgeCounter) Add(n int) int { c.Value += n; return c.Value }
 
+func TestNativeRunOwnershipAndFailedCellCleanup(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/ownership", map[string]any{"New": func() *bridgeCounter { return &bridgeCounter{Value: 7} }})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, `import go "application/ownership" as lib`, "")
+	nativeCell(t, s, `saved=lib.New()`, "")
+	count := func() int { return reflect.ValueOf(host.Native.Go).Elem().FieldByName("objects").Len() }
+	baseline := count()
+	for _, source := range []string{`abandoned=lib.New();fail("stop")`, `unused=lib.New();1/0`} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err == nil {
+			t.Fatal("failed cell succeeded")
+		}
+		if count() != baseline {
+			t.Fatal("failed cell retained new native handles", count(), baseline)
+		}
+		nativeCell(t, s, `saved.Value`, "7")
+	}
+	nativeCell(t, s, `captured=if true {r=lib.New();fn()->object{r}}else{fn()->object{saved}}`, "")
+	nativeCell(t, s, `native_data(captured())`, `{"Value":7}`)
+	stale := s.Values()["saved"]
+	host.Native.Go.RegisterPackage("application/old", map[string]any{"Get": func() Value { return stale }})
+	p, err := Compile(`import go "application/old" as old;flow Main()->any{return old.Get().Value}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Run(context.Background(), nil, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-RESOURCE" {
+		t.Fatal("run accepted a session-owned reference", err)
+	}
+	nativeCell(t, s, `native_release(saved)`, "true")
+	_, err = s.Eval(context.Background(), `saved.Value`, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-RESOURCE" {
+		t.Fatal("released reference diagnostic", err)
+	}
+}
+
+func TestGeneratedGoLibrariesWithoutRuntimeToolchain(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	p, err := Compile(`import go "slices"
+import go "strings"
+flow Main()->object {
+ numbers=slices.Clone([3,1,2])
+ slices.Sort(numbers)
+ words=slices.Clone(["b","a"])
+ slices.Sort(words)
+ measured=slices.Clone([strings.Count("aba","a")])
+ return {numbers:native_data(numbers),words:native_data(words),measured:native_data(measured),named:strings.Replace(s="ababa",old="a",new="x",n=1)}
+}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	cmd := exec.Command(executable)
+	cmd.Env = append(os.Environ(), "PATH="+t.TempDir(), "GOPROXY=off")
+	output, err := cmd.CombinedOutput()
+	want := `{"measured":[2],"named":"xbaba","numbers":[1,2,3],"words":["a","b"]}`
+	if err != nil || strings.TrimSpace(string(output)) != want {
+		t.Fatal(string(output), err)
+	}
+}
+
+func TestNativePythonFailedCellCleanup(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python unavailable")
+	}
+	dir := t.TempDir()
+	source := `import gc, weakref
+refs=[]
+class Token:
+    def read(self): return 7
+def make():
+    obj=Token()
+    refs.append(weakref.ref(obj))
+    return obj
+def alive():
+    gc.collect()
+    return sum(ref() is not None for ref in refs)
+`
+	if err := os.WriteFile(filepath.Join(dir, "lip_ownership_fixture.py"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", dir)
+	s, err := NewInteractiveSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, `import python "lip_ownership_fixture" as lib`, "")
+	nativeCell(t, s, `saved=lib.make()`, "")
+	if _, err := s.Eval(context.Background(), `abandoned=lib.make();1/0`, Options{}); err == nil {
+		t.Fatal("failed cell succeeded")
+	}
+	nativeCell(t, s, `lib.alive()`, "1")
+	nativeCell(t, s, `lib.make();1`, "1")
+	nativeCell(t, s, `lib.alive()`, "1")
+	nativeCell(t, s, `capture=if true {r=lib.make();fn()->object{r}}else{fn()->object{saved}}`, "")
+	nativeCell(t, s, `lib.alive()`, "2")
+	nativeCell(t, s, `captured=capture();captured.read()`, "7")
+	nativeCell(t, s, `native_release(saved)`, "true")
+	_, err = s.Eval(context.Background(), `saved.read()`, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-RESOURCE" {
+		t.Fatal(err)
+	}
+	nativeCell(t, s, `lib.alive()`, "1")
+	nativeCell(t, s, `pending=effect lib.make()`, "")
+	nativeCell(t, s, `from_request=perform pending;from_request.read()`, "7")
+	nativeCell(t, s, `native_release(from_request)`, "true")
+	nativeCell(t, s, `lib.alive()`, "1")
+}
+
+func TestSessionNativeLargeDataAllocation(t *testing.T) {
+	s, err := NewInteractiveSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, `xs=range(250000)`, "")
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	result, err := s.Eval(context.Background(), `len(xs)`, Options{})
+	runtime.ReadMemStats(&after)
+	if err != nil || display(t, result.Value) != "250000" {
+		t.Fatal(result, err)
+	}
+	// A small cell must not allocate a second per-element metadata array for
+	// retained pure data. Leave ample room for ordinary compilation overhead.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 4<<20 {
+		t.Fatalf("small cell allocated %d bytes for retained pure data", allocated)
+	}
+}
+
+func TestSessionNativeMetadataDoesNotRetainInitializers(t *testing.T) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	s := func() *Session {
+		s, err := NewInteractiveSession(Host{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := `text="` + strings.Repeat("x", 12<<20) + `";size=len(text);count=fn()->number{size}`
+		if _, err := s.Eval(context.Background(), source, Options{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Delete("text", "size"); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}()
+	defer s.Close()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if after.HeapAlloc > before.HeapAlloc+6<<20 {
+		t.Fatalf("closure retained initializer data: before=%d after=%d", before.HeapAlloc, after.HeapAlloc)
+	}
+	nativeCell(t, s, `count()`, "12582912")
+}
+
+func TestNativeSnapshotsAndContainerPurity(t *testing.T) {
+	for _, body := range []string{
+		`text=strings.ToUpper("abc"); size=fn()->number{len(text)};return size()`,
+		`xs=native_data(strings.Split("a,b,c",",")); size=fn()->number{len(xs)}; return size()`,
+		`resource=strings.Split("a,b,c",","); box={resource:resource,label:"abc"}; size=fn()->number{len(box.label)}; return size()`,
+		`resource=strings.Split("a,b,c",","); box=[resource,"abc"]; size=fn()->number{len(box[1])}; return size()`,
+		`resource=strings.Split("a,b,c",","); box={resource:resource,label:"abc"}; read=fn()->object{box}; copy=read(); return len(copy.resource)`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			host := NewNativeHost(Host{})
+			defer host.Close()
+			source := `import go "strings"
+flow Main()->number {` + body + `}`
+			p, err := Compile(source, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.Run(context.Background(), nil, Options{})
+			if err != nil || display(t, r.Output) != "3" {
+				t.Fatal(r, err)
+			}
+			executable, _ := buildNative(t, p, GoOptions{})
+			stdout, stderr, err := runNative(t, executable)
+			if err != nil || strings.TrimSpace(stdout) != "3" {
+				t.Fatal(stdout, stderr, err)
+			}
+			s, err := NewInteractiveSession(Host{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			nativeCell(t, s, source, "")
+			nativeCell(t, s, `Main()`, "3")
+		})
+	}
+}
+
 func TestGoAdapterApplicationExportsAndResources(t *testing.T) {
 	var calls atomic.Int64
 	host := NewNativeHost(Host{})
@@ -186,13 +388,16 @@ func TestNativePythonStateAttributesAndCallOrder(t *testing.T) {
 		t.Skip("Python unavailable")
 	}
 	dir := t.TempDir()
-	module := `count=0
+	module := `from types import SimpleNamespace
+count=0
 __version__="fixture-1"
 def touch():
     global count
     count += 1
     return count
 def once(x): return x
+prepare=SimpleNamespace(once=once)
+get=SimpleNamespace(once=once)
 class Counter:
     def __init__(self, value): self.value=value
     def add(self, step=1):
@@ -223,6 +428,16 @@ def cycle():
 	nativeCell(t, s, `py.make().add()`, "1")
 	nativeCell(t, s, `method=c.add`, "")
 	nativeCell(t, s, `method(2)`, "7")
+	nativeCell(t, s, `box=py.SimpleNamespace(inner=c);nested=effect box.inner.add(step=2)`, "")
+	nativeCell(t, s, `c.value`, "7")
+	nativeCell(t, s, `perform nested`, "9")
+	nativeCell(t, s, `shadow=py.SimpleNamespace(prepare=c);path_request=effect shadow.prepare.add(step=0)`, "")
+	nativeCell(t, s, `perform path_request`, "9")
+	nativeCell(t, s, `bundle={run:py.once};wrapped_call=effect bundle.run(42)`, "")
+	nativeCell(t, s, `perform wrapped_call`, "42")
+	nativeCell(t, s, `perform effect py.prepare.once(6)`, "6")
+	nativeCell(t, s, `perform effect py.get.once(7)`, "7")
+	nativeCell(t, s, `py.prepare.once(8)`, "8")
 	nativeCell(t, s, `temporary=py.make()`, "")
 	nativeCell(t, s, `native_release(temporary)`, "true")
 	if _, err := s.Eval(context.Background(), `temporary.add()`, Options{}); err == nil {
@@ -261,8 +476,13 @@ def cycle():
 		t.Fatal("accepted a cyclic native Data snapshot")
 	}
 	for _, name := range s.Complete("py.") {
-		if strings.Contains(name, ".get.") || strings.Contains(name, ".prepare.") {
+		if strings.HasPrefix(name, "py.perform.") {
 			t.Fatal(name)
+		}
+	}
+	for _, path := range []string{"py.get.once", "py.prepare.once"} {
+		if !strings.Contains(strings.Join(s.Complete(path), ","), path) {
+			t.Fatal("completion lost a real library path", path)
 		}
 	}
 	if _, err := s.Eval(context.Background(), `fn impure()->number{c.add()}`, Options{}); err == nil {
@@ -278,6 +498,30 @@ def cycle():
 	s.Reset()
 	nativeCell(t, s, `import python "native_fixture" as py`, "")
 	nativeCell(t, s, `py.count`, "0")
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	p, err := Compile(`import python "native_fixture" as py
+flow Main()->object {
+ original=py.once
+ direct=py.once(1)
+ shadow=py.SimpleNamespace(prepare=py.Counter(1))
+ request=effect shadow.prepare.add(step=2)
+ return {prepare:perform effect py.prepare.once(2),get:perform effect py.get.once(3),
+         direct:py.prepare.once(4),nested:perform request,original:original(direct+4)}
+}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"direct":4,"get":3,"nested":3,"original":5,"prepare":2}`
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != want {
+		t.Fatal(report, err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || strings.TrimSpace(stdout) != want {
+		t.Fatal(stdout, stderr, err)
+	}
 }
 
 func TestGoModulePackageDiscoveryWithoutRegistry(t *testing.T) {
@@ -410,6 +654,202 @@ func TestInstalledScientificPythonLibraries(t *testing.T) {
 	}
 }
 
+// Exercise complete library workflows through files, generated executables,
+// and persistent cells, including stateful objects and explicit Data snapshots.
+func TestPracticalNativeWorkflows(t *testing.T) {
+	for _, test := range []struct {
+		name, modules, source, want string
+		goPlugin                    bool
+	}{
+		{"sqlite", "sqlite3", `import python "sqlite3" as sql
+flow Main()->object {
+ db=sql.connect(":memory:")
+ db.execute("create table sales(region text, amount real)")
+ db.executemany("insert into sales values (?,?)",[["North",10],["South",7],["North",5]])
+ db.commit()
+ totals=db.execute("select region,sum(amount) from sales group by region order by region").fetchall()
+ injection=db.execute("select count(*) from sales where region=?",["'; drop table sales; --"]).fetchall()
+ count=db.execute("select count(*) from sales").fetchall()
+ db.close()
+ native_release(db)
+ return {totals:totals,injection:injection,count:count}
+}`, `{"count":[[3]],"injection":[[0]],"totals":[["North",15],["South",7]]}`, false},
+		{"pandas-etl", "pandas", `import python "pandas" as pd
+import python "io"
+flow Main()->object {
+ csv=io.StringIO("region,units,price\nNorth,2,4.5\nSouth,3,2\nNorth,1,5\nSouth,,9\n")
+ raw=pd.read_csv(csv)
+ clean=raw.dropna(subset=["units"])
+ sales=clean.assign(revenue=clean["units"].mul(clean["price"]))
+ totals=sales.groupby("region")["revenue"].sum().sort_index().to_dict()
+ rows=sales.sort_values("revenue",ascending=false).to_dict(orient="records")
+ return {totals:totals,rows:rows,dropped:len(raw)-len(clean)}
+}`, `{"dropped":1,"rows":[{"price":4.5,"region":"North","revenue":9,"units":2},{"price":2,"region":"South","revenue":6,"units":3},{"price":5,"region":"North","revenue":5,"units":1}],"totals":{"North":14,"South":6}}`, false},
+		{"linear-model", "numpy,sklearn", `import python "numpy" as np
+import python "sklearn.linear_model" as linear
+flow Predict(envelope:object,rows:list)->list {
+ return native_data(perform effect envelope.model.predict(rows))
+}
+flow Main()->object {
+ model=linear.LinearRegression()
+ trained=model.fit([[0],[1],[2],[3],[4],[5]],[1,3,5,7,9,11])
+ predictions=Predict({model:trained},[[6],[7]])
+ weights=native_data(model.coef_)
+ return {predictions_ok:np.allclose(predictions,[13,15]),weight_ok:np.allclose(weights,[2]),bias_ok:(model.intercept_-1)**2<1e-20}
+}`, `{"bias_ok":true,"predictions_ok":true,"weight_ok":true}`, false},
+		{"classification", "numpy,sklearn", `import python "numpy" as np
+import python "sklearn.pipeline" as pipeline
+import python "sklearn.preprocessing" as preprocessing
+import python "sklearn.linear_model" as linear
+flow Main()->object {
+ model=pipeline.make_pipeline(preprocessing.StandardScaler(),linear.LogisticRegression(random_state=0))
+ trained=model.fit([[-3],[-2],[-1],[1],[2],[3]],[0,0,0,1,1,1])
+ predictions=trained.predict([[-4],[4]])
+ probabilities=trained.predict_proba([[-4],[4]])
+ return {classes:native_data(predictions),finite:native_data(np.isfinite(probabilities).all()),normalized:np.allclose(probabilities.sum(axis=1),[1,1])}
+}`, `{"classes":[0,1],"finite":true,"normalized":true}`, false},
+		{"numerical-modeling", "numpy,scipy", `import python "numpy" as np
+import python "scipy.integrate" as integrate
+import python "scipy.optimize" as optimize
+flow Main()->object {
+ solution=np.linalg.solve([[3,1],[1,2]],[9,8])
+ integral=integrate.quad(np.sin,0,np.pi)
+ minimum=optimize.minimize(optimize.rosen,[0,0],method="Nelder-Mead",options={xatol:1e-9,fatol:1e-12,maxiter:1000})
+ return {solution_ok:np.allclose(solution,[2,3]),integral_ok:(integral[0]-2)**2<1e-20,minimum_ok:np.allclose(minimum.x,[1,1]),converged:native_data(minimum.success)}
+}`, `{"converged":true,"integral_ok":true,"minimum_ok":true,"solution_ok":true}`, false},
+		{"module-resource", "numpy", `import python "numpy" as np
+flow Solve(library:object)->list {
+ return native_data(perform effect library.linalg.solve([[3,1],[1,2]],[9,8]))
+}
+flow Main()->list {library=np;return Solve(library)}`, `[2,3]`, false},
+		{"go-html-template", "", `import go "html/template" as html
+import go "bytes"
+import go "net/url" as url
+flow Render(page:object,buffer:object,data:object)->string {
+ perform effect page.Execute(buffer,data)
+ return perform effect buffer.String()
+}
+flow Main()->object {
+ page=html.New("page").Parse("<h1>{{.title}}</h1><p>{{.user}}</p><a href=\"{{.link}}\">go</a>")
+ buffer=bytes.NewBufferString("")
+ rendered=Render(page,buffer,{title:"<script>alert(1)</script>",user:"Ada & Lin",link:"javascript:alert(1)"})
+ return {html:rendered,query:url.QueryEscape("tea &coffee")}
+}`, `{"html":"<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1><p>Ada &amp; Lin</p><a href=\"#ZgotmplZ\">go</a>","query":"tea+%26coffee"}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.modules != "" {
+				if err := exec.Command("python3", "-c", "import "+test.modules).Run(); err != nil {
+					t.Skipf("Python dependencies unavailable: %s", test.modules)
+				}
+			}
+			if test.goPlugin && runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
+				t.Skip("Go plugins unavailable")
+			}
+			host := NewNativeHost(Host{})
+			defer host.Close()
+			p, err := CompileWithOptions(test.source, host, CompileOptions{Entry: "Main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, parallel := range []int{1, 7} {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				report, err := p.Run(ctx, nil, Options{Parallelism: parallel})
+				cancel()
+				if err != nil || display(t, report.Output) != test.want {
+					t.Fatal("interpreted", report, err)
+				}
+			}
+			executable, _ := buildNative(t, p, GoOptions{})
+			stdout, stderr, err := runNative(t, executable, "-parallel", "7")
+			if err != nil || strings.TrimSpace(stdout) != test.want {
+				t.Fatal("generated", stdout, stderr, err)
+			}
+			session, err := NewInteractiveSession(Host{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			nativeCell(t, session, test.source, "")
+			nativeCell(t, session, `Main()`, test.want)
+		})
+	}
+}
+
+func TestNativeReceiverProposals(t *testing.T) {
+	var authorizations atomic.Int64
+	host := NewNativeHost(Host{Authorize: func(context.Context, Request) error {
+		authorizations.Add(1)
+		return nil
+	}})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/resources", map[string]any{
+		"New":  func(n int) *bridgeCounter { return &bridgeCounter{Value: n} },
+		"Wrap": func(c *bridgeCounter) any { return struct{ Counter *bridgeCounter }{c} },
+	})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, `import go "application/resources" as res;counter=res.New(10)`, "")
+	before := authorizations.Load()
+	nativeCell(t, s, `request=effect counter.Add(2)`, "")
+	if authorizations.Load() != before {
+		t.Fatal("proposal construction reached the Host")
+	}
+	nativeCell(t, s, `counter.Value`, "10")
+	nativeCell(t, s, `fn Request(receiver:object,n:number)->effect {effect receiver.Add(n)}
+flow Update(receiver:object,n:number)->number {return perform Request(receiver,n)}
+flow Keep()->number {return perform effect counter.Add(1)}`, "")
+	nativeCell(t, s, `Update(counter,3)`, "13")
+	if err := s.Delete("counter"); err != nil {
+		t.Fatal(err)
+	}
+	nativeCell(t, s, `counter=res.New(100)`, "")
+	nativeCell(t, s, `perform request`, "15")
+	nativeCell(t, s, `Keep()`, "16")
+	nativeCell(t, s, `Update(counter,1)`, "101")
+	nativeCell(t, s, `box=res.Wrap(counter);nested=effect box.Counter.Add(2)`, "")
+	nativeCell(t, s, `counter.Value`, "101")
+	nativeCell(t, s, `perform nested`, "103")
+	nativeCell(t, s, `bad=effect counter.Add(1,2)`, "")
+	if _, err := s.Eval(context.Background(), `perform bad`, Options{}); err == nil || !strings.Contains(err.Error(), "E-ARITY") {
+		t.Fatal("method arity was not checked at perform", err)
+	}
+	nativeCell(t, s, `counter.Value`, "103")
+	nativeCell(t, s, `envelope={resource:counter};wrapped=effect envelope.resource.Add(4)`, "")
+	nativeCell(t, s, `perform wrapped`, "107")
+	nativeCell(t, s, `bundle={create:res.New};created=perform effect bundle.create(8);created.Value`, "8")
+	for _, source := range []string{`effect missing.Add(1)`, `effect counter.Add(res.New(1))`} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err == nil {
+			t.Fatal("accepted invalid proposal", source)
+		}
+	}
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "1", Text: `import go "application/resources" as res
+import lip "./lib.lip" as lib
+missing:object={}
+flow Main()->number {counter=res.New(4);return lib.Update(counter,3)}`},
+		"lib.lip": {Version: "1", Text: `fn Request(receiver:object,n:number)->effect {effect receiver.Add(n)}
+export flow Update(receiver:object,n:number)->number {return perform Request(receiver,n)}`},
+	}}
+	p, err := CompileSourceSet(set, host, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "7" {
+		t.Fatal(report, err)
+	}
+	// A dependency cannot capture an unresolved receiver from its importer.
+	lib := set.Sources["lib.lip"]
+	lib.Text = `export flow Update(receiver:object,n:number)->number {return perform effect missing.Add(n)}`
+	set.Sources["lib.lip"] = lib
+	if _, err := CompileSourceSet(set, host, CompileOptions{}); err == nil {
+		t.Fatal("dependency resolved an unbound native receiver")
+	}
+}
+
 func TestNativeHostAuthorizationAndRegisteredPrecedence(t *testing.T) {
 	denied := NewNativeHost(Host{Authorize: func(context.Context, Request) error { return errors.New("denied") }})
 	denied.Native.Go.RegisterPackage("application/denied", map[string]any{"Write": func() int { t.Fatal("denied native operation executed"); return 0 }})
@@ -503,6 +943,51 @@ flow Main()->object{return lib.Read()}`},
 	if err != nil || strings.TrimSpace(stdout) != `{"x":1}` {
 		t.Fatal(stdout, stderr, err)
 	}
+}
+
+func TestNativeModuleReceiverProposals(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python unavailable")
+	}
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "1", Text: `import python "io"
+import lip "./lib.lip" as lib
+fn Request(receiver:object,text:string)->effect {fail("importer must not run")}
+flow Main()->string {buffer=io.StringIO();return lib.Append(buffer,"hello")}`},
+		"lib.lip": {Version: "1", Text: `fn Request(receiver:object,text:string)->effect {effect receiver.write(text)}
+export flow Append(receiver:object,text:string)->string {
+ perform Request(receiver,text)
+ return perform effect receiver.getvalue()
+}`},
+	}}
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	p, err := CompileSourceSet(set, host, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 7})
+	if err != nil || display(t, report.Output) != `"hello"` {
+		t.Fatal(report, err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || strings.TrimSpace(stdout) != `"hello"` {
+		t.Fatal(stdout, stderr, err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.lip"), []byte(set.Sources["lib.lip"].Text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewInteractiveSession(Host{}, SessionOptions{ProjectRoot: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, set.Sources["main.lip"].Text, "")
+	nativeCell(t, s, `Main()`, `"hello"`)
+	nativeCell(t, s, `saved=io.StringIO();lib.Append(saved,"first")`, `"first"`)
+	nativeCell(t, s, `lib.Append(saved," second")`, `"first second"`)
 }
 
 func TestNativeHelperLexicalScope(t *testing.T) {

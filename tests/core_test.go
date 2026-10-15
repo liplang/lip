@@ -294,6 +294,122 @@ flow Main()->number {return 100000 |> loop}`,
 		}
 	}
 }
+
+const frameBudgetSource = `fn direct(n:number)->number {
+ if n==0 {0} else {1+direct(n-1)}
+}
+fn indirect(n:number, callback:function)->number {
+ if n==0 {0} else {1+callback(callback=callback,n=n-1)}
+}
+fn mapped(n:number)->number {
+ if n==0 {0} else {1+map([n-1],mapped)[0]}
+}
+fn folded(n:number)->number {
+ if n==0 {0} else {1+fold([n-1],0,fn(acc:number,x:number)->number {folded(x)})}
+}
+fn nullable(n:number)->number? {
+ if n==0 {null} else {value=nullable(n-1); value}
+}
+fn tail(n:number)->number {
+ if n==0 {0} else {n-1 |> tail}
+}
+fn first(n:number)->number {
+ if n==0 {0} else {1+second(n-1)}
+}
+fn second(n:number)->number {
+ if n==0 {0} else {1+first(n-1)}
+}
+flow Main(n:number,mode:string)->any {
+ return match mode {
+  "direct" => direct(n),
+  "indirect" => indirect(n,indirect),
+  "map" => mapped(n),
+  "fold" => folded(n),
+  "nullable" => nullable(n),
+  "mutual" => first(n),
+  _ => tail(n)
+ }
+}`
+
+var frameBudgetCases = []struct {
+	name, mode, want, code string
+	n, frames              int
+}{
+	{name: "past-1024", mode: "direct", n: 2048, want: "2048"},
+	{name: "default-boundary", mode: "direct", n: 9999, want: "9999"},
+	{name: "default-exhausted", mode: "direct", n: 10000, code: "E-BUDGET"},
+	{name: "higher-budget", mode: "direct", n: 12000, frames: 12001, want: "12000"},
+	{name: "exact-boundary", mode: "direct", n: 7, frames: 8, want: "7"},
+	{name: "one-frame-over", mode: "direct", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "infinite-non-tail", mode: "direct", n: -1, frames: 8, code: "E-BUDGET"},
+	{name: "indirect-named", mode: "indirect", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "map-callback", mode: "map", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "fold-callback", mode: "fold", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "mutual", mode: "mutual", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "nullable-success", mode: "nullable", n: 7, frames: 8, want: "null"},
+	{name: "nullable-failure", mode: "nullable", n: 8, frames: 8, code: "E-BUDGET"},
+	{name: "tail-reuses-single-frame", mode: "tail", n: 100000, frames: 1, want: "0"},
+	{name: "negative-budget", mode: "direct", n: 0, frames: -1, code: "E-VALUE"},
+}
+
+func TestNonTailFrameBudget(t *testing.T) {
+	p, err := Compile(frameBudgetSource, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range frameBudgetCases {
+		t.Run(tt.name, func(t *testing.T) {
+			report, err := p.Run(context.Background(), map[string]Value{"n": number(float64(tt.n)), "mode": textValue(tt.mode)}, Options{MaxFrames: tt.frames, MaxSteps: 2000000})
+			if tt.code == "" {
+				if err != nil || report.EntryOutput == nil || display(t, report.Output) != tt.want {
+					t.Fatalf("result: %+v, %v; want %s", report, err, tt.want)
+				}
+				return
+			}
+			d, ok := err.(*Diagnostic)
+			if !ok || d.Code != tt.code || report.EntryOutput != nil {
+				t.Fatalf("failure: %+v, %v; want %s without a success envelope", report, err, tt.code)
+			}
+			if tt.code == "E-BUDGET" && (report.Error == nil || report.Error.Code != tt.code || len(d.Position) == 0 || d.Line == 0 || d.SourceID != "main.lip") {
+				t.Fatalf("budget error lost its source or graph position: %+v", d)
+			}
+		})
+	}
+}
+
+func FuzzCompileAndRun(f *testing.F) {
+	for _, source := range []string{
+		`flow Main()->number{return 1}`,
+		`fn count(n:number)->number{if n==0{0}else{1+count(n-1)}} flow Main()->number{return count(40)}`,
+		`flow Main()->number{return for x in [1,2] with acc=0 {next acc+x}}`,
+		`flow Main()->list{facts=claim();for x in range(10) parallel {facts <+ x};return [row.value for row in facts]}`,
+		`flow Main()->void{for {}}`,
+		`flow Main()->any{return match null {number=>1,_=>null}}`,
+		"flow Main()->string{return \"\"\"\ntext\n\"\"\"}",
+		`flow Main()->number{return [}`, `fn f(`, "\xff", "", "# comment\r\n",
+	} {
+		f.Add(source)
+	}
+	f.Fuzz(func(t *testing.T, source string) {
+		if len(source) > 16384 {
+			t.Skip()
+		}
+		p, err := Compile(source, Host{})
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		report, err := p.Run(ctx, nil, Options{Parallelism: 7, MaxSteps: 1000, MaxNodes: 1000, MaxElements: 1024, MaxFrames: 32})
+		if err == nil && (report.Error != nil || report.EntryOutput == nil) {
+			t.Fatalf("successful run lost its output envelope: %+v", report)
+		}
+		if err != nil && report.EntryOutput != nil {
+			t.Fatal("failed run published a success envelope")
+		}
+	})
+}
+
 func TestPureOperations(t *testing.T) {
 	cases := map[string]string{
 		`{ len([0]); }`: "1", `{ len([0]); null }`: "null", `if false { 1 / 0 } else { 7 }`: "7", `[1 / x for x in [0,2] if x != 0]`: "[0.5]",

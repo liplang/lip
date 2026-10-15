@@ -33,6 +33,8 @@ type NativeLibraries struct {
 	packages map[string]*nativePackage
 	Python   string
 	Go       *GoAdapter
+	// Static forbids runtime package discovery/building in generated programs.
+	static bool
 }
 type nativeProcess struct {
 	cmd     *exec.Cmd
@@ -49,6 +51,37 @@ type nativePackage struct {
 	pkg        *types.Package
 	plugin     string
 	manual     bool
+	parameters map[string]nativeGoParameters
+}
+type nativeGoParameters struct {
+	names    []string
+	variadic bool
+}
+type nativeStaticValue struct{ typ types.Type }
+
+// Native syntax provenance is independent of the normative type/effect system.
+// Functions retain their result shape with their frozen lexical captures.
+type nativeShape struct {
+	native       bool
+	fields       map[string]nativeShape
+	items        []nativeShape
+	item, result *nativeShape
+	source       *expression
+}
+
+func (n *NativeLibraries) freezeStatic() { n.mu.Lock(); defer n.mu.Unlock(); n.static = true }
+
+func (n *NativeLibraries) registerStatic(path string, exports map[string]any, parameters map[string]nativeGoParameters) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.Go == nil {
+		n.Go = NewGoAdapter()
+	}
+	n.Go.RegisterPackage(path, exports)
+	if n.packages == nil {
+		n.packages = map[string]*nativePackage{}
+	}
+	n.packages[path] = &nativePackage{manual: true, parameters: parameters}
 }
 
 func NewNativeHost(base Host) Host {
@@ -85,6 +118,109 @@ func (n *NativeLibraries) Close() error {
 }
 
 const nativeReferenceKey = "$lip.native"
+
+type nativeRunKey struct{}
+type nativeSessionKey struct{}
+type nativeRun struct{ scope, owner, id string }
+
+func newNativeOwner() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(id[:]), nil
+}
+func newNativeRun(ctx context.Context, runID string, session bool) (nativeRun, error) {
+	id, err := newNativeOwner()
+	if err != nil {
+		return nativeRun{}, err
+	}
+	r := nativeRun{scope: "run", owner: runID + ":" + id, id: id}
+	if session {
+		r.scope = "session"
+		r.owner, _ = ctx.Value(nativeSessionKey{}).(string)
+	}
+	return r, nil
+}
+
+// New handles are retained only when reachable from a successful cell. Existing
+// session handles belong to that session until release/reset/close. A file run
+// revokes every handle it created, even if its output contains a reference.
+func (n *NativeLibraries) endRun(run nativeRun, values []Value) error {
+	keep := map[string]map[string]bool{"go": {}, "python": {}}
+	functions := map[*function]bool{}
+	environments := map[*environment]bool{}
+	var visit func(Value)
+	var env func(*environment)
+	env = func(e *environment) {
+		if e == nil || environments[e] {
+			return
+		}
+		environments[e] = true
+		for _, v := range e.values {
+			visit(v)
+		}
+		env(e.parent)
+	}
+	visit = func(v Value) {
+		if meta, ok := v.o[nativeReferenceKey]; ok && meta.k == Object {
+			language, _ := meta.o["language"].Text()
+			id, _ := meta.o["id"].Text()
+			if ids := keep[language]; ids != nil {
+				ids[id] = true
+			}
+		}
+		for _, x := range v.l {
+			visit(x)
+		}
+		for _, x := range v.o {
+			visit(x)
+		}
+		if v.f != nil && !functions[v.f] {
+			functions[v.f] = true
+			env(v.f.captures)
+		}
+		if v.p != nil {
+			for _, x := range v.p.positional {
+				visit(x)
+			}
+			for _, x := range v.p.named {
+				visit(x)
+			}
+		}
+	}
+	for _, v := range values {
+		visit(v)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.Go != nil {
+		n.Go.mu.Lock()
+		for id, owner := range n.Go.owners {
+			if owner.id == run.id && !keep["go"][id] {
+				delete(n.Go.objects, id)
+				delete(n.Go.owners, id)
+			}
+		}
+		n.Go.mu.Unlock()
+	}
+	if w := n.workers["python"]; w != nil && !w.dead {
+		payload := map[string]any{"module": "lip.cleanup", "action": "cleanup", "args": []any{}, "run": run.id, "keep": keep["python"]}
+		if err := json.NewEncoder(w.in).Encode(payload); err != nil {
+			w.dead = true
+			return diagnostic("E-RESOURCE", "native cleanup: "+err.Error())
+		}
+		var raw json.RawMessage
+		if err := w.decoder.Decode(&raw); err != nil {
+			w.dead = true
+			return diagnostic("E-RESOURCE", "native cleanup: "+err.Error())
+		}
+		if response := nativeResponse(raw); response.Error != nil {
+			return response.Error
+		}
+	}
+	return nil
+}
 
 // NativeDescription does not inspect or call the referenced object.
 func NativeDescription(v Value) (string, bool) {
@@ -126,6 +262,9 @@ func (n *NativeLibraries) discover(ctx context.Context, path string) (*nativePac
 		if members := n.Go.packageMembers(path); members != nil {
 			return &nativePackage{members: members, manual: true}, nil
 		}
+	}
+	if n.static {
+		return nil, diagnostic("E-IMPORT", "Go package was not statically registered: "+path)
 	}
 	// Export data is produced by the user's Go toolchain and module resolver.
 	// No per-package registry and no package initializers are involved here.
@@ -224,6 +363,23 @@ func nativeGoImportError(path string, err error) error {
 	return diagnostic("E-IMPORT", fmt.Sprintf("Go import %q failed: %s", path, message))
 }
 
+func nativeAction(op Operation) string {
+	if op.Language == "host" {
+		action := strings.SplitN(op.Member, ".", 2)[0]
+		if action == "get" || action == "prepare" || action == "call" {
+			return action
+		}
+		return op.Member
+	}
+	if op.Member == "perform.get" || strings.HasPrefix(op.Member, "perform.get.") {
+		return "get"
+	}
+	if strings.HasPrefix(op.Member, "perform.prepare.") {
+		return "prepare"
+	}
+	return "call"
+}
+
 func (n *NativeLibraries) contract(op Operation, action string) Contract {
 	c := Contract{Operation: op, Version: "lip-native-1", Params: []Parameter{{Name: "args", Schema: Schema{Type: "list"}}, {Name: "kwargs", Schema: Schema{Type: "object"}}}, Result: Schema{Type: "any"}, Effect: UnknownEffect}
 	c.Invoke = func(ctx context.Context, r Request) Response { return n.invoke(ctx, op, action, r) }
@@ -295,6 +451,13 @@ func (n *NativeLibraries) invoke(ctx context.Context, op Operation, action strin
 	args, _ := r.Positional[0].Native()
 	kwargs, _ := r.Positional[1].Native()
 	if pkg != nil && action == "call" {
+		if params, ok := pkg.parameters[op.Member]; ok {
+			xs, err := nativeOrderedGoArguments(params.names, params.variadic, args.([]any), kwargs.(map[string]any))
+			if err != nil {
+				return Rejected("E-ARITY", err.Error())
+			}
+			args, kwargs = xs, map[string]any{}
+		}
 		if sig := pkg.signatures[op.Member]; sig != nil {
 			xs, err := nativeGoArguments(sig, args.([]any), kwargs.(map[string]any))
 			if err != nil {
@@ -304,6 +467,9 @@ func (n *NativeLibraries) invoke(ctx context.Context, op Operation, action strin
 			if sig.TypeParams().Len() != 0 {
 				source, err := n.specialize(ctx, op, xs)
 				if err != nil {
+					if d, ok := err.(*Diagnostic); ok {
+						return Rejected(d.Code, d.Message)
+					}
 					return Rejected("E-TYPE", err.Error())
 				}
 				pkg = &nativePackage{source: source}
@@ -317,17 +483,33 @@ func (n *NativeLibraries) invoke(ctx context.Context, op Operation, action strin
 		if len(xs) == 0 {
 			return Rejected("E-SCHEMA", "missing native receiver")
 		}
-		ref, ok := xs[0].(map[string]any)
-		if !ok {
+		for {
+			ref, ok := xs[0].(map[string]any)
+			if !ok {
+				return n.dataAccess(ctx, action, op.Member, xs)
+			}
+			if meta, ok := ref[nativeReferenceKey].(map[string]any); ok {
+				language, _ = meta["language"].(string)
+				if language != "python" && language != "go" {
+					return Rejected("E-SCHEMA", "invalid native language")
+				}
+				break
+			}
+			// Immutable Data wrappers may hold native resources or callables.
+			// Resolve their field prefix here, at the authorized perform boundary,
+			// before delegating the remaining path to the owning native runtime.
+			if (action == "call" || action == "prepare") && strings.HasPrefix(op.Member, action+".") {
+				parts := strings.SplitN(strings.TrimPrefix(op.Member, action+"."), ".", 2)
+				if receiver, ok := ref[parts[0]]; ok {
+					xs[0] = receiver
+					op.Member = action
+					if len(parts) == 2 {
+						op.Member += "." + parts[1]
+					}
+					continue
+				}
+			}
 			return n.dataAccess(ctx, action, op.Member, xs)
-		}
-		meta, ok := ref[nativeReferenceKey].(map[string]any)
-		if !ok {
-			return n.dataAccess(ctx, action, op.Member, xs)
-		}
-		language, _ = meta["language"].(string)
-		if language != "python" && language != "go" {
-			return Rejected("E-SCHEMA", "invalid native language")
 		}
 	}
 	n.mu.Lock()
@@ -364,20 +546,27 @@ func (n *NativeLibraries) invoke(ctx context.Context, op Operation, action strin
 		pluginPath = pkg.plugin
 	}
 	member := op.Member
-	if action == "get" && member == "get" {
-		member = ""
+	if op.Language != "host" && (action == "get" || action == "prepare") {
+		prefix := "perform." + action
+		if member == prefix {
+			member = ""
+		} else {
+			member = strings.TrimPrefix(member, prefix+".")
+		}
 	}
 	if language == "go" {
 		if n.Go == nil {
 			n.Go = NewGoAdapter()
 		}
-		return n.Go.invoke(nativeGoRequest{Module: op.Path, Member: member, Action: action, Plugin: pluginPath, PluginID: pluginID, Args: args.([]any), Kwargs: kwargs.(map[string]any)})
+		run, _ := ctx.Value(nativeRunKey{}).(nativeRun)
+		return n.Go.invoke(nativeGoRequest{Run: run, Module: op.Path, Member: member, Action: action, Plugin: pluginPath, PluginID: pluginID, Args: args.([]any), Kwargs: kwargs.(map[string]any)})
 	}
 	w, err := n.start(ctx, language)
 	if err != nil {
 		return Rejected("E-IMPORT", err.Error())
 	}
-	payload := map[string]any{"language": language, "module": op.Path, "member": member, "action": action, "args": args, "kwargs": kwargs, "plugin": pluginPath}
+	run, _ := ctx.Value(nativeRunKey{}).(nativeRun)
+	payload := map[string]any{"scope": run.scope, "owner": run.owner, "run": run.id, "language": language, "module": op.Path, "member": member, "action": action, "args": args, "kwargs": kwargs, "plugin": pluginPath}
 	// No automatic restart/retry: termination might follow a completed write.
 	done := make(chan struct{})
 	watchDone := make(chan struct{})
@@ -421,7 +610,7 @@ func nativeResponse(raw []byte) Response {
 		return Response{Outcome: RejectedOutcome, Error: diagnostic("E-VALUE", message), KnownCompleted: true}
 	case "rejected":
 		response := Rejected(code, message)
-		response.boundaryFault = code == "E-SCHEMA" || code == "E-ARITY" || code == "E-TYPE" || code == "E-IMPORT" || code == "E-OPERATION" || code == "E-INDEX"
+		response.boundaryFault = code == "E-RESOURCE" || code == "E-SCHEMA" || code == "E-ARITY" || code == "E-TYPE" || code == "E-IMPORT" || code == "E-OPERATION" || code == "E-INDEX"
 		return response
 	case "uncertain":
 		return Uncertain(message)
@@ -495,6 +684,8 @@ func (n *NativeLibraries) specialize(ctx context.Context, op Operation, args []a
 	var dataType func(any) (string, error)
 	dataType = func(x any) (string, error) {
 		switch v := x.(type) {
+		case nativeStaticValue:
+			return types.TypeString(v.typ, func(p *types.Package) string { return qualify(p.Path()) }), nil
 		case string:
 			return "string", nil
 		case bool:
@@ -521,7 +712,8 @@ func (n *NativeLibraries) specialize(ctx context.Context, op Operation, args []a
 				if n.Go == nil {
 					return "", fmt.Errorf("generic Go arguments require Go native resources")
 				}
-				meta, err := n.Go.referenceTypeInfo(v)
+				run, _ := ctx.Value(nativeRunKey{}).(nativeRun)
+				meta, err := n.Go.referenceTypeInfo(v, run)
 				if err != nil {
 					return "", err
 				}
@@ -695,11 +887,18 @@ func (n *NativeLibraries) snapshotData(ctx context.Context, v Value) Response {
 }
 
 func nativeGoArguments(sig *types.Signature, pos []any, named map[string]any) ([]any, error) {
-	fixed := sig.Params().Len()
-	if sig.Variadic() {
+	names := make([]string, sig.Params().Len())
+	for i := range names {
+		names[i] = sig.Params().At(i).Name()
+	}
+	return nativeOrderedGoArguments(names, sig.Variadic(), pos, named)
+}
+func nativeOrderedGoArguments(names []string, variadic bool, pos []any, named map[string]any) ([]any, error) {
+	fixed := len(names)
+	if variadic {
 		fixed--
 	}
-	if !sig.Variadic() && len(pos) > fixed {
+	if !variadic && len(pos) > fixed {
 		return nil, fmt.Errorf("too many Go arguments")
 	}
 	args := make([]any, fixed)
@@ -714,8 +913,8 @@ func nativeGoArguments(sig *types.Signature, pos []any, named map[string]any) ([
 	}
 	for name, value := range named {
 		index := -1
-		for i := 0; i < sig.Params().Len(); i++ {
-			if sig.Params().At(i).Name() == name {
+		for i := range names {
+			if names[i] == name {
 				index = i
 				break
 			}
@@ -723,7 +922,7 @@ func nativeGoArguments(sig *types.Signature, pos []any, named map[string]any) ([
 		if index < 0 {
 			return nil, fmt.Errorf("unknown Go argument %s", name)
 		}
-		if sig.Variadic() && index == fixed {
+		if variadic && index == fixed {
 			if len(pos) > fixed {
 				return nil, fmt.Errorf("duplicate variadic argument %s", name)
 			}
@@ -742,7 +941,7 @@ func nativeGoArguments(sig *types.Signature, pos []any, named map[string]any) ([
 	}
 	for i, ok := range set {
 		if !ok {
-			return nil, fmt.Errorf("missing Go argument %s", sig.Params().At(i).Name())
+			return nil, fmt.Errorf("missing Go argument %s", names[i])
 		}
 	}
 	return append(args, tail...), nil

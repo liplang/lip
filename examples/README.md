@@ -1,8 +1,12 @@
 # 从 Hello World 到 Flow 组合、并行与外部调用
 
-这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
+[English](README.en.md) | [简体中文](README.md)
+
+这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
 
 第一次接触可运行 `./lipc learn`，跟随 18 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；多入口示例带 `-entry`，输入用 `-input` 或 `-entry-input`。
+
+REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
 ## 先记住五条规则
 
@@ -33,6 +37,8 @@
 
 `learn -lesson power` 与 `learn -lesson logarithm` 提供这两项练习。REPL 和 learn 都可用左右方向键修改输入，用上下方向键取回历史，Tab 补全、Ctrl-R 搜索历史；完整快捷键见 [README](../README.md#交互计算和学习)。
 
+REPL 也会显示库函数的返回值。`fmt.Print/Printf/Println` 的返回值包含写入字节数，因此 `fmt.Print("hello")` 显示为 `hello5`；它不是额外的打印动作。完整说明见 [README](../README.md#为什么-fmtprint-后面会显示数字)。
+
 ## 程序结构
 
 运行方式：`./lipc run examples/structures/文件名.lip`。
@@ -58,6 +64,7 @@
 | [15_inputs](advanced/15_inputs.lip) | 类型化 Flow 参数与 JSON 输入 | 使用下方带 `-input` 的命令 |
 | [16_snapshots](advanced/16_snapshots.lip) | 即时观察与完整读取的区别 | 完整数为 3，即时观察数允许 0–3 |
 | [21_business_failures](advanced/21_business_failures.lip) | 用 Data 表达失败、第三次失败停止 | `failures=3, visited=4` |
+| [27_linear_model](advanced/27_linear_model.lip) | 中心化最小二乘、训练/预测 Flow、MSE、奇异输入 | -entry Main; slope=2, intercept=1, predictions=[9,11] |
 | [refine](refine.lip) | 无 source 的 carry，迭代改进直到阈值 | `rounds=4, score=0.8` |
 | [evidence](evidence.lip) | 并行证据汇聚、完整报告 | `missing=["b","c"]` |
 

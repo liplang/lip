@@ -263,7 +263,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		var captures *environment
 		captures, err = env.frozen(freeNames(e))
 		if err == nil {
-			r.value = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: captures}}
+			r.value = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: captures, nativeResult: e.nativeResult}}
 		}
 	case "block":
 		return v.block(e.body, newEnvironment(env), tail)
@@ -389,7 +389,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		}
 		_, err = bindContract(contract, pos, named)
 		if err == nil {
-			r.value = Value{k: Effect, p: &proposal{contract, pos, named}}
+			r.value = Value{k: Effect, p: &proposal{contract: contract, positional: pos, named: named, nativeResult: e.nativeResult}}
 		}
 	case "perform":
 		var p Value
@@ -486,11 +486,11 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 	return r, err
 }
 func (v *evaluator) invoke(fn *function, args []Value) (Value, error) {
+	if v.depth >= v.run.opts.MaxFrames {
+		return Value{}, diagnostic("E-BUDGET", "non-tail call frame budget exhausted (limit: "+strconv.Itoa(v.run.opts.MaxFrames)+")")
+	}
 	v.depth++
 	defer func() { v.depth-- }()
-	if v.run.opts.MaxFrames > 0 && v.depth > v.run.opts.MaxFrames {
-		return Value{}, diagnostic("E-BUDGET", "non-tail call frame budget exhausted")
-	}
 	// A tail chain must validate the innermost return before its callers.
 	// Keep each type only at its last occurrence: passed duplicate checks are
 	// redundant, and the finite type set keeps proper tail calls bounded.

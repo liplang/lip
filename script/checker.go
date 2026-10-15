@@ -120,7 +120,8 @@ func checkFlow(s *syntax, host Host, name string) (*checker, error) {
 	defer func() { f.checking = false }()
 	view := *s
 	view.flowName, view.result, view.params, view.body = f.name, f.result, f.params, f.body
-	c, err := analyzeBindings(&view, host, nil)
+	view.cell = false
+	c, err := analyzeBindings(&view, host, s.initial)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +189,12 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 		c.declare(env, name, bindingInfo{info: pureInfo("function"), fn: f, static: true}, f.tok)
 	}
 	for name, info := range initial {
+		if s.functions[name] != nil {
+			continue
+		}
+		if _, declared := s.data[name]; declared {
+			continue
+		}
 		c.declare(env, name, info, token{site: -1})
 	}
 	for _, name := range functions {
@@ -211,8 +218,10 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 		c.collectWriters(stmt, i)
 	}
 	flow := env.child()
-	for name, info := range initial {
-		flow.bindings[name] = info
+	if s.cell {
+		for name, info := range initial {
+			flow.bindings[name] = info
+		}
 	}
 	for _, p := range s.params {
 		if strings.TrimSuffix(p.typ, "?") == "function" || strings.TrimSuffix(p.typ, "?") == "effect" {
@@ -671,9 +680,13 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		first := sub(e.x)
 		local := env.child()
 		local.bindings["$pipe"] = bindingInfo{info: first}
-		if e.y.x.tag != "id" {
+		target := e.y.name
+		if e.y.tag != "flow" && e.y.x.tag != "id" {
 			c.error(e.tok, "E-TYPE", "pipeline target must be a static declaration")
-		} else if binding, ok := env.find(e.y.x.name); ok && !binding.static {
+		} else if e.y.tag != "flow" {
+			target = e.y.x.name
+		}
+		if binding, ok := env.find(target); ok && !binding.static {
 			c.error(e.tok, "E-TYPE", "pipeline target must be a static declaration")
 		}
 		saved := c.voidOK

@@ -1,12 +1,12 @@
-# fn 是纯函数：不能 perform，不能捕获活的 Claim store。
-# fn 的值块以表达式给出结果，不写 Flow 的 return。
-# 函数是值，可以传参、返回和捕获不可变值。
+# fn is pure: it cannot perform or capture a live Claim store.
+# The final expression gives the fn result; an explicit final return is also allowed.
+# Functions are values: pass, return, and capture immutable values.
 fn make_adder(offset: number) -> function {
     fn(x: number) -> number { x + offset }
 }
 fn multiply(a: number, b: number) -> number { a * b }
 flow Closures() -> object {
     add_ten = make_adder(10)
-    # 用户函数允许命名参数；命名参数必须放在位置参数后面。
+    # User functions accept named arguments after all positional arguments.
     return {mapped: map([1, 2, 3], add_ten), product: multiply(4, b=5)}
 }

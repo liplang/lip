@@ -1,5 +1,5 @@
-# 尾调用把下一次调用直接作为函数结果，十万轮不增加调用栈深度。
-# 直接调用、互递归和通过 function 值间接调用都享有这条保证。
+# A tail call directly supplies the function result; 100,000 iterations do not grow the call stack.
+# The guarantee covers direct, mutually recursive, and indirect function-value tail calls.
 fn sum_to(n: number, acc: number) -> number {
     if n == 0 { acc } else { sum_to(n - 1, acc + n) }
 }

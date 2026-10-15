@@ -5,14 +5,390 @@ import (
 	"errors"
 	"fmt"
 	. "lip/script"
+	"os"
 	"os/exec"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+const parallelWorkSource = `import python "example.worker" as worker
+flow Main(n:number)->number {
+ facts=claim()
+ for x in range(n) parallel {
+  value=perform effect worker.read(x)
+  facts <+ value
+ }
+ return fold([row.value for row in facts],0,fn(acc:number,x:number)->number{acc+x})
+}`
+
+func TestHostRunLifecycle(t *testing.T) {
+	type leaseKey struct{}
+	for _, mode := range []string{"success", "failure", "budget", "cancel", "cleanup"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var active atomic.Int64
+			began, ended := 0, 0
+			host := testHost(func(ctx context.Context, r Request) Response {
+				active.Add(1)
+				defer active.Add(-1)
+				if ctx.Value(leaseKey{}) != "leased" {
+					t.Error("missing lease context")
+				}
+				if mode == "cancel" {
+					cancel()
+					return Uncertain("cancelled write")
+				}
+				return Result(r.Positional[0])
+			})
+			host.BeginRun = func(ctx context.Context, info RunInfo) (RunLease, error) {
+				began++
+				return RunLease{Context: context.WithValue(ctx, leaseKey{}, "leased"), End: func(ctx context.Context, end RunEnd) error {
+					ended++
+					if active.Load() != 0 || ctx.Err() != nil || end.RunID == "" || end.Journal == nil {
+						t.Error("cleanup preceded settlement or inherited cancellation", end)
+					}
+					if (mode == "failure" || mode == "budget" || mode == "cancel") && end.Error == nil {
+						t.Error("cleanup lost run failure")
+					}
+					if mode == "cleanup" {
+						return errors.New("lease cleanup failed")
+					}
+					return nil
+				}}, nil
+			}
+			body := `return perform effect worker.read(1)`
+			if mode == "failure" {
+				body = `x=perform effect worker.read(1);return fail("stop")`
+			}
+			p, err := Compile(`import python "example.worker" as worker;flow Main()->number{`+body+`}`, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{}
+			if mode == "budget" {
+				opts.MaxSteps = 1
+			}
+			report, err := p.Run(ctx, nil, opts)
+			if mode == "success" && err != nil || mode != "success" && err == nil {
+				t.Fatal(mode, report, err)
+			}
+			if began != 1 || ended != 1 {
+				t.Fatal("lifecycle count", began, ended)
+			}
+			if mode == "cleanup" && (len(report.CleanupErrors) != 1 || report.Error != nil || report.EntryOutput != nil) {
+				t.Fatal("cleanup fault became a node error or successful output", report)
+			}
+		})
+	}
+}
+
+func TestDiagnosticPhases(t *testing.T) {
+	_, err := Compile(`flow Main()->number{return missing}`, Host{})
+	if d, ok := err.(*Diagnostic); !ok || d.Phase != "static" {
+		t.Fatal(err)
+	}
+	p, err := Compile(`flow Main(n:number)->number{return 1/n}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Run(context.Background(), nil, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Phase != "host" {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), map[string]Value{"n": number(0)}, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Phase != "runtime" || report.Error.Phase != "runtime" {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	_, stderr, err := runNative(t, executable, "-input", `{"n":0}`)
+	if err == nil || !strings.Contains(stderr, "[runtime]") {
+		t.Fatal(stderr, err)
+	}
+}
+
+func recordPeak(peak *atomic.Int64, current int64) {
+	for old := peak.Load(); current > old; old = peak.Load() {
+		if peak.CompareAndSwap(old, current) {
+			return
+		}
+	}
+}
+
+func TestArbitraryParallelismOverlap(t *testing.T) {
+	limits := []int{3, 7, 17, 1238, 73295}
+	stress := 0
+	if setting := os.Getenv("LIP_STRESS_PARALLELISM"); setting != "" {
+		var err error
+		stress, err = strconv.Atoi(setting)
+		if err != nil || stress <= 0 {
+			t.Fatal("LIP_STRESS_PARALLELISM must be a positive integer")
+		}
+		found := false
+		for _, limit := range limits {
+			found = found || limit == stress
+		}
+		if !found {
+			limits = append(limits, stress)
+		}
+	}
+	for _, limit := range limits {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			began := time.Now()
+			items := limit
+			if limit == stress {
+				// This opt-in case requires enough memory for the requested real
+				// provider overlap, rather than just a large admission ceiling.
+			} else if limit > 2048 {
+				items = 2048
+			} else {
+				items += 5
+			}
+			firstWave := min(limit, items)
+			started := make(chan struct{}, items)
+			release := make(chan struct{})
+			var active, peak atomic.Int64
+			host := testHost(func(ctx context.Context, request Request) Response {
+				recordPeak(&peak, active.Add(1))
+				defer active.Add(-1)
+				started <- struct{}{}
+				select {
+				case <-release:
+					return Result(request.Positional[0])
+				case <-ctx.Done():
+					return Uncertain(ctx.Err().Error())
+				}
+			})
+			p, err := Compile(parallelWorkSource, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			done := make(chan Report, 1)
+			go func() {
+				report, _ := p.Run(ctx, map[string]Value{"n": number(float64(items))}, Options{Parallelism: limit, MaxNodes: items*3 + 100, MaxSteps: int64(items)*64 + 1000})
+				done <- report
+			}()
+			for i := 0; i < firstWave; i++ {
+				select {
+				case <-started:
+				case <-ctx.Done():
+					t.Fatalf("only %d/%d providers overlapped: %v", i, firstWave, ctx.Err())
+				}
+			}
+			close(release)
+			report := <-done
+			if report.Error != nil || report.EntryOutput == nil || num(report.Output) != float64(items*(items-1)/2) || len(report.Journal.Records()) != items || peak.Load() < int64(firstWave) || peak.Load() > int64(limit) || active.Load() != 0 {
+				t.Fatalf("limit=%d peak=%d active=%d calls=%d error=%v", limit, peak.Load(), active.Load(), len(report.Journal.Records()), report.Error)
+			}
+			t.Logf("limit=%d items=%d peak=%d nodes=%d elapsed=%s", limit, items, peak.Load(), len(report.Nodes), time.Since(began))
+		})
+	}
+}
+
+func TestParallelismConfiguration(t *testing.T) {
+	p, err := Compile(`flow Main()->number{return 1}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int{0, 1, 7, 1238, 73295, int(^uint(0) >> 1)} {
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: limit})
+		if err != nil || num(report.Output) != 1 {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
+	}
+	if _, err := p.Run(context.Background(), nil, Options{Parallelism: -1}); err == nil {
+		t.Fatal("negative parallelism silently selected sequential execution")
+	}
+}
+
+func TestGraphConstructionStopsAtNodeBudget(t *testing.T) {
+	var source strings.Builder
+	source.WriteString("flow Main()->number{if true {\n")
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&source, "value%d=%d\n", i, i)
+	}
+	source.WriteString("};return 7}")
+	p, err := Compile(source.String(), Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 73295, MaxNodes: 10})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-BUDGET" || len(report.Nodes) > 10 || report.EntryOutput != nil {
+		t.Fatalf("graph construction exceeded its budget: nodes=%d, error=%v", len(report.Nodes), err)
+	}
+}
+
+func TestLargeParallelNestedFlowsAndPermits(t *testing.T) {
+	for _, limit := range []int{7, 1238, 73295} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			var active, peak, calls atomic.Int64
+			host := testHost(func(ctx context.Context, request Request) Response {
+				recordPeak(&peak, active.Add(1))
+				defer active.Add(-1)
+				calls.Add(1)
+				return Result(request.Positional[0])
+			})
+			host.Resources = NewResourcePool(map[string]uint64{"connections": 11})
+			host.Contracts[0].Resources = map[string]uint64{"connections": 1}
+			p, err := CompileWithOptions(`import python "example.worker" as worker
+flow Read(x:number)->number {return perform effect worker.read(x)}
+flow Twice(x:number)->number {first=x |> Read;return first |> Read}
+flow Main(n:number)->number {
+ facts=claim()
+ for x in range(n) parallel {value=x |> Twice;facts <+ value}
+ return fold([row.value for row in facts],0,fn(acc:number,x:number)->number{acc+x})
+}`, host, CompileOptions{Entry: "Main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			report, err := p.Run(ctx, map[string]Value{"n": number(257)}, Options{Parallelism: limit, MaxNodes: 10000, MaxSteps: 100000})
+			if err != nil || num(report.Output) != 32896 || calls.Load() != 514 || len(report.Journal.Records()) != 514 || peak.Load() > int64(min(limit, 11)) || active.Load() != 0 {
+				t.Fatalf("limit=%d peak=%d active=%d calls=%d: %v", limit, peak.Load(), active.Load(), calls.Load(), err)
+			}
+		})
+	}
+}
+
+func TestLargeParallelCancellationReleasesPermits(t *testing.T) {
+	var active atomic.Int64
+	var cancelRun atomic.Bool
+	cancelRun.Store(true)
+	started := make(chan struct{}, 11)
+	host := testHost(func(ctx context.Context, request Request) Response {
+		active.Add(1)
+		defer active.Add(-1)
+		if cancelRun.Load() {
+			started <- struct{}{}
+			<-ctx.Done()
+			return Uncertain("cancelled")
+		}
+		return Result(request.Positional[0])
+	})
+	host.Resources = NewResourcePool(map[string]uint64{"connections": 11})
+	host.Contracts[0].Resources = map[string]uint64{"connections": 1}
+	p, err := Compile(parallelWorkSource, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Run(ctx, map[string]Value{"n": number(257)}, Options{Parallelism: 73295})
+		done <- err
+	}()
+	for i := 0; i < 11; i++ {
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("providers did not acquire available permits")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || active.Load() != 0 {
+			t.Fatalf("cancellation did not drain active calls: %v, %d", err, active.Load())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled run stranded workers or permit waiters")
+	}
+	cancelRun.Store(false)
+	next, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	if report, err := p.Run(next, map[string]Value{"n": number(23)}, Options{Parallelism: 1238}); err != nil || num(report.Output) != 253 {
+		t.Fatalf("later run could not reuse permits: %+v, %v", report, err)
+	}
+}
+
+func BenchmarkParallelScheduler(b *testing.B) {
+	host := testHost(func(_ context.Context, request Request) Response { return Result(request.Positional[0]) })
+	p, err := Compile(parallelWorkSource, host)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, items := range []int{1000, 10000, 73295} {
+		for _, limit := range []int{7, 1238, 73295} {
+			b.Run(fmt.Sprintf("items=%d/parallel=%d", items, limit), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					report, err := p.Run(context.Background(), map[string]Value{"n": number(float64(items))}, Options{Parallelism: limit, MaxNodes: 300000, MaxSteps: 10000000})
+					if err != nil || num(report.Output) != float64(items*(items-1)/2) {
+						b.Fatal(report.Error, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCompletedScopesReleaseLocalValues(t *testing.T) {
+	const source = `import python "example.worker" as worker
+flow Scratch(n:number)->number {payload=range(n);return len(payload)}
+flow Build(n:number)->list {return range(n)}
+flow Count(xs:list)->number {return len(xs)}
+flow Main(mode:string,n:number)->number {
+ before=perform effect worker.read(0)
+ facts=claim()
+ if mode=="block" {payload=range(n+before);facts <+ len(payload)}
+ for i in (if mode=="loop" {[0,1]} else {[]}) {
+  payload=range(n+before)
+  facts <+ len(payload)
+ }
+ size=match mode {
+  "flow" => n+before |> Scratch,
+  "pipeline" => n+before |> Build |> Count,
+  _ => fold([row.value for row in facts],0,fn(a:number,b:number)->number{a+b})
+ }
+ return perform effect worker.read(size)
+}`
+	for _, mode := range []string{"flow", "pipeline", "block", "loop"} {
+		t.Run(mode, func(t *testing.T) {
+			var baseline uint64
+			var retained int64
+			host := testHost(func(_ context.Context, request Request) Response {
+				runtime.GC()
+				var memory runtime.MemStats
+				runtime.ReadMemStats(&memory)
+				if num(request.Positional[0]) == 0 {
+					baseline = memory.HeapAlloc
+				} else {
+					retained = int64(memory.HeapAlloc) - int64(baseline)
+				}
+				return Result(request.Positional[0])
+			})
+			p, err := CompileWithOptions(source, host, CompileOptions{Entry: "Main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const elements = 300000
+			report, err := p.Run(context.Background(), map[string]Value{"mode": textValue(mode), "n": number(elements)}, Options{Parallelism: 7})
+			want := float64(elements)
+			if mode == "loop" {
+				want *= 2
+			}
+			if err != nil || num(report.Output) != want {
+				t.Fatal(report, err)
+			}
+			// A single payload contains tens of MiB of Values. Inspect the live
+			// heap before the run ends, allowing ample unrelated GC variation.
+			if retained > 12<<20 {
+				t.Fatalf("completed %s scope retained %d bytes", mode, retained)
+			}
+			t.Logf("live heap change before run completion: %d bytes", retained)
+		})
+	}
+}
 
 func TestParallelActuallyOverlapsAndSelectsEarliestError(t *testing.T) {
 	started := make(chan float64, 2)

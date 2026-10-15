@@ -24,15 +24,88 @@ type GoAdapter struct {
 	libraries  map[string]map[string]any
 	registered map[string]bool
 	seq        uint64
+	owners     map[string]nativeRun
+	active     nativeRun
 }
 type goNamespace string
+type nativeGoGeneric struct{ instances []any }
+
+// Match the same homogeneous Data types used by Go's build-time inference.
+// Resource arguments use their actual registered Go types.
+func (a *GoAdapter) argumentType(x any) reflect.Type {
+	switch v := x.(type) {
+	case nil:
+		return reflect.TypeFor[any]()
+	case []any:
+		t := reflect.TypeFor[any]()
+		for i, x := range v {
+			u := a.argumentType(x)
+			if i == 0 {
+				t = u
+			} else if t != u {
+				t = reflect.TypeFor[any]()
+				break
+			}
+		}
+		return reflect.SliceOf(t)
+	case map[string]any:
+		if _, ok := v[nativeReferenceKey]; ok {
+			return a.decoded(x).Type()
+		}
+		t := reflect.TypeFor[any]()
+		first := true
+		for _, x := range v {
+			u := a.argumentType(x)
+			if first {
+				t = u
+				first = false
+			} else if t != u {
+				t = reflect.TypeFor[any]()
+				break
+			}
+		}
+		return reflect.MapOf(reflect.TypeFor[string](), t)
+	default:
+		return reflect.TypeOf(x)
+	}
+}
+func (a *GoAdapter) genericInstance(g nativeGoGeneric, args []any) any {
+	for _, fn := range g.instances {
+		t := reflect.TypeOf(fn)
+		fixed := t.NumIn()
+		if t.IsVariadic() {
+			fixed--
+		}
+		if len(args) < fixed || !t.IsVariadic() && len(args) != fixed {
+			continue
+		}
+		match := true
+		for i, x := range args {
+			var want reflect.Type
+			if t.IsVariadic() && i >= fixed {
+				want = t.In(fixed).Elem()
+			} else {
+				want = t.In(i)
+			}
+			if a.argumentType(x) != want {
+				match = false
+				break
+			}
+		}
+		if match {
+			return fn
+		}
+	}
+	fail("E-TYPE", "generic Go argument types have no static instance; register concrete instances in HostSource")
+	return nil
+}
 
 func NewGoAdapter() *GoAdapter {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		panic(err)
 	}
-	return &GoAdapter{token: hex.EncodeToString(id[:]), objects: map[string]reflect.Value{}, libraries: map[string]map[string]any{}, registered: map[string]bool{}}
+	return &GoAdapter{token: hex.EncodeToString(id[:]), objects: map[string]reflect.Value{}, owners: map[string]nativeRun{}, libraries: map[string]map[string]any{}, registered: map[string]bool{}}
 }
 
 // RegisterPackage exposes supplied exports through import go. It is useful for
@@ -113,12 +186,14 @@ func (a *GoAdapter) Close() {
 	fresh := NewGoAdapter()
 	a.token = fresh.token
 	a.objects = fresh.objects
+	a.owners = fresh.owners
 	// Keep immutable registration metadata and loaded libraries. Go plugins cannot
 	// be unloaded; package initialization is a process lifetime event.
 }
 func (a *GoAdapter) invoke(r nativeGoRequest) Response {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.active = r.Run
 	response := a.respond(r)
 	raw, err := json.Marshal(response)
 	if err != nil {
@@ -128,6 +203,7 @@ func (a *GoAdapter) invoke(r nativeGoRequest) Response {
 }
 
 type nativeGoRequest struct {
+	Run                                      nativeRun
 	Module, Member, Action, Plugin, PluginID string
 	Args                                     []any
 	Kwargs                                   map[string]any
@@ -139,7 +215,8 @@ func (a *GoAdapter) reference(v reflect.Value) any {
 	a.seq++
 	id := strconv.FormatUint(a.seq, 10)
 	a.objects[id] = v
-	return map[string]any{"$lip.native": map[string]any{"language": "go", "token": a.token, "id": id, "type": v.Type().String(), "go_type": a.typeInfo(v.Type())}}
+	a.owners[id] = a.active
+	return map[string]any{"$lip.native": map[string]any{"language": "go", "token": a.token, "scope": a.active.scope, "owner": a.active.owner, "generation": a.token, "id": id, "type": v.Type().String(), "go_type": a.typeInfo(v.Type())}}
 }
 func (a *GoAdapter) typeInfo(t reflect.Type) any {
 	if t.Name() != "" {
@@ -158,12 +235,19 @@ func (a *GoAdapter) typeInfo(t reflect.Type) any {
 	return map[string]any{"kind": "unsupported"}
 }
 
-func (a *GoAdapter) referenceTypeInfo(x any) (info map[string]any, err error) {
+func (a *GoAdapter) referenceTypeInfo(x any, run nativeRun) (info map[string]any, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	previous := a.active
+	a.active = run
+	defer func() { a.active = previous }()
 	defer func() {
 		if p := recover(); p != nil {
-			err = diagnostic("E-SCHEMA", fmt.Sprint(p))
+			if fault, ok := p.(nativeGoFault); ok {
+				err = diagnostic(fault.code, fault.message)
+			} else {
+				err = diagnostic("E-RESOURCE", fmt.Sprint(p))
+			}
 		}
 	}()
 	v := a.decoded(x)
@@ -247,15 +331,18 @@ func (a *GoAdapter) decoded(x any) reflect.Value {
 		if raw, ok := m["$lip.native"]; ok {
 			r, ok := raw.(map[string]any)
 			if !ok {
-				fail("E-SCHEMA", "invalid resource reference")
+				fail("E-RESOURCE", "invalid resource reference")
 			}
 			if r["token"] != a.token || r["language"] != "go" {
-				fail("E-SCHEMA", "foreign, forged or expired native resource reference")
+				fail("E-RESOURCE", "foreign, forged or expired native resource reference")
 			}
 			id, _ := r["id"].(string)
 			v, ok := a.objects[id]
 			if !ok {
-				fail("E-SCHEMA", "expired native resource reference")
+				fail("E-RESOURCE", "expired native resource reference")
+			}
+			if a.active.owner != "" && a.owners[id].owner != a.active.owner {
+				fail("E-RESOURCE", "native resource belongs to another owner")
 			}
 			return v
 		}
@@ -491,7 +578,10 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 	for _, x := range r.Kwargs {
 		a.decoded(x)
 	}
-	name := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(r.Member, "get."), "call."), "prepare.")
+	name := r.Member
+	if r.Module == "lip.native" && (r.Action == "get" || r.Action == "prepare" || r.Action == "call") {
+		name = strings.TrimPrefix(name, r.Action+".")
+	}
 	var value any
 	if r.Module == "lip.native" {
 		if len(r.Args) == 0 {
@@ -503,10 +593,11 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 			if id, ok := meta["id"].(string); ok {
 				if r.Action == "release" {
 					delete(a.objects, id)
+					delete(a.owners, id)
 					return true
 				}
 				if temporary, _ := meta["temporary"].(bool); temporary && r.Action == "call" {
-					defer delete(a.objects, id)
+					defer func() { delete(a.objects, id); delete(a.owners, id) }()
 				}
 			}
 		}
@@ -545,7 +636,9 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 			return fmt.Sprint(v.Interface())
 		}
 		if r.Member != "call" && r.Member != "prepare" {
-			v = a.member(v, name)
+			for _, part := range strings.Split(name, ".") {
+				v = a.member(v, part)
+			}
 		}
 		value = v
 	} else {
@@ -597,6 +690,18 @@ func (a *GoAdapter) execute(r nativeGoRequest) any {
 		if typ, ok := v.Interface().(reflect.Type); ok {
 			value = typ
 		}
+		if generic, ok := v.Interface().(nativeGoGeneric); ok {
+			value = generic
+		}
+	}
+	if generic, ok := value.(nativeGoGeneric); ok {
+		if r.Action == "get" {
+			return a.reference(reflect.ValueOf(generic))
+		}
+		if r.Action == "prepare" {
+			return a.temporary(reflect.ValueOf(generic))
+		}
+		value = a.genericInstance(generic, r.Args)
 	}
 	if typ, ok := value.(reflect.Type); ok {
 		if r.Action == "get" {
@@ -690,6 +795,7 @@ func (a *GoAdapter) respond(r nativeGoRequest) (response map[string]any) {
 				seq, _ := strconv.ParseUint(id, 10, 64)
 				if seq > before {
 					delete(a.objects, id)
+					delete(a.owners, id)
 				}
 			}
 			code := "E-EFFECT-REJECTED"

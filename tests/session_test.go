@@ -86,6 +86,283 @@ func TestSessionRetainsValuesWithoutRepeatingCalls(t *testing.T) {
 	}
 }
 
+func TestSessionPreservesProposalOps(t *testing.T) {
+	for _, rhs := range []string{
+		`[effect worker.read(0)][0]`,
+		`{request:effect worker.read(0)}.request`,
+		`(fn()->effect {effect worker.read(0)})()`,
+		`for i in [1] with p=effect worker.read(0) {next p}`,
+	} {
+		t.Run(rhs, func(t *testing.T) {
+			var calls atomic.Int64
+			host := testHost(func(_ context.Context, r Request) Response {
+				calls.Add(1)
+				return Result(r.Positional[0])
+			})
+			s, err := NewSession(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			for _, source := range []string{`import python "example.worker" as worker`, `p=` + rhs, `alias=p`} {
+				if _, err := s.Eval(context.Background(), source, Options{}); err != nil {
+					t.Fatal(source, err)
+				}
+			}
+			for _, name := range []string{"p", "alias"} {
+				_, err := s.Eval(context.Background(), `for i in [1] parallel {perform `+name+`}`, Options{Parallelism: 7})
+				if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+					t.Fatalf("%s strengthened Unknown Ops: %v", name, err)
+				}
+			}
+			if calls.Load() != 0 {
+				t.Fatal("rejected parallel call reached provider")
+			}
+			if _, err := s.Eval(context.Background(), `perform alias`, Options{}); err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 1 {
+				t.Fatal("ordinary Unknown proposal was not performed")
+			}
+			for _, source := range []string{`direct=effect worker.read(2)`, `for i in [1] parallel {perform direct}`} {
+				if _, err := s.Eval(context.Background(), source, Options{Parallelism: 7}); err != nil {
+					t.Fatal(source, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionDeleteBindings(t *testing.T) {
+	var calls, alternate atomic.Int64
+	host := testHost(func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) })
+	other := host.Contracts[0]
+	other.Operation.Path = "other.worker"
+	other.Invoke = func(_ context.Context, r Request) Response {
+		alternate.Add(1)
+		return Result(number(num(r.Positional[0]) + 100))
+	}
+	host.Contracts = append(host.Contracts, other)
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eval := func(source, want string) {
+		t.Helper()
+		result, err := s.Eval(context.Background(), source, Options{Parallelism: 7})
+		if err != nil || want != "" && (!result.HasValue || display(t, result.Value) != want) {
+			t.Fatalf("%s: %+v, %v; want %s", source, result, err, want)
+		}
+	}
+	eval(`import python "example.worker" as worker`, "")
+	eval(`saved=perform effect worker.read(7)`, "7")
+	eval(`fn capture()->number {saved}`, "")
+	eval(`fn proposal()->effect {effect worker.read(5)}`, "")
+	eval(`request=proposal()`, "")
+	eval(`flow Source(x:number)->number {return x+saved}`, "")
+	eval(`flow Wrapper(x:number)->number {return x |> Source}`, "")
+	if err := s.Delete("saved", "Source", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"saved", "Source", "worker"} {
+		if _, ok := s.Values()[name]; ok || len(s.Complete(name)) != 0 {
+			t.Fatalf("deleted name remains visible: %s", name)
+		}
+		if _, err := s.Eval(context.Background(), name, Options{}); err == nil {
+			t.Fatalf("deleted name remains bound: %s", name)
+		}
+	}
+	eval(`Wrapper(1)`, "8")
+	eval(`saved=100`, "100")
+	eval(`flow Source(x:string)->string {return x}`, "")
+	eval(`import python "other.worker" as worker`, "")
+	eval(`Wrapper(1)`, "8")
+	eval(`capture()`, "7")
+	eval(`Source("new")`, `"new"`)
+	eval(`perform proposal()`, "5")
+	eval(`perform request`, "5")
+	eval(`worker.read(1)`, "101")
+	if calls.Load() != 3 || alternate.Load() != 1 {
+		t.Fatalf("deletion replayed or redirected actions: original=%d alternate=%d", calls.Load(), alternate.Load())
+	}
+	for _, names := range [][]string{nil, {"saved", "absent"}, {"saved", "bad.name"}, {"saved", ""}, {"len"}} {
+		if err := s.Delete(names...); err == nil {
+			t.Fatalf("invalid deletion succeeded: %v", names)
+		}
+		eval(`saved`, "100")
+	}
+	if err := s.Delete("capture", "Source", "worker", "request", "saved", "Wrapper", "proposal"); err != nil {
+		t.Fatal(err)
+	}
+	// Name reuse is independent of both the old and the new binding's kind.
+	eval(`capture=[1];Source={n:2};worker=fn()->number{3};request:bool=true;saved=fn(n:number)->number{n}`, "")
+	if err := s.Delete("capture", "Source", "worker", "request"); err != nil {
+		t.Fatal(err)
+	}
+	eval(`flow capture()->number {return 4};fn Source()->number {5};worker:number=6;request=claim();request <+ 7;[row.value for row in request]`, "[7]")
+	if err := s.Delete("request"); err != nil {
+		t.Fatal(err)
+	}
+	eval(`request=8`, "8")
+	eval(`facts=claim();facts <+ 9;snapshot=perform effect claim.snapshot("facts");[row.value for row in facts]`, "[9]")
+	if err := s.Delete("facts", "snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{
+		`facts=claim();if true {facts=3}`,
+		`facts=claim();for facts in [1] {facts <+ 3}`,
+		`facts=claim();f=fn(facts:number)->number{facts}`,
+	} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err == nil {
+			t.Fatalf("session symbol lowering allowed live Claim shadowing: %s", source)
+		} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-SHADOW-CLAIM" {
+			t.Fatalf("expected Claim shadowing diagnostic, got %v", err)
+		}
+	}
+	s.Reset()
+	if err := s.Delete("request"); err == nil {
+		t.Fatal("reset retained the public namespace")
+	}
+}
+
+func TestSessionDeleteModuleAlias(t *testing.T) {
+	dir := t.TempDir()
+	for name, offset := range map[string]string{"old.lip": "2", "new.lip": "20"} {
+		text := `export OFFSET:number=` + offset + `;export fn add(x:number)->number{x+OFFSET};export flow Read(x:number)->number{return x |> add}`
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := NewSession(Host{}, SessionOptions{ProjectRoot: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eval := func(source, want string) {
+		t.Helper()
+		result, err := s.Eval(context.Background(), source, Options{})
+		if err != nil || want != "" && display(t, result.Value) != want {
+			t.Fatalf("%s: %+v, %v", source, result, err)
+		}
+	}
+	eval(`import lip "./old.lip" as lib;fn keep(x:number)->number{lib.add(x)};flow Via(x:number)->number{return x |> lib.Read}`, "")
+	if err := s.Delete("lib"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Complete("lib")) != 0 {
+		t.Fatal("deleted module remains in completion")
+	}
+	eval(`lib=5`, "5")
+	eval(`keep(1)+Via(1)`, "6")
+	if err := s.Delete("lib"); err != nil {
+		t.Fatal(err)
+	}
+	eval(`import lip "./new.lip" as lib`, "")
+	eval(`lib.Read(1)+keep(1)+Via(1)`, "27")
+	if names := s.Complete("lib.R"); len(names) != 1 || names[0] != "lib.Read" {
+		t.Fatal(names)
+	}
+}
+
+func TestSessionPipelineClosures(t *testing.T) {
+	s, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eval := func(source, want string) {
+		t.Helper()
+		result, err := s.Eval(context.Background(), source, Options{})
+		if err != nil || want != "" && (!result.HasValue || display(t, result.Value) != want) {
+			t.Fatalf("%s: %+v, %v; want %s", source, result, err, want)
+		}
+	}
+	eval(`OFFSET:number=2;fn plus(x:number,delta:number)->number{x+delta}`, "")
+	eval(`count=fn(xs:list)->number{xs |>len |>plus(delta=OFFSET)}`, "")
+	eval(`nested=fn(x:number)->number{x |>plus(delta=x |>plus(delta=OFFSET))}`, "")
+	eval(`[count([1,2]),nested(3)]`, "[4,8]")
+	if err := s.Delete("OFFSET", "plus"); err != nil {
+		t.Fatal(err)
+	}
+	eval(`OFFSET=50;plus=100`, "100")
+	eval(`[count([1,2]),nested(3)]`, "[4,8]")
+}
+
+func FuzzSessionTransactions(f *testing.F) {
+	for _, source := range []string{
+		`flow Read(x:number)->number{return x+audit_guard};Read(2)`,
+		`fn add(x:number,delta:number)->number{x+delta};f=fn(x:number)->number{x |>add(delta=audit_guard)};f(2)`,
+		`facts=claim();for x in [1,2] parallel {facts <+ x};[row.value for row in facts]`,
+		`fn even(n:number)->bool{if n==0 {true} else {odd(n-1)}};fn odd(n:number)->bool{if n==0 {false} else {even(n-1)}};even(20)`,
+		`uncommitted=3;fail("stop")`, `if true {`, `return`, `1 |>len`, "\xff", "",
+	} {
+		f.Add(source)
+	}
+	f.Fuzz(func(t *testing.T, source string) {
+		if len(source) > 16384 {
+			t.Skip()
+		}
+		s, err := NewSession(Host{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		options := Options{Parallelism: 7, MaxSteps: 1000, MaxNodes: 1000, MaxElements: 1024, MaxFrames: 32}
+		if _, err := s.Eval(context.Background(), `audit_guard=17`, options); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err = s.Eval(ctx, source, options)
+		cancel()
+		if err != nil && len(s.Values()) != 1 {
+			t.Fatal("failed cell changed the saved namespace")
+		}
+		if err := s.Delete("audit_guard"); err != nil {
+			t.Fatal("cell lost an existing binding", err)
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		result, err := s.Eval(ctx, `audit_guard=23`, options)
+		if err != nil || !result.HasValue || num(result.Value) != 23 {
+			t.Fatal("session failed to recover or reuse a deleted name", result, err)
+		}
+	})
+}
+
+func TestSessionDeleteReleasesUncapturedValues(t *testing.T) {
+	s, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var memory runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&memory)
+	baseline := memory.HeapAlloc
+	for _, source := range []string{
+		`payload=range(300000)`,
+		`fn independent(n:number)->number{n+1}`,
+		`fn even(n:number)->bool{if n==0 {true} else {odd(n-1)}};fn odd(n:number)->bool{if n==0 {false} else {even(n-1)}}`,
+	} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err != nil {
+			t.Fatal(source, err)
+		}
+	}
+	if err := s.Delete("payload"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&memory)
+	if retained := int64(memory.HeapAlloc) - int64(baseline); retained > 12<<20 {
+		t.Fatalf("unrelated named functions retained deleted payload: %d bytes", retained)
+	}
+	result, err := s.Eval(context.Background(), `[independent(2),even(10000),odd(10001)]`, Options{MaxSteps: 1000000})
+	if err != nil || display(t, result.Value) != `[3,true,true]` {
+		t.Fatal(result, err)
+	}
+}
+
 func TestSessionFunctionsAndRunBoundaries(t *testing.T) {
 	s, _ := NewSession(Host{})
 	ctx := context.Background()
@@ -98,15 +375,14 @@ fn odd(n:number)->bool { if n==0 {false} else {even(n-1)} }`, Options{})
 	if err != nil || display(t, result.Value) != "true" {
 		t.Fatal(err)
 	}
-	for _, source := range []string{"facts=claim()", "flow Main()->number{return 1}", "return 1", "fn even()->number {1}"} {
+	for _, source := range []string{"fn even()->number {1}", "break", "continue"} {
 		if _, err := s.Eval(ctx, source, Options{}); err == nil {
 			t.Fatal("accepted invalid session boundary", source)
 		}
 	}
-	for _, source := range []string{"OFFSET:number=2", "export fn inc(x:number)->number{x+1}"} {
-		_, err := s.Eval(ctx, source, Options{})
-		if d, ok := err.(*Diagnostic); !ok || (d.Code != "E-SESSION" && d.Code != "E-MODULE") || !strings.Contains(d.Message, ":run") {
-			t.Fatal("file declarations need an actionable session diagnostic", source, err)
+	for _, source := range []string{"facts=claim()", "flow Main()->number{return 1}", "return 1", "OFFSET:number=2", "export fn inc(x:number)->number{x+1}"} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatalf("valid interactive syntax %s: %v", source, err)
 		}
 	}
 	if _, err := s.Eval(ctx, "1", Options{RunID: "reuse"}); err == nil {
@@ -115,6 +391,31 @@ fn odd(n:number)->bool { if n==0 {false} else {even(n-1)} }`, Options{})
 	result, err = s.Eval(ctx, "if true { 1 } else { 2 }", Options{})
 	if err != nil || display(t, result.Value) != "1" {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionRecoversFromFrameBudget(t *testing.T) {
+	s, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.Eval(ctx, `fn count(n:number)->number {if n==0 {0} else {1+count(n-1)}}
+saved=7`, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Eval(ctx, "uncommitted=count(10000)", Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-BUDGET" || result.HasValue || result.Report.EntryOutput != nil {
+		t.Fatalf("exhausted cell: %+v, %v", result, err)
+	}
+	if _, present := s.Values()["uncommitted"]; present {
+		t.Fatal("failed recursive call committed its binding")
+	}
+	for _, source := range []string{"count(2048)", "saved+count(1)"} {
+		if result, err := s.Eval(ctx, source, Options{}); err != nil || !result.HasValue {
+			t.Fatalf("session did not recover: %+v, %v", result, err)
+		}
 	}
 }
 
@@ -189,7 +490,7 @@ func TestSessionGeneralHelp(t *testing.T) {
 		}
 	}
 	for source, want := range map[string]string{
-		`help()`:            "LIP 1.0 交互帮助",
+		`help()`:            "LIP 1.0 interactive help",
 		`help(3)`:           "binary64",
 		`help(true)`:        "bool",
 		`help(null)`:        "null",
@@ -200,7 +501,7 @@ func TestSessionGeneralHelp(t *testing.T) {
 		`help(twice)`:       "fn(n:number) -> number",
 		`help(f)`:           "fn(n:number) -> number",
 		`help([twice][0])`:  "fn(n:number) -> number",
-		`help(p)`:           "尚未执行",
+		`help(p)`:           "not yet performed",
 		`help(worker)`:      "worker.read(value:number)",
 		`help(worker.read)`: "worker.read(value:number)",
 	} {
@@ -303,6 +604,11 @@ def nonfinite():
 	}
 	eval(`import python "math"`, "")
 	eval(`math.sqrt(3)`, "1.7320508075688772")
+	eval(`flow root(x:number)->number { return perform effect math.sqrt(x) }`, "")
+	eval(`12 |> root`, "3.4641016151377544")
+	eval(`root(12)`, "3.4641016151377544")
+	eval(`flow direct(x:number)->number { return math.sqrt(x) }`, "")
+	eval(`direct(9)`, "3")
 	eval(`help("math.sqrt")`, "")
 	for source, code := range map[string]string{
 		`failed=py.nonfinite()`:        "E-VALUE",
@@ -344,6 +650,9 @@ def nonfinite():
 	} else {
 		eval(`import python "numpy" as np`, "")
 		eval(`np.sqrt(3)`, "1.7320508075688772")
+		eval(`flow sqr(x:number)->number { return perform effect np.sqrt(x) }`, "")
+		eval(`12 |> sqr`, "3.4641016151377544")
+		eval(`sqr(12)`, "3.4641016151377544")
 		eval(`native_data(np.sqrt([1,4,9]))`, "[1,2,3]")
 		eval(`np.sum([1,2,3])`, "6")
 		eval(`np.all([true,false]).item()`, "false")
@@ -362,7 +671,7 @@ def nonfinite():
 }
 
 func TestCellContinuationUsesCoreGrammar(t *testing.T) {
-	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else", "x=\"\"\"\n:help\n", `"""quote ""`} {
+	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else", "flow sqrt(x:number)->number", "export fn add(x:number)->number {", "LIMIT:object={", "import lip", "x=\"\"\"\n:help\n", `"""quote ""`} {
 		if !CellIncomplete(source) {
 			t.Fatalf("unfinished cell considered complete: %q", source)
 		}
@@ -404,6 +713,97 @@ func TestInteractiveCLI(t *testing.T) {
 		stdout, stderr := run("x=2\nfn twice(n:number)->number {\n n*2\n}\ntwice(x)\nif true {\n x+1\n} else {0}\nx=9\nx\n:quit\n", "repl")
 		if stdout != "2\n4\n3\n2\n" || !strings.Contains(stderr, "E-DUPLICATE") {
 			t.Fatalf("stdout %q stderr %q", stdout, stderr)
+		}
+	})
+	t.Run("delete-bindings", func(t *testing.T) {
+		stdout, stderr := run("x=2\nfn keep()->number {x}\nflow Old()->number {return x}\nflow Saved()->number {return Old()}\n:del x, Old\nx=9\nOld=3\nkeep()+Saved()\n:del x, absent\nx\n:del\n:del x,\nx\n:del x\nx=4\n:vars\n:quit\n", "repl")
+		if !strings.HasPrefix(stdout, "2\n9\n3\n4\n9\n9\n4\n") || !strings.Contains(stdout, "x = 4\n") || strings.Contains(stdout, "$cell") || strings.Count(stderr, "E-NAME") != 1 || strings.Count(stderr, "E-SESSION") != 2 {
+			t.Fatalf("stdout %q stderr %q", stdout, stderr)
+		}
+		stdout, stderr = run("import python \"math\" as lib\n:del lib\nlib=2\n:del lib\nimport python \"cmath\" as lib\nhelp(lib)\n:del lib\nlib=3\n:quit\n", "repl")
+		if !strings.HasPrefix(stdout, "2\n") || !strings.HasSuffix(stdout, "3\n") || stderr != "" || strings.Contains(stdout, "$cell") {
+			t.Fatalf("alias reuse: stdout %q stderr %q", stdout, stderr)
+		}
+	})
+	t.Run("recursion-budget", func(t *testing.T) {
+		declaration := "fn count(n:number)->number {if n==0 {0} else {1+count(n-1)}}\n"
+		file := filepath.Join(dir, "recursion.lip")
+		if err := os.WriteFile(file, []byte(declaration+"flow Main(n:number)->number {return count(n)}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run("", "run", "-frames", "9", "-input", `{"n":8}`, file)
+		if stdout != "8\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+		// A failed :run inherits the REPL budget, and later cells still work.
+		input := declaration + "saved=7\nfailed=count(8)\nsaved+count(1)\n" +
+			":run -input '{\"n\":8}' '" + file + "'\n" +
+			":run -frames 9 -input '{\"n\":8}' '" + file + "'\nsaved\n:quit\n"
+		stdout, stderr = run(input, "repl", "-frames", "8")
+		if stdout != "7\n8\n8\n7\n" || strings.Count(stderr, "E-BUDGET") != 2 || strings.Count(stderr, "limit: 8") != 2 {
+			t.Fatalf("stdout %q stderr %q", stdout, stderr)
+		}
+		for _, args := range [][]string{
+			{"run", "-frames", "-1", file},
+			{"repl", "-frames", "-1"},
+		} {
+			cmd := exec.CommandContext(ctx, binary, args...)
+			if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "-frames must be nonnegative") {
+				t.Fatalf("negative frame budget: %s, %v", out, err)
+			}
+		}
+	})
+	t.Run("parallelism-configuration", func(t *testing.T) {
+		file := filepath.Join(dir, "parallelism.lip")
+		if err := os.WriteFile(file, []byte("flow Main()->number {return 7}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run("flow Value(x:number)->number {return x}\n3 |> Value\n:run '"+file+"'\n:run -parallel 17 '"+file+"'\n:quit\n", "repl", "-parallel", "73295")
+		if stdout != "3\n7\n7\n" || stderr != "" {
+			t.Fatalf("stdout %q stderr %q", stdout, stderr)
+		}
+		for _, args := range [][]string{{"run", "-parallel", "-1", file}, {"repl", "-parallel", "-1"}} {
+			cmd := exec.CommandContext(ctx, binary, args...)
+			if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "-parallel must be nonnegative") {
+				t.Fatalf("negative parallelism: %s, %v", out, err)
+			}
+		}
+	})
+	t.Run("script-syntax-and-multiline", func(t *testing.T) {
+		stdout, stderr := run(`flow Empty()->void {}
+if true {Empty()}
+# Keep a following else in the same statement.
+else {fail("wrong branch")}
+:begin
+export OFFSET:number=2
+flow First(x:number)->number {return x |> Second}
+flow Second(x:number)->number {return x+OFFSET}
+facts=claim()
+for x in [1,2] parallel {value=x |> First; facts <+ value}
+[row.value for row in facts]
+:end
+First(3)
+3 |> First
+:begin
+flow Rejected()->number {return missing}
+:end
+First(4)
+:begin
+flow Canceled()->number {return 0}
+:cancel
+:quit
+`, "repl")
+		if stdout != "[3,4]\n5\n5\n6\n" || !strings.Contains(stderr, "E-NAME") || strings.Count(stderr, "E-") != 1 {
+			t.Fatalf("stdout %q stderr %q", stdout, stderr)
+		}
+	})
+	t.Run("repl-project-import", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(dir, "repl-module.lip"), []byte(`export flow Twice(x:number)->number {return x*2}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run("import lip \"./repl-module.lip\" as lib\n3 |> lib.Twice\nlib.Twice(4)\n:quit\n", "repl", "-project", dir)
+		if stdout != "6\n8\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
 		}
 	})
 	t.Run("entry-selection-and-input", func(t *testing.T) {
@@ -482,7 +882,7 @@ func TestInteractiveCLI(t *testing.T) {
 	})
 	t.Run("learn-multiline-string", func(t *testing.T) {
 		stdout, stderr := run("\"\"\"Hello, LIP!\"\"\"\n:edit\nflow Hello()->string {\n s=\"\"\"\n:quit\n\"\"\"\n return \"Hello, LIP!\"\n}\n:submit\n:quit\n", "learn", "-lesson", "hello")
-		if stderr != "" || strings.Count(stdout, "通过") != 2 {
+		if stderr != "" || strings.Count(stdout, "Passed") != 2 {
 			t.Fatal(stdout, stderr)
 		}
 	})
@@ -530,7 +930,7 @@ func TestInteractiveCLI(t *testing.T) {
 			t.Skip("Python 3 unavailable")
 		}
 		stdout, stderr := run("3 ** -2\nimport python \"math\" as m\nm.sqrt(3)\nhelp(m.sqrt)\nimport python \"math\"\nmath.sqrt(3)\nhelp()\nhelp(len)\nhelp([1,2])\nm.missing()\nm.sqrt(4)\n:quit\n", "repl")
-		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 1.0 交互帮助\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
+		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 1.0 interactive help\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
 			t.Fatalf("stdout %q stderr %q", stdout, stderr)
 		}
 	})
@@ -552,14 +952,14 @@ func TestInteractiveCLI(t *testing.T) {
 		}
 		input.WriteString(":quit\n")
 		stdout, stderr = run(input.String(), "learn")
-		if lessons < 10 || stderr != "" || strings.Count(stdout, "用例 1 ✓") != lessons {
+		if lessons < 10 || stderr != "" || strings.Count(stdout, "Case 1 ✓") != lessons {
 			t.Fatal("lesson demos", lessons, stdout, stderr)
 		}
 	})
 	t.Run("answers-and-progress", func(t *testing.T) {
 		path := filepath.Join(dir, "progress.json")
 		stdout, stderr := run("36\nprice * count\n:next\n:quit\n", "learn", "-lesson", "bindings", "-progress", path)
-		if !strings.Contains(stdout, "通过") || !strings.Contains(stderr, "预期 35") {
+		if !strings.Contains(stdout, "Passed") || !strings.Contains(stderr, "expected 35") {
 			t.Fatal(stdout, stderr)
 		}
 		data, err := os.ReadFile(path)
@@ -578,18 +978,18 @@ func TestInteractiveCLI(t *testing.T) {
 			{"modules", "{total:n |>pricing.Adjust,base:pricing.BASE}"},
 		} {
 			stdout, stderr := run(test.answer+"\n:quit\n", "learn", "-lesson", test.id)
-			if stderr != "" || !strings.Contains(stdout, "LIP 1.0") || strings.Count(stdout, "用例 ") != 2 || !strings.Contains(stdout, "通过") {
+			if stderr != "" || !strings.Contains(stdout, "LIP 1.0") || strings.Count(stdout, "Case ") != 2 || !strings.Contains(stdout, "Passed") {
 				t.Fatal(test.id, stdout, stderr)
 			}
 		}
 		stdout, stderr := run("{total:n |>pricing.add,base:pricing.BASE}\n{total:n |>pricing.Adjust,base:pricing.BASE}\n:quit\n", "learn", "-lesson", "modules")
-		if !strings.Contains(stderr, "E-EXPORT") || strings.Count(stdout, "通过") != 1 {
+		if !strings.Contains(stderr, "E-EXPORT") || strings.Count(stdout, "Passed") != 1 {
 			t.Fatal("module rejection must allow retry", stdout, stderr)
 		}
 	})
 	t.Run("full-program", func(t *testing.T) {
 		stdout, stderr := run(":edit\nflow Squares(xs:list)->list {\n facts=claim()\n for x in xs parallel {facts <+ x*x}\n return [row.value for row in facts]\n}\n:submit\n:quit\n", "learn", "-lesson", "claim")
-		if stderr != "" || !strings.Contains(stdout, "通过") {
+		if stderr != "" || !strings.Contains(stdout, "Passed") {
 			t.Fatal(stdout, stderr)
 		}
 	})
@@ -670,6 +1070,11 @@ try:
     t.value('parse_n\t("3")\r', '3')            # core completion
     t.value('answer=5\r', '5')
     t.value('answ\t ** 2\r', '25')               # saved binding completion
+    t.send('flow Adjust(x:number)->number {return x+2}\r'); t.ready()
+    t.value('3 |> Adju\t\r', '5')                # retained Flow completion and pipeline
+    t.value('Adjust(4)\r', '6')
+    t.send('\x1b[200~flow Earlier(x:number)->number {return Later(x)}\nflow Later(x:number)->number {return x*2}\x1b[201~\r'); t.ready()
+    t.value('Earlier(3)\r', '6')                   # bracketed script paste with forward calls
     t.value('"你a"\x1b[D\x7f好\x1b[F\r', '"你好"')
     t.value('"Ae\u0301"\x1b[D\x7fB\x1b[F\r', '"AB"')
     t.value('"A👩‍💻"\x1b[D\x7fB\x1b[F\r', '"AB"')
@@ -686,11 +1091,11 @@ finally:
 t = Terminal('learn', '-lesson', 'arithmetic')
 try:
     t.send('(x + 2) * 4\x1b[D\x1b[C\x7f3\r')  # both arrows edit lesson answer
-    t.wait('通过'.encode()); t.ready()
+    t.wait('Passed'.encode()); t.ready()
     t.send(':edit\r'); t.ready()
     t.send('broken\x03'); t.wait(b'^C'); t.ready()
     t.send('(x + 2) * 3\r')
-    t.wait('通过'.encode()); t.ready()
+    t.wait('Passed'.encode()); t.ready()
 finally:
     t.close()
 
@@ -716,7 +1121,7 @@ try:
     assert ' at http://' in line, line
     base = line.split(' at ', 1)[1].strip()
     with urllib.request.urlopen(base+'/', timeout=5) as r:
-        assert r.status == 200 and 'LIP 网站' in r.read().decode()
+        assert r.status == 200 and 'LIP website' in r.read().decode()
     with urllib.request.urlopen(base+'/api/hello/Ada', timeout=5) as r:
         assert json.load(r) == {'message':'Hello, Ada'}
     request = urllib.request.Request(base+'/api/echo?x=1&x=2', data=b'{"value":3}', headers={'Content-Type':'application/json'})
@@ -810,5 +1215,339 @@ func TestSessionPipelineDeclarationSurvivesCells(t *testing.T) {
 	s.Reset()
 	if _, err := s.Eval(context.Background(), `3 |> twice`, Options{}); err == nil {
 		t.Fatal("reset retained a declaration")
+	}
+}
+
+// Keep every bundled language example usable as interactive declarations plus
+// an ordinary named invocation. This covers the same syntax and expected
+// behavior used by interpreter/generated-program conformance tests.
+func TestSessionScriptExamples(t *testing.T) {
+	cases := append([]exampleCase(nil), examples...)
+	for _, name := range []string{"23_home", "24_echo", "25_greeting"} {
+		cases = append(cases, exampleCase{path: "web/" + name + ".lip", input: `{"request":{"params":{"name":"Ada"},"query":{"tag":["one","two"]},"json":{"value":3}}}`})
+	}
+	for _, example := range cases {
+		t.Run(example.path, func(t *testing.T) {
+			host := Host{}
+			if example.demo {
+				if _, err := exec.LookPath("python3"); err != nil {
+					t.Skip("demo Host needs Python 3")
+				}
+				var err error
+				host, err = DemoHost()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			source, err := os.ReadFile(filepath.Join("..", "examples", example.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			program, err := CompileWithOptions(string(source), host, CompileOptions{Entry: example.entry})
+			if err != nil {
+				t.Fatal(err)
+			}
+			build, _ := program.BuildInfo().Fields()
+			entry, _ := build["entry"].Text()
+			input := example.input
+			if input == "" {
+				input = "{}"
+			}
+			call := entry + "("
+			value, err := DecodeData([]byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fields, _ := value.Fields()
+			for name, value := range fields {
+				call += name + "=" + display(t, value) + ","
+			}
+			call += ")"
+			s, err := NewSession(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if strings.HasPrefix(example.path, "web/") {
+				report, err := program.Run(ctx, fields, Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				example.want = display(t, report.Output)
+			}
+			if result, err := s.Eval(ctx, string(source), Options{}); err != nil || result.HasValue {
+				t.Fatalf("declarations: %+v, %v", result, err)
+			}
+			// Repeated calls check that cached syntax and Claim instances remain
+			// independent even when the previous call checked/lowered pipelines.
+			for _, parallel := range []int{1, 4} {
+				result, err := s.Eval(ctx, call, Options{Parallelism: parallel, MaxSteps: 10000000})
+				if err != nil || !result.HasValue {
+					t.Fatalf("%s: %+v, %v", call, result, err)
+				}
+				checkExample(t, example, display(t, result.Value))
+			}
+		})
+	}
+}
+
+func TestSessionFlowTransactionsAndClaims(t *testing.T) {
+	var calls atomic.Int64
+	host := testHost(func(_ context.Context, request Request) Response {
+		calls.Add(1)
+		return Result(request.Positional[0])
+	})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	eval := func(source, want string) CellResult {
+		t.Helper()
+		result, err := s.Eval(ctx, source, Options{Parallelism: 4})
+		if err != nil {
+			t.Fatalf("%s: %v", source, err)
+		}
+		if want != "" && (!result.HasValue || display(t, result.Value) != want) {
+			t.Fatalf("%s: %+v", source, result)
+		}
+		return result
+	}
+	eval(`import python "example.worker" as worker`, "")
+	eval(`saved = perform effect worker.read(7)`, "7")
+	eval(`export OFFSET:number=2`, "")
+	eval(`export fn plus(x:number)->number {x+OFFSET+saved}`, "")
+	eval(`flow Read(x:number)->number {return perform effect worker.read(x)}`, "")
+	eval(`flow Add(x:number)->number {return x |> plus}`, "")
+	eval(`flow Main(x:number)->object {
+    facts=claim()
+    for n in [x,x+1] parallel { value=n |> Read |> Add; facts <+ value }
+    return {values:[row.value for row in facts],run:facts[0].run_id}
+}`, "")
+	if calls.Load() != 1 {
+		t.Fatal("declarations performed an action")
+	}
+	first := eval(`Main(1)`, "")
+	second := eval(`1 |> Main`, "")
+	a, _ := first.Value.Fields()
+	b, _ := second.Value.Fields()
+	if display(t, a["values"]) != "[10,11]" || display(t, b["values"]) != "[10,11]" || display(t, a["run"]) == display(t, b["run"]) || calls.Load() != 5 {
+		t.Fatal("Flow calls reused stores or replayed historical calls", display(t, first.Value), display(t, second.Value), calls.Load())
+	}
+	for source, code := range map[string]string{
+		`flow Bad()->number {return unknown}`:                                 "E-NAME",
+		`flow Recur()->number {return Recur()}`:                               "E-FLOW-CYCLE",
+		`flow Impure()->number {return Read(perform effect worker.read(99))}`: "E-PURITY",
+		`fn impure()->number {Read(1)}`:                                       "E-PURITY",
+		`Main()`:                                                              "E-ARITY",
+		`Main("wrong")`:                                                       "E-TYPE",
+		`flow Read()->null {return null}`:                                     "E-DUPLICATE",
+		`Read=1`:                                                              "E-DUPLICATE",
+	} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != code {
+			t.Fatalf("%s: expected %s, got %v", source, code, err)
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatal("rejected syntax performed an action")
+	}
+	if _, err := s.Eval(ctx, `flow Uncommitted()->number {return 8}; temporary=Read(9); fail("stop")`, Options{}); err == nil {
+		t.Fatal("failed cell succeeded")
+	}
+	if _, err := s.Eval(ctx, `Uncommitted()`, Options{}); err == nil {
+		t.Fatal("failed cell committed a Flow")
+	}
+	if _, ok := s.Values()["temporary"]; ok || calls.Load() != 6 {
+		t.Fatal("failed transaction or action replay")
+	}
+	eval(`Read(3)`, "3")
+	eval(`facts=claim(); for n in [1,2] parallel {facts <+ n}; [row.value for row in facts]`, "[1,2]")
+	eval(`[row.value for row in facts]`, "[1,2]")
+	if _, err := s.Eval(ctx, `facts <+ 3`, Options{}); err == nil {
+		t.Fatal("active Claim escaped its run")
+	}
+	if names := s.Complete("Mai"); len(names) != 1 || names[0] != "Main" {
+		t.Fatal(names)
+	}
+	s.Reset()
+	if _, err := s.Eval(ctx, `Main(1)`, Options{}); err == nil {
+		t.Fatal("reset retained a Flow")
+	}
+}
+
+func TestSessionStatementGrammar(t *testing.T) {
+	var calls atomic.Int64
+	s, _ := NewSession(testHost(func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) }))
+	defer s.Close()
+	ctx := context.Background()
+	for _, source := range []string{
+		`import python "example.worker" as worker`,
+		`if true { worker.read(1) }`,
+		"if false { worker.read(99) }\nelse {worker.read(2)}",
+		`if false {a=1} else if true {a=2;worker.read(a)} else {worker.read(99)}`,
+		`match 2 {1 => worker.read(99), 2 if true => {a=3;worker.read(a)}, _ => worker.read(99)}`,
+		`for n in [1,2] {if n==1 {continue};worker.read(n);break}`,
+		`return`,
+		`flow Empty()->void {}`,
+		`if true {Empty()} else {Empty()}`,
+		`match true {true => Empty(), _ => Empty()}`,
+	} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatalf("%s: %v", source, err)
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatal("statement control flow", calls.Load())
+	}
+	for source, want := range map[string]string{
+		"\"\"\"first\r\nsecond\"\"\"":                                    `"first\u000asecond"`,
+		`if true {1} else {2}`:                                           "1",
+		`match 2 {1 => 3, _ => 4}`:                                       "4",
+		`{x=2; if true {x*3} else {0}}`:                                  "6",
+		`for with n=0 {if n<3 {next n+1} else {break n}}`:                "3",
+		`for n in {items:[1,2]}.items with total=0 {next total+n}`:       "3",
+		`for n in if true {[1,2]} else {[]} with total=0 {next total+n}`: "3",
+	} {
+		r, err := s.Eval(ctx, source, Options{})
+		if err != nil || !r.HasValue || display(t, r.Value) != want {
+			t.Fatal(source, r, err)
+		}
+	}
+}
+
+func TestSessionFrozenModules(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, source string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("pricing.lip", `import host "app" as app
+RATE:number=2
+export fn total(x:number)->number {x*RATE}
+export fn request(x:number)->effect {effect app.read(x*RATE)}
+export flow Quote(x:number)->number {return perform effect app.read(total(x))}`)
+	write("extra.lip", `import host "other" as app
+export fn increment(x:number)->number {x+1}`)
+	var calls atomic.Int64
+	host := testHost(func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) })
+	host.Contracts[0].Operation = Operation{Language: "host", Path: "app", Member: "read"}
+	s, err := NewSession(host, SessionOptions{ProjectRoot: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	eval := func(source, want string) {
+		t.Helper()
+		r, err := s.Eval(ctx, source, Options{})
+		if err != nil || want != "" && display(t, r.Value) != want {
+			t.Fatalf("%s: %+v, %v", source, r, err)
+		}
+	}
+	eval(`import lip "./pricing.lip" as pricing`, "")
+	if calls.Load() != 0 {
+		t.Fatal("import executed a Flow")
+	}
+	eval(`total=pricing.total`, "")
+	eval(`request=pricing.request`, "")
+	eval(`perform request(3)`, "6")
+	if names := s.Complete("pricing.Q"); len(names) != 1 || names[0] != "pricing.Quote" {
+		t.Fatal(names)
+	}
+	eval(`flow Quote(x:number)->number {return x |> pricing.Quote}`, "")
+	eval(`Quote(3)`, "6")
+	write("pricing.lip", `export fn total(x:number)->number {x*100}`)
+	eval(`import lip "./extra.lip" as extra`, "")
+	eval(`total(3) |> extra.increment`, "7")
+	eval(`3 |> pricing.total`, "6")
+	eval(`perform request(3)`, "6")
+	eval(`Quote(3)`, "6")
+	if calls.Load() != 4 {
+		t.Fatal("module closure replayed an action", calls.Load())
+	}
+	for source, code := range map[string]string{
+		`pricing.RATE`:                           "E-EXPORT",
+		`pricing`:                                "E-TYPE",
+		`import lip "../outside.lip" as outside`: "E-MODULE",
+		`import lip "./absent.lip" as absent`:    "E-MODULE",
+	} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != code {
+			t.Fatal(source, err)
+		}
+	}
+	write("cycle.lip", `import lip "./cycle.lip" as self`)
+	if _, err := s.Eval(ctx, `import lip "./cycle.lip" as cycle`, Options{}); err == nil {
+		t.Fatal("module cycle accepted")
+	}
+	moved := dir + "-moved"
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	// Frozen imports no longer depend on the source directory at evaluation.
+	func() {
+		defer func() {
+			if err := os.Rename(moved, dir); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		eval(`total(4)`, "8")
+		eval(`Quote(4)`, "8")
+	}()
+	for name := range s.Values() {
+		if strings.HasPrefix(name, "$") {
+			t.Fatal("private linker name exposed", name)
+		}
+	}
+	s.Reset()
+	eval(`import lip "./pricing.lip" as pricing`, "")
+	eval(`pricing.total(3)`, "300")
+}
+
+func TestSessionFlowNamesRespectPrelude(t *testing.T) {
+	var calls atomic.Int64
+	s, err := NewInteractiveSession(Host{Authorize: func(context.Context, Request) error { calls.Add(1); return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	for _, source := range []string{
+		`flow Local()->number {native_data=1;native_release=2;help=3;return native_data+native_release+help}`,
+		`flow Document()->string {return help(1)}`,
+	} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatal(source, err)
+		}
+	}
+	// Names local to a saved Flow must not shadow a later cell's prelude.
+	result, err := s.Eval(ctx, `native_data({x:1})`, Options{})
+	if err != nil || display(t, result.Value) != `{"x":1}` {
+		t.Fatal(result, err)
+	}
+	before := calls.Load()
+	for _, source := range []string{
+		`flow help(x:number)->number {return x+1}`,
+		`flow native_data(x:number)->number {return x+2}`,
+		`flow native_release(x:number)->number {return x+3}`,
+	} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatal(source, err)
+		}
+	}
+	result, err = s.Eval(ctx, `[help(1),native_data(2),native_release(3),Local()]`, Options{})
+	if err != nil || result.Help || display(t, result.Value) != `[2,4,6,6]` || calls.Load() != before {
+		t.Fatal(result, err, calls.Load())
+	}
+	result, err = s.Eval(ctx, `Document()`, Options{})
+	text, _ := result.Value.Text()
+	if err != nil || !strings.Contains(text, "binary64") {
+		t.Fatal("saved tooling environment changed", result, err)
 	}
 }

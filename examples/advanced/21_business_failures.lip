@@ -1,6 +1,6 @@
-# 业务失败应显式成为普通 Data，才能统计、分支或继续下一项。
-# fail("...") 是程序错误，会终止节点；不是可 catch 的业务值。
-# carry 到第三个失败就停止，尚未处理的后续项不会执行。
+# Represent recoverable business failures as Data to count, branch, or continue.
+# fail("...") terminates the node with a program error; it is not a catchable business value.
+# The carry stops on the third failure; later items are never processed.
 flow BusinessFailures() -> object {
     stopped = for result in [
         {ok: false}, {ok: true}, {ok: false}, {ok: false}, {ok: true}

@@ -1,5 +1,5 @@
-# 不访问外部服务的最小迭代改进例子。
-# for with 没有 source，会持续 next，直到 break 返回结果。
+# A minimal iterative improvement example without external services.
+# Source-free for with keeps taking next steps until break returns a result.
 flow Refine() -> object {
     result = for with s = {score: 0, rounds: 0} {
         improved = {score: s.score + 0.2, rounds: s.rounds + 1}

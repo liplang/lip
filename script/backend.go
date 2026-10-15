@@ -2,26 +2,29 @@ package script
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"fmt"
 	"go/ast"
 	"go/format"
 	goparser "go/parser"
 	gotoken "go/token"
+	"go/types"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// Runtime sources are bundled with the compiler. Emitted programs use only
-// the standard library; they need neither the compiler nor a source checkout.
+// Runtime sources are bundled with the compiler. The runtime uses the standard
+// library; selected Go libraries are linked from the application's module.
+// Executables need neither the compiler nor a source checkout.
 //
 //go:embed compiler.go checker.go values.go evaluator.go scheduler.go host.go adapters.go native.go native_workers.go go_adapter.go
 var runtimeSources embed.FS
 
 // GoOptions supplies trusted native integration code, never LIP program text.
 // HostSource is a Go file in package main with func generatedHost() (Host,error).
-// Its imports may use standard library packages. Operation contracts must match
+// Its imports resolve in the application's Go module. Contracts must match
 // the Host used by Compile. With no operations, HostSource may be empty.
 type GoOptions struct{ HostSource string }
 
@@ -59,7 +62,8 @@ func DemoHostGoSource() (string, error) {
 // EmitGo compiles a checked program to self-contained Go source. Every LIP
 // expression and local statement becomes a specialized Go function. Static
 // region metadata is retained for the shared scheduler, not reparsed at run time.
-func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
+func (p *Program) EmitGo(options GoOptions) (source []byte, err error) {
+	defer func() { err = diagnosticPhase(err, "static") }()
 	needsHostSource := false
 	for _, c := range p.host.Contracts {
 		needsHostSource = needsHostSource || c.Version != "lip-native-1"
@@ -124,20 +128,18 @@ func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
 	body.WriteString("func generatedProgram(host Host)(*Program,error){\n")
 	if p.host.Native != nil {
 		body.WriteString("host=NewNativeHost(host)\n")
+		body.WriteString("host.Contracts=append([]Contract(nil),host.Contracts...)\n")
+		registration, err := g.staticGoLibraries(imports)
+		if err != nil {
+			return nil, err
+		}
+		body.WriteString(registration)
+		body.WriteString("host.Native.freezeStatic()\n")
 		for _, c := range p.host.Contracts {
 			if c.Version != "lip-native-1" {
 				continue
 			}
-			action := "call"
-			if c.Operation.Member == "get" || strings.HasPrefix(c.Operation.Member, "get.") {
-				action = "get"
-			}
-			if strings.HasPrefix(c.Operation.Member, "prepare.") {
-				action = "prepare"
-			}
-			if c.Operation.Language == "host" && !strings.HasPrefix(c.Operation.Member, "call.") && c.Operation.Member != "call" && action != "get" && action != "prepare" {
-				action = c.Operation.Member
-			}
+			action := nativeAction(c.Operation)
 			fmt.Fprintf(&body, "host.Contracts=append(host.Contracts,host.Native.contract(Operation{%s,%s,%s},%s))\n", quote(c.Operation.Language), quote(c.Operation.Path), quote(c.Operation.Member), quote(action))
 		}
 	}
@@ -245,6 +247,10 @@ func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
 	}
 	sort.Strings(keys)
 	for _, name := range keys {
+		if strings.HasPrefix(name, "_lipinit") {
+			fmt.Fprintf(&output, "_ %s\n", quote(imports[name]))
+			continue
+		}
 		if used[name] {
 			fmt.Fprintf(&output, "%s %s\n", name, quote(imports[name]))
 		}
@@ -256,6 +262,302 @@ func (p *Program) EmitGo(options GoOptions) ([]byte, error) {
 		return nil, fmt.Errorf("format generated Go: %w", err)
 	}
 	return formatted, nil
+}
+
+// Link automatic exports and generic instances into the executable. Discovery
+// and Go type inference happen here, never in a deployed operation.
+func (g *goEmitter) staticGoLibraries(imports map[string]string) (string, error) {
+	n := g.program.host.Native
+	ctx := context.Background()
+	aliases := g.program.check.aliases
+	instances := map[Operation]map[string]string{}
+	visiting := map[*expression]bool{}
+	var example func(*expression) (any, error)
+	var proposalExample func(*expression) (any, error)
+	resolve := func(e *expression) (Operation, *nativePackage, *types.Signature, error) {
+		parts := strings.SplitN(e.name, ".", 2)
+		if len(parts) != 2 {
+			return Operation{}, nil, nil, fmt.Errorf("not a native Go proposal")
+		}
+		im := aliases[parts[0]]
+		if im.language != "go" {
+			return Operation{}, nil, nil, fmt.Errorf("not a native Go proposal")
+		}
+		op := Operation{"go", im.path, parts[1]}
+		pkg, err := n.discover(ctx, im.path)
+		if err != nil {
+			return op, nil, nil, err
+		}
+		return op, pkg, pkg.signatures[op.Member], nil
+	}
+	// Rename only package selectors. This retains full Go syntax for named,
+	// nested and third-party type arguments without textual substitutions.
+	library := func(source string) (map[string]string, *ast.File, error) {
+		file, err := goparser.ParseFile(gotoken.NewFileSet(), "library.go", source, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+		rename := map[string]string{}
+		for _, im := range file.Imports {
+			path, _ := strconv.Unquote(im.Path.Value)
+			old := importName(im, path)
+			if old == "_" {
+				continue
+			}
+			name := ""
+			for alias, p := range imports {
+				if p == path && alias != "_" {
+					name = alias
+					break
+				}
+			}
+			if name == "" {
+				for i := 0; ; i++ {
+					candidate := fmt.Sprintf("nativepkg%d", i)
+					if _, ok := imports[candidate]; !ok {
+						name = candidate
+						break
+					}
+				}
+				imports[name] = path
+			}
+			rename[old] = name
+		}
+		entries := map[string]string{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			if s, ok := node.(*ast.SelectorExpr); ok {
+				if id, ok := s.X.(*ast.Ident); ok && rename[id.Name] != "" {
+					id.Name = rename[id.Name]
+				}
+			}
+			return true
+		})
+		for _, d := range file.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != gotoken.VAR {
+				continue
+			}
+			for _, s := range gd.Specs {
+				v, ok := s.(*ast.ValueSpec)
+				if !ok || len(v.Names) != 1 || v.Names[0].Name != "Library" {
+					continue
+				}
+				c := v.Values[0].(*ast.CompositeLit)
+				for _, entry := range c.Elts {
+					kv := entry.(*ast.KeyValueExpr)
+					key, _ := strconv.Unquote(kv.Key.(*ast.BasicLit).Value)
+					entries[key] = printGo(kv.Value)
+				}
+			}
+		}
+		return entries, file, nil
+	}
+	proposalExample = func(e *expression) (any, error) {
+		op, _, sig, err := resolve(e)
+		if err != nil || sig == nil {
+			return nil, fmt.Errorf("native result type is not known at build time")
+		}
+		if sig.TypeParams().Len() > 0 {
+			if len(e.args) != 2 {
+				return nil, fmt.Errorf("invalid packed native arguments")
+			}
+			pos, err := example(e.args[0].expr)
+			if err != nil {
+				return nil, err
+			}
+			named, err := example(e.args[1].expr)
+			if err != nil {
+				return nil, err
+			}
+			args, err := nativeGoArguments(sig, pos.([]any), named.(map[string]any))
+			if err != nil {
+				return nil, err
+			}
+			source, err := n.specialize(ctx, op, args)
+			if err != nil {
+				return nil, err
+			}
+			// Read the instantiated signature using the same Go type checker.
+			fset := gotoken.NewFileSet()
+			file, err := goparser.ParseFile(fset, "instance.go", source, 0)
+			if err != nil {
+				return nil, err
+			}
+			info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+			config := types.Config{Importer: nativeTypeImporter{ctx, n}}
+			if _, err := config.Check("lip.native.static", fset, []*ast.File{file}, info); err != nil {
+				return nil, err
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				if kv, ok := node.(*ast.KeyValueExpr); ok {
+					if key, ok := kv.Key.(*ast.BasicLit); ok && key.Value == strconv.Quote(op.Member) {
+						if s, ok := info.TypeOf(kv.Value).(*types.Signature); ok {
+							sig = s
+						}
+					}
+				}
+				return true
+			})
+			entries, _, err := library(source)
+			if err != nil {
+				return nil, err
+			}
+			if instances[op] == nil {
+				instances[op] = map[string]string{}
+			}
+			instances[op][entries[op.Member]] = entries[op.Member]
+		}
+		if sig.Results().Len() == 0 {
+			return nil, nil
+		}
+		if sig.Results().Len() != 1 && !(sig.Results().Len() == 2 && types.Identical(sig.Results().At(1).Type(), types.Universe.Lookup("error").Type())) {
+			return nil, fmt.Errorf("multiple native results require explicit static registration for generic inference")
+		}
+		result := sig.Results().At(0).Type()
+		// Scalars cross the common Data boundary before another native call:
+		// Go int/float aliases become LIP binary64, and named text/bool values
+		// become their Data primitives. Resources keep their Go type.
+		if basic, ok := result.Underlying().(*types.Basic); ok {
+			switch {
+			case basic.Info()&(types.IsInteger|types.IsFloat) != 0:
+				result = types.Typ[types.Float64]
+			case basic.Info()&types.IsString != 0:
+				result = types.Typ[types.String]
+			case basic.Info()&types.IsBoolean != 0:
+				result = types.Typ[types.Bool]
+			}
+		}
+		if _, unknown := result.Underlying().(*types.Interface); unknown {
+			return nil, fmt.Errorf("generic argument has a dynamic Go interface result; register concrete instances in HostSource")
+		}
+		return nativeStaticValue{result}, nil
+	}
+	example = func(e *expression) (any, error) {
+		if e == nil || visiting[e] {
+			return nil, fmt.Errorf("generic argument type is not known at build time; register concrete instances in HostSource")
+		}
+		visiting[e] = true
+		defer delete(visiting, e)
+		switch e.tag {
+		case "lit":
+			return e.value.Native()
+		case "list":
+			xs := make([]any, len(e.elems))
+			for i, x := range e.elems {
+				v, err := example(x)
+				if err != nil {
+					return nil, err
+				}
+				xs[i] = v
+			}
+			return xs, nil
+		case "object":
+			xs := map[string]any{}
+			for _, f := range e.fields {
+				v, err := example(f.expr)
+				if err != nil {
+					return nil, err
+				}
+				xs[f.name] = v
+			}
+			return xs, nil
+		case "id":
+			if x := g.program.syntax.nativeOrigins[e]; x != nil {
+				return example(x)
+			}
+			if d, ok := g.program.syntax.data[e.name]; ok {
+				return d.value.Native()
+			}
+		case "block":
+			return example(e.body.tail)
+		case "perform":
+			if e.x.tag == "proposal" {
+				return proposalExample(e.x)
+			}
+		}
+		switch e.info.typ {
+		case "number":
+			return float64(0), nil
+		case "string":
+			return "", nil
+		case "bool":
+			return false, nil
+		}
+		return nil, fmt.Errorf("generic argument type is not known at build time; register concrete instances in HostSource")
+	}
+	for _, e := range g.exprs {
+		if e.tag != "proposal" {
+			continue
+		}
+		_, pkg, sig, err := resolve(e)
+		if err != nil || pkg.manual || sig == nil || sig.TypeParams().Len() == 0 {
+			continue
+		}
+		if _, err := proposalExample(e); err != nil {
+			return "", at(diagnostic("E-TYPE", err.Error()), e.tok)
+		}
+	}
+	var out strings.Builder
+	paths := map[string]bool{}
+	for _, im := range g.program.syntax.imports {
+		if im.language == "go" {
+			paths[im.path] = true
+		}
+	}
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+	for _, path := range ordered {
+		pkg, err := n.discover(ctx, path)
+		if err != nil {
+			continue
+		} // Explicit contracts may describe virtual paths.
+		if pkg.manual {
+			continue
+		}
+		entries, _, err := library(pkg.source)
+		if err != nil {
+			return "", err
+		}
+		if len(entries) == 0 {
+			imports[fmt.Sprintf("_lipinit%d", len(imports))] = path
+		}
+		for name, sig := range pkg.signatures {
+			if sig.TypeParams().Len() == 0 {
+				continue
+			}
+			choices := instances[Operation{"go", path, name}]
+			values := make([]string, 0, len(choices))
+			for v := range choices {
+				values = append(values, v)
+			}
+			sort.Strings(values)
+			entries[name] = "nativeGoGeneric{instances:[]any{" + strings.Join(values, ",") + "}}"
+		}
+		fmt.Fprintf(&out, "host.Native.registerStatic(%q,map[string]any{", path)
+		names := make([]string, 0, len(entries))
+		for name := range entries {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Fprintf(&out, "%q:%s,", name, entries[name])
+		}
+		out.WriteString("},map[string]nativeGoParameters{")
+		for _, name := range names {
+			if sig := pkg.signatures[name]; sig != nil {
+				fmt.Fprintf(&out, "%q:{names:[]string{", name)
+				for i := 0; i < sig.Params().Len(); i++ {
+					fmt.Fprintf(&out, "%q,", sig.Params().At(i).Name())
+				}
+				fmt.Fprintf(&out, "},variadic:%t},", sig.Variadic())
+			}
+		}
+		out.WriteString("})\n")
+	}
+	return out.String(), nil
 }
 
 type goEmitter struct {
@@ -461,7 +763,7 @@ func compiledRuntime() (string, map[string]string, map[string]*ast.FuncDecl, err
 	imports := map[string]string{}
 	templates := map[string]*ast.FuncDecl{}
 	allowed := map[string]bool{}
-	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl flowDecl dataDecl syntax analysis function proposal asciiDigit asciiLetter validID checker builtinArity error resolve") {
+	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl flowDecl dataDecl syntax analysis function proposal bindingInfo asciiDigit asciiLetter validID checker builtinArity error resolve") {
 		allowed[n] = true
 	}
 	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "adapters.go", "native.go", "native_workers.go", "go_adapter.go"} {
@@ -607,13 +909,16 @@ func generatedRun()error{
  parallel:=flag.Int("parallel",1,"active leaf evaluations; waiting containers yield")
  steps:=flag.Int64("steps",10000000,"step budget; 0 unlimited")
  elements:=flag.Int64("elements",1000000,"list budget; 0 unlimited")
+ frames:=flag.Int("frames",DefaultMaxFrames,"non-tail call frame budget; 0 uses default; tail calls reuse frames")
  flag.Parse();if flag.NArg()!=0{return fmt.Errorf("compiled program accepts flags only")}
+ if *frames<0{return fmt.Errorf("-frames must be nonnegative (0 uses the default)")}
+ if *parallel<0{return fmt.Errorf("-parallel must be nonnegative (0 uses one)")}
  hasInput,hasEntryInput:=false,false;flag.Visit(func(f *flag.Flag){hasInput=hasInput||f.Name=="input";hasEntryInput=hasEntryInput||f.Name=="entry-input"});if hasInput&&hasEntryInput{return fmt.Errorf("choose -input or -entry-input")}
  inputJSON:=*entryInput;if !hasEntryInput{inputJSON="{\"positional\":[],\"named\":"+*input+"}"}
  data,err:=DecodeEntryInput([]byte(inputJSON));if err!=nil{return err}
  host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err};defer p.host.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt);defer cancel()
- r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000});if err!=nil{return err}
+ r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000,MaxFrames:*frames});if err!=nil{return err}
  output:=r.Output;if *entryOutput{output=*r.EntryOutput};out,err:=EncodeJSON(output);if err!=nil{return err};fmt.Println(string(out));return nil
 }
 `

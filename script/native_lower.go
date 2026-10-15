@@ -7,13 +7,171 @@ import (
 	"strings"
 )
 
+// Native provenance describes the value at each container position. It is
+// independent of normative proposal Ops and never makes a perform concurrent.
+func nativeShapePointer(s nativeShape) *nativeShape { return &s }
+
+func (s nativeShape) element() nativeShape {
+	out := nativeShape{native: s.native}
+	if s.item != nil {
+		out = mergeNativeShape(out, *s.item)
+	}
+	for _, x := range s.items {
+		out = mergeNativeShape(out, x)
+	}
+	for _, x := range s.fields {
+		out = mergeNativeShape(out, x)
+	}
+	return out
+}
+
+func mergeNativeShape(a, b nativeShape) nativeShape {
+	out := nativeShape{native: a.native || b.native}
+	if a.fields != nil || b.fields != nil {
+		out.fields = map[string]nativeShape{}
+		for k, v := range a.fields {
+			out.fields[k] = v
+		}
+		for k, v := range b.fields {
+			out.fields[k] = mergeNativeShape(out.fields[k], v)
+		}
+	}
+	if a.items != nil || b.items != nil || a.item != nil || b.item != nil {
+		x := nativeShape{}
+		for _, s := range []nativeShape{a, b} {
+			if s.item != nil {
+				x = mergeNativeShape(x, *s.item)
+			}
+			for _, v := range s.items {
+				x = mergeNativeShape(x, v)
+			}
+		}
+		out.item = &x
+	}
+	if a.result != nil || b.result != nil {
+		x := nativeShape{}
+		for _, s := range []nativeShape{a, b} {
+			if s.result != nil {
+				x = mergeNativeShape(x, *s.result)
+			}
+		}
+		out.result = &x
+	}
+	return out
+}
+
+func (s nativeShape) empty() bool {
+	return !s.native && len(s.fields) == 0 && len(s.items) == 0 && s.item == nil && s.result == nil
+}
+
+// Runtime function metadata contains provenance only. Lexical initializer
+// syntax belongs to the compiler and must not extend a closure's captures.
+func nativeRuntimeShape(s nativeShape) nativeShape {
+	out := nativeShape{native: s.native}
+	for name, field := range s.fields {
+		if field = nativeRuntimeShape(field); !field.empty() {
+			if out.fields == nil {
+				out.fields = map[string]nativeShape{}
+			}
+			out.fields[name] = field
+		}
+	}
+	for i, item := range s.items {
+		if item = nativeRuntimeShape(item); !item.empty() {
+			if out.items == nil {
+				out.items = make([]nativeShape, len(s.items))
+			}
+			out.items[i] = item
+		}
+	}
+	if s.item != nil {
+		out.item = nativeShapePointer(nativeRuntimeShape(*s.item))
+	}
+	if s.result != nil {
+		out.result = nativeShapePointer(nativeRuntimeShape(*s.result))
+	}
+	return out
+}
+func nativeValueShape(v Value) nativeShape {
+	if _, ok := NativeDescription(v); ok {
+		return nativeShape{native: true}
+	}
+	s := nativeShape{}
+	if v.k == Function && v.f != nil {
+		s.result = v.f.nativeResult
+	}
+	if v.k == Effect && v.p != nil {
+		s.result = v.p.nativeResult
+	}
+	if v.k == Object {
+		for k, x := range v.o {
+			if shape := nativeValueShape(x); !shape.empty() {
+				if s.fields == nil {
+					s.fields = map[string]nativeShape{}
+				}
+				s.fields[k] = shape
+			}
+		}
+	}
+	if v.k == List {
+		for i, x := range v.l {
+			if shape := nativeValueShape(x); !shape.empty() {
+				if s.items == nil {
+					s.items = make([]nativeShape, len(v.l))
+				}
+				s.items[i] = shape
+			}
+		}
+	}
+	return s
+}
+
+func nativeSchemaShape(schema Schema) nativeShape {
+	switch strings.TrimSuffix(schema.Type, "?") {
+	case "null", "bool", "number", "string":
+		return nativeShape{}
+	case "list":
+		item := nativeShape{native: true}
+		if schema.Items != nil {
+			item = nativeSchemaShape(*schema.Items)
+		}
+		return nativeShape{item: &item}
+	}
+	return nativeShape{native: true}
+}
+func nativeGoResultShape(sig *types.Signature) nativeShape {
+	count := sig.Results().Len()
+	if count > 1 && types.Identical(sig.Results().At(count-1).Type(), types.Universe.Lookup("error").Type()) {
+		count--
+	}
+	var value func(types.Type) nativeShape
+	value = func(t types.Type) nativeShape {
+		if basic, ok := t.Underlying().(*types.Basic); ok && basic.Info()&(types.IsBoolean|types.IsString|types.IsInteger|types.IsFloat) != 0 {
+			return nativeShape{}
+		}
+		return nativeShape{native: true}
+	}
+	if count == 0 {
+		return nativeShape{}
+	}
+	if count == 1 {
+		return value(sig.Results().At(0).Type())
+	}
+	out := nativeShape{items: make([]nativeShape, count)}
+	for i := range out.items {
+		out.items[i] = value(sig.Results().At(i).Type())
+	}
+	return out
+}
+
 // Library syntax is lowered to the same registered proposal/perform protocol
 // as application adapters. No foreign callable is a LIP pure function.
-func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Value) (Host, error) {
+func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Value, avoid map[string]bool) (Host, error) {
 	if host.Native == nil {
 		return host, nil
 	}
 	host.Contracts = append([]Contract(nil), host.Contracts...)
+	s.nativeOrigins = map[*expression]*expression{}
 	aliases := map[string]importDecl{}
 	registered := map[string]Contract{}
 	for _, c := range host.Contracts {
@@ -34,6 +192,9 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 	}
 	names := map[string]bool{}
+	for name := range avoid {
+		names[name] = true
+	}
 	mapSyntaxTokens(s, func(t *token) {
 		if t.kind == "id" {
 			names[t.text] = true
@@ -72,43 +233,49 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		return ""
 	}
-	foreign := map[*expression]bool{}
+	foreign := map[*expression]nativeShape{}
 	var failure error
-	var lower func(*expression, map[string]bool)
-	var blockLower func(*block, map[string]bool)
-	var stmtLower func(*statement, map[string]bool)
-	var exitNative func(*statement, map[string]bool) bool
-	child := func(scope map[string]bool) map[string]bool {
-		out := map[string]bool{}
+	var lower func(*expression, map[string]nativeShape)
+	var blockLower func(*block, map[string]nativeShape)
+	var stmtLower func(*statement, map[string]nativeShape)
+	var exitNative func(*statement, map[string]nativeShape) nativeShape
+	child := func(scope map[string]nativeShape) map[string]nativeShape {
+		out := map[string]nativeShape{}
 		for k, v := range scope {
 			out[k] = v
 		}
 		return out
 	}
-	isNative := func(e *expression, scope map[string]bool) bool {
-		return e != nil && (foreign[e] || e.tag == "id" && scope[e.name])
-	}
-	exitNative = func(s *statement, scope map[string]bool) bool {
-		if s == nil {
-			return false
+	shape := func(e *expression, scope map[string]nativeShape) nativeShape {
+		if e == nil {
+			return nativeShape{}
 		}
-		if isNative(s.expr, scope) && (s.tag == "next" || s.tag == "break") {
-			return true
+		if e.tag == "id" {
+			return scope[e.name]
+		}
+		return foreign[e]
+	}
+	isNative := func(e *expression, scope map[string]nativeShape) bool { return shape(e, scope).native }
+	exitNative = func(s *statement, scope map[string]nativeShape) nativeShape {
+		if s == nil {
+			return nativeShape{}
+		}
+		out := nativeShape{}
+		if s.tag == "next" || s.tag == "break" {
+			out = shape(s.expr, scope)
 		}
 		for _, b := range []*block{s.body, s.otherwise} {
-			if b != nil && exitNative(b.exit, scope) {
-				return true
+			if b != nil {
+				out = mergeNativeShape(out, exitNative(b.exit, scope))
 			}
 		}
-		if exitNative(s.other, scope) {
-			return true
-		}
+		out = mergeNativeShape(out, exitNative(s.other, scope))
 		for _, a := range s.arms {
-			if a.body != nil && exitNative(a.body.exit, scope) {
-				return true
+			if a.body != nil {
+				out = mergeNativeShape(out, exitNative(a.body.exit, scope))
 			}
 		}
-		return false
+		return out
 	}
 	pack := func(args []argument, t token) (*expression, *expression) {
 		pos := &expression{tag: "list", tok: t}
@@ -129,6 +296,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			local := fresh()
 			b.items = append(b.items, &statement{tag: "bind", tok: a.expr.tok, name: local, expr: a.expr})
 			args[i].expr = &expression{tag: "id", tok: a.expr.tok, name: local}
+			s.nativeOrigins[args[i].expr] = a.expr
 		}
 		if packed {
 			pos, named := pack(args, e.tok)
@@ -136,7 +304,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		b.tail = &expression{tag: "perform", tok: e.tok, x: &expression{tag: "proposal", tok: e.tok, name: name, args: args}}
 		*e = expression{tag: "block", tok: e.tok, body: b}
-		foreign[e] = true
+		foreign[e] = nativeShape{native: true}
 	}
 	perform := func(e *expression, name string, args []argument) { performCall(e, name, args, true) }
 	prepare := func(t token, name string, receiver *expression, args []argument) *expression {
@@ -170,14 +338,14 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		return im, member, true
 	}
-	stmtLower = func(stmt *statement, scope map[string]bool) {
+	stmtLower = func(stmt *statement, scope map[string]nativeShape) {
 		if stmt == nil {
 			return
 		}
 		lower(stmt.expr, scope)
 		local := child(scope)
 		if stmt.tag == "for" {
-			local[stmt.name] = isNative(stmt.expr, scope)
+			local[stmt.name] = shape(stmt.expr, scope).element()
 		}
 		blockLower(stmt.body, local)
 		blockLower(stmt.otherwise, child(scope))
@@ -187,12 +355,14 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			blockLower(a.body, child(scope))
 		}
 		if stmt.tag == "bind" {
-			scope[stmt.name] = isNative(stmt.expr, scope)
+			info := shape(stmt.expr, scope)
+			info.source = stmt.expr
+			scope[stmt.name] = info
 		} else if stmt.tag == "claim" {
-			scope[stmt.name] = false
+			scope[stmt.name] = nativeShape{}
 		}
 	}
-	blockLower = func(b *block, scope map[string]bool) {
+	blockLower = func(b *block, scope map[string]nativeShape) {
 		if b == nil {
 			return
 		}
@@ -202,33 +372,41 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		lower(b.tail, scope)
 		stmtLower(b.exit, scope)
 	}
-	lower = func(e *expression, scope map[string]bool) {
+	lower = func(e *expression, scope map[string]nativeShape) {
 		if e == nil || failure != nil {
 			return
+		}
+		if e.tag == "id" {
+			if source := scope[e.name].source; source != nil {
+				s.nativeOrigins[e] = source
+			}
 		}
 		if e.tag == "pipe" {
 			// A stage is a static LIP declaration, never a native callable or a
 			// bridge helper. Preserve its callee for the ordinary stage checker.
 			lower(e.x, scope)
-			foreign[e] = isNative(e.x, scope)
+			foreign[e] = shape(e.x, scope)
 			for _, arg := range e.y.args[1:] {
 				lower(arg.expr, scope)
-				foreign[e] = foreign[e] || isNative(arg.expr, scope)
+				foreign[e] = mergeNativeShape(foreign[e], shape(arg.expr, scope))
 			}
 			return
 		}
 		// Capture a module path before lowering its receiver. Namespace lookup is
 		// not an extra native call and must not invoke a function being referenced.
 		if im, member, ok := moduleTarget(e); ok && (e.tag == "field" || e.tag == "id") {
-			op := Operation{im.language, im.path, "get." + member}
+			// A reserved source keyword separates adapter operations from real
+			// library paths such as Python's get.member or prepare.member.
+			op := Operation{im.language, im.path, "perform.get." + member}
 			if member == "" {
-				op.Member = "get"
+				op.Member = "perform.get"
 			}
 			add(op, "get")
 			perform(e, im.alias+"."+op.Member, nil)
 			return
 		}
 		if e.tag == "proposal" {
+			resultShape := nativeShape{native: true}
 			parts := strings.SplitN(e.name, ".", 2)
 			im, ok := aliases[parts[0]]
 			if ok && len(parts) == 2 && (im.language == "go" || im.language == "python") {
@@ -238,6 +416,8 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					for _, a := range e.args {
 						lower(a.expr, scope)
 					}
+					e.nativeResult = nativeShapePointer(nativeSchemaShape(c.Result))
+					foreign[e] = nativeShape{result: e.nativeResult}
 					return
 				}
 				if im.language == "go" {
@@ -252,6 +432,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 						return
 					}
 					if sig := pkg.signatures[parts[1]]; sig != nil {
+						resultShape = nativeGoResultShape(sig)
 						var pos []any
 						named := map[string]any{}
 						for _, a := range e.args {
@@ -296,10 +477,14 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				add(op, "call")
 				pos, named := pack(e.args, e.tok)
 				e.args = []argument{{expr: pos}, {expr: named}}
-				foreign[e] = true
+				e.nativeResult = &resultShape
+				foreign[e] = nativeShape{result: e.nativeResult}
 				return
 			}
-			if len(parts) == 2 && scope[parts[0]] {
+			// Explicit effects may target any bound receiver, including Flow
+			// parameters whose native provenance is only known at runtime.
+			_, bound := scope[parts[0]]
+			if len(parts) == 2 && bound && !ok {
 				for _, a := range e.args {
 					lower(a.expr, scope)
 				}
@@ -309,7 +494,8 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				pos, named := pack(args, e.tok)
 				e.name = name
 				e.args = []argument{{expr: pos}, {expr: named}}
-				foreign[e] = true
+				e.nativeResult = nativeShapePointer(nativeShape{native: true})
+				foreign[e] = nativeShape{result: e.nativeResult}
 				return
 			}
 		}
@@ -337,6 +523,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					lower(e.args[0].expr, scope)
 					if action == "snapshot" || action == "release" || isNative(e.args[0].expr, scope) {
 						perform(e, add(Operation{"host", "lip.native", action}, action), e.args)
+						foreign[e] = nativeShape{}
 						return
 					}
 				}
@@ -348,6 +535,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 						lower(arg.expr, scope)
 					}
 					performCall(e, im.alias+"."+member, e.args, false)
+					foreign[e] = nativeSchemaShape(c.Result)
 					return
 				}
 				add(op, "call")
@@ -355,7 +543,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					for _, arg := range e.args {
 						lower(arg.expr, scope)
 					}
-					prep := Operation{im.language, im.path, "prepare." + member}
+					prep := Operation{im.language, im.path, "perform.prepare." + member}
 					add(prep, "prepare")
 					callee := prepare(e.x.tok, im.alias+"."+prep.Member, nil, e.args)
 					perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
@@ -367,6 +555,9 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					return
 				}
 				perform(e, im.alias+"."+member, e.args)
+				if result := foreign[probe].result; result != nil {
+					foreign[e] = *result
+				}
 				return
 			}
 			// A method is resolved by the provider, not by pure object projection.
@@ -389,12 +580,12 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		if e.tag == "fn" {
 			for _, p := range e.params {
-				local[p.name] = false
+				local[p.name] = nativeShape{}
 			}
 		}
 		if e.tag == "comprehension" {
 			lower(e.y, scope)
-			local[e.name] = isNative(e.y, scope)
+			local[e.name] = shape(e.y, scope).element()
 			lower(e.x, local)
 		} else {
 			lower(e.x, local)
@@ -412,8 +603,8 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		bodyScope := child(local)
 		if e.tag == "carry" {
-			bodyScope[e.state] = isNative(e.y, scope)
-			bodyScope[e.name] = isNative(e.x, scope)
+			bodyScope[e.state] = shape(e.y, scope)
+			bodyScope[e.name] = shape(e.x, scope).element()
 		}
 		blockLower(e.body, bodyScope)
 		for _, a := range e.arms {
@@ -422,73 +613,98 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			blockLower(a.body, child(local))
 		}
 		switch e.tag {
+		case "fn":
+			foreign[e] = nativeShape{result: nativeShapePointer(nativeRuntimeShape(shape(e.body.tail, bodyScope)))}
+			e.nativeResult = foreign[e].result
 		case "perform":
-			foreign[e] = isNative(e.x, local)
+			if result := shape(e.x, local).result; result != nil {
+				foreign[e] = *result
+			}
 		case "block":
-			foreign[e] = isNative(e.body.tail, bodyScope)
+			foreign[e] = shape(e.body.tail, bodyScope)
 		case "if":
-			foreign[e] = isNative(e.body.tail, bodyScope) || isNative(e.y, local)
+			foreign[e] = mergeNativeShape(shape(e.body.tail, bodyScope), shape(e.y, local))
 		case "match":
 			for _, a := range e.arms {
-				foreign[e] = foreign[e] || isNative(a.result, local)
+				foreign[e] = mergeNativeShape(foreign[e], shape(a.result, local))
 			}
 		case "carry":
-			foreign[e] = isNative(e.y, scope) || exitNative(e.body.exit, bodyScope)
+			foreign[e] = mergeNativeShape(shape(e.y, scope), exitNative(e.body.exit, bodyScope))
 		case "comprehension":
-			foreign[e] = isNative(e.x, local)
+			foreign[e] = nativeShape{item: nativeShapePointer(shape(e.x, local))}
 		case "list":
-			for _, x := range e.elems {
-				foreign[e] = foreign[e] || isNative(x, local)
+			out := nativeShape{items: make([]nativeShape, len(e.elems))}
+			for i, x := range e.elems {
+				out.items[i] = shape(x, local)
 			}
+			foreign[e] = out
 		case "object":
+			out := nativeShape{fields: map[string]nativeShape{}}
 			for _, f := range e.fields {
-				foreign[e] = foreign[e] || isNative(f.expr, local)
+				out.fields[f.name] = shape(f.expr, local)
 			}
+			foreign[e] = out
 		case "call":
 			if isNative(e.x, local) {
 				callee := prepare(e.x.tok, add(Operation{"host", "lip.native", "prepare"}, "prepare"), e.x, e.args)
 				perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
 			} else {
+				if result := shape(e.x, local).result; result != nil {
+					foreign[e] = *result
+				}
 				for _, a := range e.args {
-					foreign[e] = foreign[e] || isNative(a.expr, local)
+					foreign[e] = mergeNativeShape(foreign[e], shape(a.expr, local))
 				}
 			}
 		case "field":
 			if isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "get." + e.name}, "get"), []argument{{expr: e.x}})
+			} else {
+				foreign[e] = shape(e.x, local).fields[e.name]
 			}
 		case "index":
 			if isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "index"}, "index"), []argument{{expr: e.x}, {expr: e.y}})
+			} else {
+				receiver := shape(e.x, local)
+				if e.y.tag == "lit" && e.y.value.k == String {
+					foreign[e] = receiver.fields[e.y.value.s]
+				} else if e.y.tag == "lit" && e.y.value.k == Number && e.y.value.n >= 0 && e.y.value.n < float64(len(receiver.items)) && e.y.value.n == float64(int(e.y.value.n)) {
+					foreign[e] = receiver.items[int(e.y.value.n)]
+				} else {
+					foreign[e] = receiver.element()
+				}
 			}
 		}
 	}
-	scope := map[string]bool{}
+	scope := map[string]nativeShape{}
 	for alias := range aliases {
-		scope[alias] = false
+		scope[alias] = nativeShape{}
 	}
 	for name := range s.functions {
-		scope[name] = false
+		scope[name] = nativeShape{}
 	}
 	for name := range s.flows {
-		scope[name] = false
+		scope[name] = nativeShape{}
 	}
 	for name := range s.data {
-		scope[name] = false
+		scope[name] = nativeShape{}
 	}
 	for name, value := range saved {
-		scope[name] = containsNative(value)
+		scope[name] = nativeValueShape(value)
 	}
 	for _, name := range sortedFunctionNames(s.functions) {
 		lower(s.functions[name], scope)
+		scope[name] = shape(s.functions[name], scope)
 	}
-	if len(s.flows) == 0 {
+	if len(s.flows) == 0 || s.cell {
 		blockLower(s.body, scope)
-	} else {
+	}
+	if len(s.flows) != 0 {
 		for _, name := range sortedFlowNames(s.flows) {
 			local := child(scope)
 			for _, param := range s.flows[name].params {
-				local[param.name] = false
+				local[param.name] = nativeShape{}
 			}
 			blockLower(s.flows[name].body, local)
 		}

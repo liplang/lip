@@ -690,6 +690,7 @@ func checkType(v Value, typ string) error {
 }
 
 type Diagnostic struct {
+	Phase    string
 	SourceID string
 	Code     string
 	Message  string
@@ -702,16 +703,29 @@ type Diagnostic struct {
 }
 
 func (e *Diagnostic) Error() string {
+	phase := e.Phase
+	if phase == "" {
+		phase = "host"
+	}
+	message := "[" + phase + "] " + e.Message
 	if e.Line > 0 {
 		if e.SourceID != "" {
-			return fmt.Sprintf("%s at %s:%d:%d: %s", e.Code, e.SourceID, e.Line, e.Column, e.Message)
+			return fmt.Sprintf("%s at %s:%d:%d: %s", e.Code, e.SourceID, e.Line, e.Column, message)
 		}
-		return fmt.Sprintf("%s at %d:%d: %s", e.Code, e.Line, e.Column, e.Message)
+		return fmt.Sprintf("%s at %d:%d: %s", e.Code, e.Line, e.Column, message)
 	}
-	return e.Code + ": " + e.Message
+	return e.Code + ": " + message
 }
 func diagnostic(code, message string) *Diagnostic {
-	return &Diagnostic{Code: code, Message: message, Site: -1}
+	return &Diagnostic{Phase: "host", Code: code, Message: message, Site: -1}
+}
+func diagnosticPhase(err error, phase string) error {
+	if e, ok := err.(*Diagnostic); ok {
+		copy := cloneDiagnostic(e)
+		copy.Phase = phase
+		return copy
+	}
+	return err
 }
 func cloneDiagnostic(e *Diagnostic) *Diagnostic {
 	if e == nil {

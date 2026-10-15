@@ -1,6 +1,6 @@
-# list 保留顺序，从 0 开始索引。object 用 string 作为键。
-# .name 和 ["name"] 都可读取对象字段；缺键读取会报错。
-# put / concat 返回新容器，原容器保持原值。
+# Lists preserve order and use zero-based indices. Objects have string keys.
+# .name and ["name"] read object fields; missing keys are errors.
+# put / concat return new containers; the inputs retain their values.
 flow Containers() -> object {
     names = ["Ada", "Lin"]
     person = {name: names[0], role: "reader"}

@@ -1,0 +1,52 @@
+# LIP development guide
+
+[English](DEVELOPMENT.en.md) | [简体中文](DEVELOPMENT.md)
+
+Project guidance accompanying the [development skill](.agents/skills/lip-development/SKILL.md).
+
+Use this guide when developing/reviewing LIP 1.0 specifications, compiler, Go backend, Go/Python Host boundary, examples, or interactive tools. Locate the user-selected root containing `spec/LIP-1.0-SPEC.md`, `script/`, and `go.mod`. If it cannot be written in a restricted environment, use an already authorized local copy. Paths below are relative to that root.
+
+## Design basis
+
+The [LIP 1.0 specification](spec/LIP-1.0-SPEC.en.md), also available in [Chinese](spec/LIP-1.0-SPEC.md), is the language authority. Read relevant sections before tracing implementation. Keep the specification self-contained: define symbols, states, identities, and errors before use. Integrate accepted findings without review priority labels, issue numbers, or conversational names. Explain concrete reasons for rejected design suggestions in delivery notes.
+
+Prefer implementation fixes unless the task concerns the specification or reveals a contradiction. Distinguish specification review from implementation review and report only checks actually run.
+
+Keep the core small: immutable values, pure functions, control flow, graph dependencies, append-only Claims, effect/perform. Compose ordinary data operations from existing pure operations, obtaining most libraries through Go/Python. Avoid business-reducer syntax, arbitrary mutable lattices, automatic subscriptions, parallel writes, threshold waits, and unnecessary files.
+
+## Implementation boundaries
+
+- `script/compiler.go` and `checker.go` own syntax/static guarantees. Hidden function/any signatures require dynamic checking, not omitted checks.
+- `values.go` defines shared Data, numbers, encoding, identities, and diagnostics. any? equals any; paths consistently treat nullable types, nonfinite values, duplicate fields, and unsupported native values.
+- `**` associates right, precedes left negation, and accepts signed exponents. `*/` uses its right operand as base, shares multiplication precedence, and associates left. Follow §16.5's fixed algorithm rather than platform pow/log, synchronizing reference code, errors, and interpreted/generated vectors.
+- `evaluator.go`/`scheduler.go` own pure functions, closures, proper tail calls, carry, gates, barriers, primary errors, and Claims. Unselected branches produce no dynamic errors/calls; preserve node positions/evaluation paths.
+- `host.go`/`adapters.go` are the only external boundary. Proposal construction calls no provider; validate arguments/authorization/resources before actions. Distinguish known completion with failed validation from Uncertain; retries cannot hide writes.
+- Ops propagates conservatively: container projections, call results, and carry results are Unknown. Stronger private inference cannot admit parallel work. Recording provenance is not a purity type.
+- `backend.go` emits actual Go evaluation, never invokes an interpreter over bundled source. When adding helpers, check embedded-declaration filtering for missing generated symbols.
+- Generated static metadata initializes once and remains read-only. Concurrent Program construction/runs cannot rewrite active ASTs; native fixtures also use race detection.
+- `session.go` retains successful immutable results/closures with the same checker/graph engine. Never rerun history to reconstruct state. Failed cells commit no bindings, but performed actions remain. Complete Claim programs have explicit run lifecycles.
+- REPL/learn share `cmd/lipc/editor.go`. Raw mode covers input only and restores before evaluation/provider calls, including cancel/EOF/errors. No background terminal prefetch. Verify shortcuts, Unicode, and bracketed paste with real PTYs; pipes remain plain text. Completion executes no source/native calls.
+
+## Call consistency
+
+Ordinary dynamic calls evaluate callee → validate callable/actual arity/names → evaluate arguments in source order → check parameter types → execute body → validate result. Arity errors precede argument performs; parameter errors precede bodies. map/fold callbacks follow the same rules.
+
+Cover direct functions, aliases, anonymous/container-extracted functions, closures, higher-order callbacks, and named arguments. Reject statically known errors early, including callback arity on empty lists. Interpreter/generated dynamic errors must agree.
+
+Claims append identified facts; complete reads wait for every producer, while live snapshots are individual external observations. Positions use decimal-string wire pairs with numeric sorting. Compare full canonical identities; digests are indexes only. Conflicts never use first-arrival-wins.
+
+## Documentation and layout
+
+Use English as the primary language for normal prompts/help/diagnostics/lessons/example comments, optionally supplemented by Chinese. Prefer English when space is limited. Give every Chinese document a linked English version; synchronize contracts, examples, section numbers, and navigation. Keep public documentation in linked Chinese and English editions, and code, comments, and normal interactive text in English.
+
+Explain what graph concurrency, Claims, and effects solve before usage. Explain ReAct as think → call a tool → observe → decide again. Separate within-run graph dependencies from Host-managed long-lived events. State the small-core/Go-Python scope and unimplemented optional durable recovery accurately.
+
+`examples/` contains commented executable `.lip` programs progressing from Hello World/bindings/arithmetic/branches/functions to carry/Claims/external work. Teaching registrations belong in `script/adapters.go`, explicitly enabled by DemoHost. `backend.go` derives DemoHostGoSource from the same registration function. Tests live in `tests/`. Group code by semantics; new files should own complete responsibilities rather than tiny helpers.
+
+Minimum Go is 1.25; allow higher versions without pinning patch/toolchain. Adjust versions according to user requirements and real dependencies.
+
+## Validation and delivery
+
+Add regressions for real semantic risks rather than restating implementation. Useful checks include numeric/encoding vectors; terminal if/match/value blocks and malformed arguments/source; actual generated binaries/diagnostic locations; legal schedule variations, closed-gate zero calls, prerequisite closure/barriers/Claims; identical Go/Python Data boundaries, pre-authorization zero calls, known-fault replay without reruns; REPL multiline/error recovery/closures/non-repeated historical actions; every lesson with multiple inputs.
+
+Run `make test`, `make race`, `make vet`. race also builds/runs generated binaries with race detection. Makefile caches/temp files stay in `.build` for restricted workspaces. After validation run `make clean`; deliver no lipc, `.build`, Python caches, or other generated products. Restrict cleanup to project products. Report changes, actual checks, and limitations without claiming optional profiles are implemented.

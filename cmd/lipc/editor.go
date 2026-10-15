@@ -15,7 +15,7 @@ import (
 
 var errInputCanceled = errors.New("input canceled")
 
-const editorHelp = "终端编辑：←/→ 移动，↑/↓ 历史；Ctrl-A/E 行首/行尾，Alt-B/F 按词移动；Ctrl-U/K/W 剪切，Ctrl-Y 粘回，Ctrl-_ 撤销，Ctrl-R 搜索，Tab 补全；Ctrl-C 丢弃输入。"
+const editorHelp = "Terminal editing: arrows move/browse history; Ctrl-A/E start/end, Alt-B/F by word; Ctrl-U/K/W cut, Ctrl-Y yank, Ctrl-_ undo, Ctrl-R search, Tab complete; Ctrl-C discards input."
 
 func commandCompletions(prefix string, names []string, commands string) []string {
 	for _, command := range strings.Fields(commands) {

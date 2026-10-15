@@ -1,11 +1,11 @@
-# number 是有限的 binary64 数值。括号可以改变计算优先级。
-# / 为除法，// 为向负无穷取整的商，% 为与除数同号的余数。
-# // 与 % 的浮点边界规则由规范定义，不直接继承 Go/Python 的规则。
-# ** 是幂，右结合：2 ** 3 ** 2 等于 2 ** (3 ** 2)。
-# 幂先于左侧负号：-3 ** 2 = -9；负数整体求平方要写 (-3) ** 2 = 9。
-# 指数可为负数：2 ** -3 = 1 / 8。
-# */ 求对数，右边是底数：8 */ 2 = 3（number 的 3 与 3.0 相同）。
-# */ 与乘除同级，左结合：8 */ 2 * 4 = (8 */ 2) * 4 = 12。
+# number is finite binary64. Parentheses change precedence.
+# / divides; // rounds the quotient toward negative infinity; % follows the divisor sign.
+# The specification defines floating-point boundaries for // and %, independently of Go/Python.
+# ** is right-associative exponentiation: 2 ** 3 ** 2 = 2 ** (3 ** 2).
+# Power precedes left negation: -3 ** 2 = -9; use (-3) ** 2 = 9 to square a negative base.
+# Negative exponents are allowed: 2 ** -3 = 1 / 8.
+# */ is logarithm with the base on the right: 8 */ 2 = 3; 3 and 3.0 are the same number.
+# */ has multiplication precedence and associates left: 8 */ 2 * 4 = (8 */ 2) * 4 = 12.
 flow Arithmetic() -> object {
     return {
         sum: 2 + 3 * 4,

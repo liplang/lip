@@ -1,6 +1,6 @@
-# string 索引和 slice 的边界使用 Unicode 标量，不是 UTF-8 字节偏移。
-# slice 的右边界不包含在结果里。split 保留相邻分隔符之间的空串。
-# str 用于显示；parse_number 只接受规范中的完整数字文本。
+# String indices and slice boundaries count Unicode scalars, not UTF-8 bytes.
+# slice excludes its end boundary. split retains empty segments between adjacent separators.
+# str formats values; parse_number accepts only complete number text as specified.
 flow TextAndNumbers() -> object {
     text = "a𐀀b"
     score = parse_number("8e-1")

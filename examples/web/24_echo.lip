@@ -1,4 +1,4 @@
-# 使用 POST /api/echo；Host 先检查 JSON、重复键、字符编码和正文大小。
+# Use POST /api/echo; the Host checks JSON, duplicate keys, encoding, and body size first.
 flow Echo(request: object) -> object {
     return {status: 200, json: {received: request.json, query: request.query}}
 }

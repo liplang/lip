@@ -1,6 +1,6 @@
-# parallel 允许各轮独立计算；不要依赖任务完成顺序。
-# Claim 追加带身份的事实，完整快照按逻辑 Position 排序。
-# count/latest 等业务投影是纯计算，不是共享变量更新。
+# parallel allows independent iterations; do not depend on completion order.
+# Claims append identified facts; complete snapshots follow logical Position order.
+# Business projections such as count/latest are pure computations, not shared variable updates.
 flow ParallelFacts() -> object {
     facts = claim()
     for x in [3, 1, 2] parallel {

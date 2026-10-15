@@ -1,13 +1,13 @@
-# 使用教学 Host：lipc run -host demo 本文件
-# import 只声明名字映射，不安装依赖，也不授权任意 package 调用。
-# Host 已注册这两个操作的参数、结果、ReadOnly 和并发合约。
+# Use the teaching Host: lipc run -host demo examples/ecosystem/17_go_python.lip
+# import declares a namespace; it installs no dependencies and grants no arbitrary package access.
+# The Host registers both operations with parameter/result schemas and Concurrent ReadOnly contracts.
 import python "statistics" as stats
 import go "crypto/sha256" as sha
 flow GoAndPython() -> object {
     xs = [1, 2, 3]
-    # effect 构造请求；perform 才实际执行，并按 CallID 记录结果。
+    # effect constructs a request; perform executes it and records the result by CallID.
     mean = perform effect stats.mean(xs)
-    # Go 原生 bytes 由 Host 的显式 wrapper 转为十六进制 string。
+    # An explicit Host wrapper converts Go bytes to a hexadecimal string.
     digest = perform effect sha.Sum256(str(xs))
     return {mean: mean, digest: digest}
 }

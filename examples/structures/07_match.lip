@@ -1,6 +1,6 @@
-# match 按顺序尝试 arm；=> 左侧是模式，右侧是结果表达式。
-# 模式可以是字面量、类型名或 _。_ 匹配任何值。
-# if 是可选 guard；先 has 再取字段，可安全处理缺键对象。
+# match tries arms in order; patterns go before => and results after it.
+# Patterns are literals, type names, or _. The wildcard _ matches any value.
+# An optional if guard runs after matching; has protects access to missing fields.
 fn describe(x: any) -> string {
     match x {
         null => "empty",

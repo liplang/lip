@@ -1,12 +1,16 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"html/template"
 	"io"
 	. "lip/script"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +25,172 @@ func webProgram(t *testing.T, source string, host Host) *Program {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func TestHTTPPracticalCRUDApplication(t *testing.T) {
+	page := template.Must(template.New("item").Parse(`<h1>{{.title}}</h1>`))
+	var mu sync.Mutex
+	items := map[string]string{}
+	var writes atomic.Int64
+	data := func(x any) Response {
+		v, err := FromNative(x)
+		if err != nil {
+			return Rejected("invalid-data", err.Error())
+		}
+		return Result(v)
+	}
+	host := Host{Contracts: []Contract{
+		{Operation: Operation{Language: "host", Path: "app", Member: "read"}, Version: "1",
+			Params: []Parameter{{Name: "id", Schema: Schema{Type: "string"}}}, Result: Schema{Type: "any"}, Effect: ReadOnlyEffect, Concurrent: true,
+			Invoke: func(_ context.Context, r Request) Response {
+				id, _ := r.Positional[0].Text()
+				mu.Lock()
+				defer mu.Unlock()
+				if id == "" {
+					keys := make([]string, 0, len(items))
+					for key := range items {
+						keys = append(keys, key)
+					}
+					sort.Strings(keys)
+					rows := make([]any, 0, len(keys))
+					for _, key := range keys {
+						rows = append(rows, map[string]any{"id": key, "title": items[key]})
+					}
+					return data(rows)
+				}
+				if title, ok := items[id]; ok {
+					return data(map[string]any{"id": id, "title": title})
+				}
+				return Result(NullValue())
+			}},
+		{Operation: Operation{Language: "host", Path: "app", Member: "change"}, Version: "1",
+			Params: []Parameter{{Name: "id", Schema: Schema{Type: "string"}}, {Name: "title", Schema: Schema{Type: "string"}}, {Name: "method", Schema: Schema{Type: "string"}}},
+			Result: Schema{Type: "number"}, Effect: WriteEffect,
+			Invoke: func(_ context.Context, r Request) Response {
+				id, _ := r.Positional[0].Text()
+				title, _ := r.Positional[1].Text()
+				method, _ := r.Positional[2].Text()
+				mu.Lock()
+				defer mu.Unlock()
+				_, exists := items[id]
+				if method == "POST" && exists {
+					return data(409)
+				}
+				if method != "POST" && !exists {
+					return data(404)
+				}
+				writes.Add(1)
+				if method == "DELETE" {
+					delete(items, id)
+					return data(204)
+				}
+				items[id] = title
+				if method == "POST" {
+					return data(201)
+				}
+				return data(200)
+			}},
+		{Operation: Operation{Language: "host", Path: "app", Member: "render"}, Version: "1",
+			Params: []Parameter{{Name: "item", Schema: Schema{Type: "object"}}}, Result: Schema{Type: "string"}, Effect: ReadOnlyEffect, Concurrent: true,
+			Invoke: func(_ context.Context, r Request) Response {
+				item, err := r.Positional[0].Native()
+				if err != nil {
+					return Rejected("invalid-data", err.Error())
+				}
+				var buffer bytes.Buffer
+				if err := page.Execute(&buffer, item); err != nil {
+					return Rejected("render-failed", err.Error())
+				}
+				return data(buffer.String())
+			}},
+	}}
+	source := `import host "app"
+fn Valid(doc:any)->bool {
+ match doc {
+  object if has(doc,"title") => match doc.title {string => len(doc.title)>0 && len(doc.title)<=80,_ => false},
+  _ => false
+ }
+}
+flow Read(request:object)->object {
+ item=perform effect app.read(request.params.id)
+ return if item==null {{status:404,json:{error:"missing"}}} else {{status:200,json:item}}
+}
+flow List(request:object)->object {rows=perform effect app.read("");return {status:200,json:rows}}
+flow Change(request:object)->object {
+ return if request.method=="DELETE" {
+  status=perform effect app.change(request.params.id,"",request.method)
+  {status:status}
+ } else if !Valid(request.json) {{status:400,json:{error:"invalid_title"}}}
+ else {
+  status=perform effect app.change(request.params.id,request.json.title,request.method)
+  {status:status,json:{id:request.params.id,title:request.json.title}}
+ }
+}
+flow Page(request:object)->object {
+ item=perform effect app.read(request.params.id)
+ return if item==null {{status:404,body:"missing"}} else {
+  html=perform effect app.render(item)
+  {status:200,headers:{"Content-Type":"text/html; charset=utf-8"},body:html}
+ }
+}`
+	var routes []HTTPRoute
+	for _, route := range []struct{ pattern, entry string }{
+		{"GET /api/items", "List"}, {"GET /api/items/{id}", "Read"}, {"POST /api/items/{id}", "Change"},
+		{"PUT /api/items/{id}", "Change"}, {"DELETE /api/items/{id}", "Change"}, {"GET /items/{id}", "Page"},
+	} {
+		p, err := CompileWithOptions(source, host, CompileOptions{Entry: route.entry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes = append(routes, HTTPRoute{Pattern: route.pattern, Program: p})
+	}
+	mux, err := NewHTTPMux(routes, HTTPOptions{Run: Options{Parallelism: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path, body string, status int, want string) {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != status || want != "" && w.Body.String() != want {
+			t.Errorf("%s %s: %d %s; want %d %s", method, path, w.Code, w.Body.String(), status, want)
+		}
+	}
+	for _, body := range []string{`null`, `[]`, `{}`, `{"title":3}`, `{"title":""}`, `{"title":null}`, `{"title":"` + strings.Repeat("x", 81) + `"}`, `{"title":"a","title":"b"}`} {
+		request("POST", "/api/items/a", body, 400, "")
+	}
+	if writes.Load() != 0 {
+		t.Fatal("invalid business input wrote to storage")
+	}
+	request("GET", "/api/items/a", "", 404, `{"error":"missing"}`)
+	request("PUT", "/api/items/a", `{"title":"missing"}`, 404, "")
+	request("POST", "/api/items/a", `{"title":"<script>alert(1)</script> & tea"}`, 201, "")
+	request("GET", "/items/a", "", 200, `<h1>&lt;script&gt;alert(1)&lt;/script&gt; &amp; tea</h1>`)
+	request("POST", "/api/items/a", `{"title":"duplicate"}`, 409, "")
+	request("PUT", "/api/items/a", `{"title":"updated"}`, 200, `{"id":"a","title":"updated"}`)
+	request("GET", "/api/items/a", "", 200, `{"id":"a","title":"updated"}`)
+	request("DELETE", "/api/items/a", "", 204, "")
+	request("DELETE", "/api/items/a", "", 404, "")
+	request("GET", "/api/items", "", 200, `[]`)
+	var wg sync.WaitGroup
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := fmt.Sprintf("/api/items/item-%02d", i)
+			body := fmt.Sprintf(`{"title":"record-%02d"}`, i)
+			request("POST", path, body, 201, "")
+			request("GET", path, "", 200, fmt.Sprintf(`{"id":"item-%02d","title":"record-%02d"}`, i, i))
+		}(i)
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(items) != 24 || writes.Load() != 27 {
+		t.Fatal("concurrent state mismatch", items, writes.Load())
+	}
 }
 
 // A real http.Server/http.Client connection over net.Pipe exercises framing
@@ -350,6 +520,35 @@ flow Main(request:object)->object {
 		if count != 2 {
 			t.Fatal(counts)
 		}
+	}
+}
+
+func TestHTTPRecoversFromFrameBudget(t *testing.T) {
+	p := webProgram(t, `fn count(n:number)->number {if n==0 {0} else {1+count(n-1)}}
+flow Main(request:object)->object {
+ value=count(parse_number(request.query.n[0]))
+ return {status:200,json:{value:value}}
+}`, Host{})
+	var failure Report
+	handler, err := NewHTTPHandler(p, HTTPOptions{
+		Run:     Options{MaxFrames: 8},
+		OnError: func(_ *http.Request, report Report, _ error) { failure = report },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "/?n=8", nil))
+	if w.Code != 500 || w.Body.String() != `{"error":"internal_error"}` || failure.Error == nil || failure.Error.Code != "E-BUDGET" || failure.EntryOutput != nil {
+		t.Fatalf("budget failure: %d %s, %+v", w.Code, w.Body.String(), failure)
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "/?n=7", nil))
+	if w.Code != 200 || w.Body.String() != `{"value":7}` {
+		t.Fatalf("handler did not recover: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := NewHTTPHandler(p, HTTPOptions{Run: Options{MaxFrames: -1}}); err == nil {
+		t.Fatal("negative frame budget disabled the HTTP guard")
 	}
 }
 

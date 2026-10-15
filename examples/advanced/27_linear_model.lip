@@ -1,0 +1,35 @@
+# Fit y = intercept + slope*x with centered least squares, using only the core.
+# Pure folds compute statistics; Flows separate training from prediction.
+# Invalid training sets return business Data rather than dividing by zero.
+fn fit(rows:list)->object {
+    if len(rows)<2 {{ok:false,error:"at_least_two_rows"}}
+    else {
+        totals=fold(rows,{x:0,y:0},fn(s:object,row:object)->object {
+            {x:s.x+row.x,y:s.y+row.y}
+        })
+        mean={x:totals.x/len(rows),y:totals.y/len(rows)}
+        centered=fold(rows,{xx:0,xy:0},fn(s:object,row:object)->object {
+            dx=row.x-mean.x
+            {xx:s.xx+dx*dx,xy:s.xy+dx*(row.y-mean.y)}
+        })
+        if centered.xx==0 {{ok:false,error:"constant_x"}}
+        else {
+            slope=centered.xy/centered.xx
+            {ok:true,slope:slope,intercept:mean.y-slope*mean.x}
+        }
+    }
+}
+flow Train(rows:list)->object {return fit(rows)}
+flow Predict(xs:list,model:object)->list {
+    return map(xs,fn(x:number)->number {model.intercept+model.slope*x})
+}
+flow Main()->object {
+    rows=[{x:0,y:1},{x:1,y:3},{x:2,y:5},{x:3,y:7}]
+    model=Train(rows)
+    predictions=[4,5] |> Predict(model=model)
+    mse=fold(rows,0,fn(total:number,row:object)->number {
+        total+(row.y-(model.intercept+model.slope*row.x))**2
+    })/len(rows)
+    return {slope:model.slope,intercept:model.intercept,predictions:predictions,mse:mse,
+            singular_rejected:!fit([{x:1,y:2},{x:1,y:3}]).ok}
+}

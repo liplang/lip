@@ -34,6 +34,8 @@ func run(ctx context.Context, args []string) error {
 		return learn(ctx, args[1:])
 	case "help", "-h", "--help":
 		fmt.Println("LIP 1.0 · pure values, structured Flows, Claim facts, effect/perform")
+		fmt.Println("run/repl/serve and generated executables accept -frames N (default 10000; 0 selects default). Tail calls reuse frames; exhaustion reports E-BUDGET.")
+		fmt.Println("-parallel N accepts any positive integer and limits active leaf evaluations; workers start on demand. REPL :run inherits the selected limit.")
 		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
 		return nil
 	case "run", "emit-go", "build":
@@ -52,11 +54,18 @@ func run(ctx context.Context, args []string) error {
 	parallel := flags.Int("parallel", 1, "maximum active leaf evaluations (waiting containers yield)")
 	steps := flags.Int64("steps", 10000000, "step budget (0 unlimited)")
 	elements := flags.Int64("elements", 1000000, "list allocation budget (0 unlimited)")
+	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget (0 uses default; tail calls reuse frames)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 1 {
 		return usage()
+	}
+	if *frames < 0 {
+		return fmt.Errorf("-frames must be nonnegative (0 uses the default)")
+	}
+	if *parallel < 0 {
+		return fmt.Errorf("-parallel must be nonnegative (0 uses one)")
 	}
 	hasInput, hasEntryInput := false, false
 	flags.Visit(func(f *flag.Flag) {
@@ -104,7 +113,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000})
+		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000, MaxFrames: *frames})
 		if err != nil {
 			return err
 		}

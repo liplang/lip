@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	specPath := flag.String("spec", "spec/LIP-1.0-SPEC.md", "specification path")
+	specPath := flag.String("spec", "spec/LIP-1.0-SPEC.en.md", "specification path (English or Chinese edition)")
 	check := flag.Bool("check", false, "compare generated vectors with the specification")
 	flag.Parse()
 	if err := run(*specPath, *check); err != nil {
@@ -27,7 +27,7 @@ func run(specPath string, check bool) error {
 	if err != nil {
 		return err
 	}
-	_, section, ok := strings.Cut(string(source), "### 16.5. 幂与对数的固定数值算法\n")
+	_, section, ok := strings.Cut(string(source), "### 16.5. ")
 	if !ok {
 		return fmt.Errorf("missing numeric reference section")
 	}
@@ -54,7 +54,7 @@ func run(specPath string, check bool) error {
 	program.WriteString("package main\nimport (\"fmt\"; \"math\")\n")
 	program.WriteString(reference)
 	program.WriteString("\nfunc main() {\n")
-	fmt.Fprintf(&program, "fmt.Println(%q)\n", "| 表达式 | binary64 bits |")
+	fmt.Fprintf(&program, "fmt.Println(%q)\n", "| Expression | binary64 bits |")
 	fmt.Fprintf(&program, "fmt.Println(%q)\n", "|---|---|")
 	for _, vector := range vectors {
 		format := "| `" + vector.expression + "` | `0x%016x` |\n"
@@ -77,7 +77,9 @@ func run(specPath string, check bool) error {
 	if err != nil {
 		return fmt.Errorf("run numeric reference: %w\n%s", err, stderr.String())
 	}
-	if check && !strings.Contains(section, string(output)) {
+	// Table headings are localized; the separator and exact vector rows are shared.
+	_, table, _ := strings.Cut(string(output), "\n")
+	if check && !strings.Contains(section, table) {
 		return fmt.Errorf("specification bit table differs from reference output:\n%s", output)
 	}
 	_, err = os.Stdout.Write(output)
