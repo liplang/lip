@@ -1,3 +1,3 @@
-module lipbeta
+module lip
 
 go 1.25

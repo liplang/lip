@@ -3,7 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
-	. "lipbeta/script"
+	. "lip/script"
 	"os"
 	"os/exec"
 	"path/filepath"

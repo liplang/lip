@@ -3,7 +3,7 @@ package tests
 import (
 	"context"
 	"io"
-	. "lipbeta/script"
+	. "lip/script"
 	"net"
 	"net/http"
 	"net/http/httptest"

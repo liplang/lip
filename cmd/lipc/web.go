@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"lipbeta/script"
+	"lip/script"
 	"net"
 	"net/http"
 	"os"

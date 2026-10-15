@@ -8,7 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"lipbeta/script"
+	"lip/script"
 	"os"
 	"path/filepath"
 	"sort"

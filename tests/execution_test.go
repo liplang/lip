@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	. "lipbeta/script"
+	. "lip/script"
 	"os/exec"
 	"sort"
 	"strings"

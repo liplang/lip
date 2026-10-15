@@ -2,6 +2,8 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+当前版本：**1.0**。
+
 **用值描述计算，用图组织工作，用事实形成结果。**
 
 LIP 是一门面向可组合计算、并行分析与工具协作的小语言。纯函数计算值，Flow 把工作组织成依赖图，Claim 汇聚带来源的事实，effect / perform 连接外部能力。这些机制共同定义从输入到结果的完整过程：哪些工作可以同时进行，何时结果才算完整，外部动作通过什么边界发生。
@@ -140,7 +142,7 @@ lipc help
 lipc learn -list
 ```
 
-设置了 GOBIN 时，将该目录加入 PATH；自选位置可用 `GOBIN="$HOME/.local/bin" go install ./cmd/lipc`。长期使用时将 PATH 写入 shell 配置；Windows 使用 `lipc.exe` 并配置用户 PATH。当前 Go 模块名为 `lipbeta`，以上安装命令基于本地源码。
+设置了 GOBIN 时，将该目录加入 PATH；自选位置可用 `GOBIN="$HOME/.local/bin" go install ./cmd/lipc`。长期使用时将 PATH 写入 shell 配置；Windows 使用 `lipc.exe` 并配置用户 PATH。当前 Go 模块名为 `lip`，以上安装命令基于本地源码。
 
 ## 语言核心与程序结构
 
@@ -406,7 +408,7 @@ request 提供 method、path、raw_path、host、params、query、headers、body
 
 ## 嵌入与构建身份
 
-Go API 的主要入口如下，import 路径为 `lipbeta/script`：
+Go API 的主要入口如下，import 路径为 `lip/script`：
 
 | 用途 | API |
 |---|---|

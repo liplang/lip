@@ -3,7 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/hex"
-	. "lipbeta/script"
+	. "lip/script"
 	"math"
 	"strings"
 	"sync/atomic"

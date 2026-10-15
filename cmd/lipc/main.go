@@ -5,7 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"lipbeta/script"
+	"lip/script"
 	"os"
 	"os/exec"
 	"os/signal"

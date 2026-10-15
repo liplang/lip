@@ -2,6 +2,8 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+Current version: **1.0**.
+
 **Compute with values. Organize work as a graph. Build results from facts.**
 
 LIP is a small language for composable computation, parallel analysis, and tool collaboration. Pure functions compute values, Flows organize dependent work, Claims collect facts with provenance, and effect / perform connects external capabilities. Together they describe the whole journey from input to result: what can run concurrently, when a result is complete, and how external actions take place.
@@ -140,7 +142,7 @@ lipc help
 lipc learn -list
 ```
 
-If GOBIN is set, add that directory to PATH. A custom location can be selected with `GOBIN="$HOME/.local/bin" go install ./cmd/lipc`. Save PATH in your shell configuration; on Windows, configure user PATH and use `lipc.exe`. The current Go module name is `lipbeta`; these installation commands use local source.
+If GOBIN is set, add that directory to PATH. A custom location can be selected with `GOBIN="$HOME/.local/bin" go install ./cmd/lipc`. Save PATH in your shell configuration; on Windows, configure user PATH and use `lipc.exe`. The current Go module name is `lip`; these installation commands use local source.
 
 ## Language core and program structure
 
@@ -406,7 +408,7 @@ Defaults are 30 seconds, 1 MiB each for request/response bodies, 8 MiB each for 
 
 ## Embedding and build identity
 
-The Go import path is `lipbeta/script`:
+The Go import path is `lip/script`:
 
 | Purpose | API |
 |---|---|

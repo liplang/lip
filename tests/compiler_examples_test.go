@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	. "lipbeta/script"
+	. "lip/script"
 	"os"
 	"os/exec"
 	"path/filepath"
