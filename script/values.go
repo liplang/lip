@@ -690,6 +690,7 @@ func checkType(v Value, typ string) error {
 }
 
 type Diagnostic struct {
+	SourceID string
 	Code     string
 	Message  string
 	Site     int
@@ -702,6 +703,9 @@ type Diagnostic struct {
 
 func (e *Diagnostic) Error() string {
 	if e.Line > 0 {
+		if e.SourceID != "" {
+			return fmt.Sprintf("%s at %s:%d:%d: %s", e.Code, e.SourceID, e.Line, e.Column, e.Message)
+		}
 		return fmt.Sprintf("%s at %d:%d: %s", e.Code, e.Line, e.Column, e.Message)
 	}
 	return e.Code + ": " + e.Message
@@ -726,6 +730,7 @@ func at(err error, t token) *Diagnostic {
 	copy := *e
 	if copy.Site < 0 {
 		copy.Site, copy.Line, copy.Column = t.site, t.line, t.column
+		copy.SourceID = t.source
 	}
 	return &copy
 }

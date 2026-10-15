@@ -34,12 +34,11 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 	}
 	names := map[string]bool{}
-	ts, _ := lex(s.source)
-	for _, t := range ts {
+	mapSyntaxTokens(s, func(t *token) {
 		if t.kind == "id" {
 			names[t.text] = true
 		}
-	}
+	})
 	for name := range saved {
 		names[name] = true
 	}
@@ -189,6 +188,8 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		if stmt.tag == "bind" {
 			scope[stmt.name] = isNative(stmt.expr, scope)
+		} else if stmt.tag == "claim" {
+			scope[stmt.name] = false
 		}
 	}
 	blockLower = func(b *block, scope map[string]bool) {
@@ -203,6 +204,17 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 	}
 	lower = func(e *expression, scope map[string]bool) {
 		if e == nil || failure != nil {
+			return
+		}
+		if e.tag == "pipe" {
+			// A stage is a static LIP declaration, never a native callable or a
+			// bridge helper. Preserve its callee for the ordinary stage checker.
+			lower(e.x, scope)
+			foreign[e] = isNative(e.x, scope)
+			for _, arg := range e.y.args[1:] {
+				lower(arg.expr, scope)
+				foreign[e] = foreign[e] || isNative(arg.expr, scope)
+			}
 			return
 		}
 		// Capture a module path before lowering its receiver. Namespace lookup is
@@ -305,10 +317,17 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			if e.x.tag == "id" && len(e.args) == 1 {
 				action := ""
 				switch e.x.name {
-				case "native_data":
+				case "$native_data":
 					action = "snapshot"
-				case "native_release":
+				case "$native_release":
 					action = "release"
+				case "native_data", "native_release":
+					if _, bound := scope[e.x.name]; !bound {
+						action = "snapshot"
+						if e.x.name == "native_release" {
+							action = "release"
+						}
+					}
 				case "len":
 					action = "length"
 				case "str":
@@ -316,7 +335,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				}
 				if action != "" {
 					lower(e.args[0].expr, scope)
-					if e.x.name == "native_data" || e.x.name == "native_release" || isNative(e.args[0].expr, scope) {
+					if action == "snapshot" || action == "release" || isNative(e.args[0].expr, scope) {
 						perform(e, add(Operation{"host", "lip.native", action}, action), e.args)
 						return
 					}
@@ -445,12 +464,34 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 	}
 	scope := map[string]bool{}
+	for alias := range aliases {
+		scope[alias] = false
+	}
+	for name := range s.functions {
+		scope[name] = false
+	}
+	for name := range s.flows {
+		scope[name] = false
+	}
+	for name := range s.data {
+		scope[name] = false
+	}
 	for name, value := range saved {
 		scope[name] = containsNative(value)
 	}
 	for _, name := range sortedFunctionNames(s.functions) {
 		lower(s.functions[name], scope)
 	}
-	blockLower(s.body, scope)
+	if len(s.flows) == 0 {
+		blockLower(s.body, scope)
+	} else {
+		for _, name := range sortedFlowNames(s.flows) {
+			local := child(scope)
+			for _, param := range s.flows[name].params {
+				local[param.name] = false
+			}
+			blockLower(s.flows[name].body, local)
+		}
+	}
 	return host, failure
 }

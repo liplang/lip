@@ -1,0 +1,22 @@
+# 运行：lipc run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+# 多个 Flow 时必须选入口；未选中的声明也要通过检查。
+# export 让其他 LIP 文件通过 import lip 复用声明；默认名字私有。
+export OFFSET:number = 2
+
+fn add(value:number, delta:number)->number { value + delta }
+
+export flow Adjust(value:number)->number {
+    # 左侧只求值一次，结果注入具名阶段的第一个参数。
+    return value |> add(delta=OFFSET)
+}
+
+flow Main(xs:list)->object {
+    facts = claim()
+    for x in xs parallel {
+        # 每轮调用自己的 Adjust 子图；完整成功后 result 才可用。
+        result = x |> Adjust
+        # 三轮向本次 Main 创建的同一个 facts 贡献记录。
+        facts <+ result
+    }
+    return {values:[row.value for row in facts], count:facts |> len}
+}

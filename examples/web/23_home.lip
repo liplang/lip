@@ -1,0 +1,15 @@
+# 默认路由 GET /{$}；三引号直接保存完整 HTML，保留正文缩进和换行。
+# 页面是静态文本；动态用户内容应通过会自动转义的模板 Host 渲染。
+flow Home(request: object) -> object {
+    return {
+        status: 200,
+        headers: {"Content-Type": "text/html; charset=utf-8"},
+        body: """<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>LIP 网站</title>
+<main><h1>你好，LIP!</h1><p>这个页面由一个 LIP Flow 返回。</p></main>
+</html>
+"""
+    }
+}

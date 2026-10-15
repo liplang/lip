@@ -103,6 +103,12 @@ fn odd(n:number)->bool { if n==0 {false} else {even(n-1)} }`, Options{})
 			t.Fatal("accepted invalid session boundary", source)
 		}
 	}
+	for _, source := range []string{"OFFSET:number=2", "export fn inc(x:number)->number{x+1}"} {
+		_, err := s.Eval(ctx, source, Options{})
+		if d, ok := err.(*Diagnostic); !ok || (d.Code != "E-SESSION" && d.Code != "E-MODULE") || !strings.Contains(d.Message, ":run") {
+			t.Fatal("file declarations need an actionable session diagnostic", source, err)
+		}
+	}
 	if _, err := s.Eval(ctx, "1", Options{RunID: "reuse"}); err == nil {
 		t.Fatal("accepted cross-cell run identity reuse")
 	}
@@ -183,7 +189,7 @@ func TestSessionGeneralHelp(t *testing.T) {
 		}
 	}
 	for source, want := range map[string]string{
-		`help()`:            "LIP 交互帮助",
+		`help()`:            "LIP 1.0 交互帮助",
 		`help(3)`:           "binary64",
 		`help(true)`:        "bool",
 		`help(null)`:        "null",
@@ -356,15 +362,18 @@ def nonfinite():
 }
 
 func TestCellContinuationUsesCoreGrammar(t *testing.T) {
-	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else"} {
+	for _, source := range []string{"[1,\n", "fn square(x:number)->number {\n", "1 + \\\n", "(1 +\n", "if true {1} else", "x=\"\"\"\n:help\n", `"""quote ""`} {
 		if !CellIncomplete(source) {
 			t.Fatalf("unfinished cell considered complete: %q", source)
 		}
 	}
-	for _, source := range []string{`"["`, "[1,2]\n", "[1)\n", `"bad`, "1 + )", "if true {1} else {2}", "# comment\n"} {
+	for _, source := range []string{`"["`, "[1,2]\n", "[1)\n", `"bad`, "1 + )", "if true {1} else {2}", "# comment\n", "\"\"\"done\n\"\"\"", `"""bad\x`, `"""\u{d800}`} {
 		if CellIncomplete(source) {
 			t.Fatalf("complete/malformed cell requested more input: %q", source)
 		}
+	}
+	if !CellInMultilineString("x=\"\"\"\n:quit\n") || CellInMultilineString(`"""done"""`) {
+		t.Fatal("multiline string command context was lost")
 	}
 }
 
@@ -397,10 +406,117 @@ func TestInteractiveCLI(t *testing.T) {
 			t.Fatalf("stdout %q stderr %q", stdout, stderr)
 		}
 	})
+	t.Run("entry-selection-and-input", func(t *testing.T) {
+		file := filepath.Join(dir, "entries.lip")
+		source := "flow First(x:number)->number {return x+OFFSET}\nflow Second()->null {return null}\nOFFSET:number=2"
+		if err := os.WriteFile(file, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run("", "run", "-entry", "First", "-entry-input", `{"positional":[3],"named":{}}`, "-entry-output", file)
+		if stdout != "{\"kind\":\"value\",\"value\":5}\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run("", "run", "-entry", "Second", "-entry-output", file)
+		if stdout != "{\"kind\":\"value\",\"value\":null}\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+		for _, input := range []string{`{"x":1,"x":2}`, `{"x":"\ud800"}`, `{"x":`, `[]`, `{},"positional":[]`} {
+			cmd := exec.CommandContext(ctx, binary, "run", "-entry", "First", "-input", input, file)
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "E-SCHEMA") {
+				t.Fatalf("named input %s: %s %v", input, out, err)
+			}
+		}
+	})
+	t.Run("static-modules-run-and-build", func(t *testing.T) {
+		project := filepath.Join(dir, "project")
+		if err := os.MkdirAll(filepath.Join(project, "lib"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(project, "main.lip")
+		dep := filepath.Join(project, "lib", "math.lip")
+		for path, source := range map[string]string{
+			file: "import lip \"./lib/math.lip\" as math\nflow Main(x:number)->number{return x |>math.Double}\nflow Empty()->void{}",
+			dep:  "BASE:number=2\nexport flow Double(x:number)->number{return x*BASE}",
+		} {
+			if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stdout, stderr := run("", "run", "-entry", "Main", "-project", project, "-input", `{"x":3}`, file)
+		if stdout != "6\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+		executable := filepath.Join(dir, "module-program")
+		run("", "build", "-entry", "Main", "-project", project, "-o", executable, file)
+		// Executables use the frozen closure, even after a dependency changes.
+		if err := os.WriteFile(dep, []byte("invalid source"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, executable, "-entry-input", `{"positional":[3],"named":{}}`, "-entry-output")
+		out, err := cmd.CombinedOutput()
+		if err != nil || string(out) != "{\"kind\":\"value\",\"value\":6}\n" {
+			t.Fatal(string(out), err)
+		}
+	})
+	t.Run("repl-v1-file-boundary", func(t *testing.T) {
+		file := filepath.Join(dir, "entry with spaces.lip")
+		if err := os.WriteFile(file, []byte("flow Add(x:number)->number{return x+2}\nflow Empty()->void{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		input := "x=9\nfn twice(n:number)->number{n*2}\n3 |>twice\n" +
+			":run -entry Add -entry-input '{\"positional\":[3],\"named\":{}}' -entry-output \"" + file + "\"\n" +
+			":run -entry Empty -entry-output '" + file + "'\n" +
+			":run 'unfinished\nx\n:quit\n"
+		stdout, stderr := run(input, "repl")
+		if stdout != "9\n6\n{\"kind\":\"value\",\"value\":5}\n{\"kind\":\"void\"}\n9\n" || !strings.Contains(stderr, "unfinished quote") {
+			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("repl-multiline-string", func(t *testing.T) {
+		stdout, stderr := run("text=\"\"\"\n:quit\n\n# literal comment\n\"\"\"\ntext\n:quit\n", "repl")
+		want := "\"\\u000a:quit\\u000a\\u000a# literal comment\\u000a\"\n"
+		if stdout != want+want || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("learn-multiline-string", func(t *testing.T) {
+		stdout, stderr := run("\"\"\"Hello, LIP!\"\"\"\n:edit\nflow Hello()->string {\n s=\"\"\"\n:quit\n\"\"\"\n return \"Hello, LIP!\"\n}\n:submit\n:quit\n", "learn", "-lesson", "hello")
+		if stderr != "" || strings.Count(stdout, "通过") != 2 {
+			t.Fatal(stdout, stderr)
+		}
+	})
 	t.Run("repl-flow", func(t *testing.T) {
 		stdout, stderr := run(":run examples/advanced/14_parallel_claim.lip\n:quit\n", "repl")
 		if stderr != "" || !strings.Contains(stdout, `"count":3`) {
 			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("web-server", func(t *testing.T) {
+		python, err := exec.LookPath("python3")
+		if err != nil {
+			t.Skip("HTTP CLI process probe needs Python 3")
+		}
+		for _, name := range []string{"23_home", "24_echo", "25_greeting"} {
+			data, err := os.ReadFile(filepath.Join("..", "examples", "web", name+".lip"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, name+".lip"), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		manifest := filepath.Join(dir, "routes.json")
+		data := `[{"pattern":"GET /{$}","source":"23_home.lip"},{"pattern":"POST /api/echo","source":"24_echo.lip"},{"pattern":"GET /api/hello/{name}","source":"25_greeting.lip"}]`
+		if err := os.WriteFile(manifest, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, python, "-c", webServingProbe, binary, manifest)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			if failure, ok := err.(*exec.ExitError); ok && failure.ExitCode() == 77 && strings.Contains(string(out), "TCP_LISTEN_NOT_PERMITTED") {
+				t.Skip("sandbox blocks TCP listeners; in-memory HTTP wire and handler tests cover the adapter")
+			}
+			t.Fatalf("web server: %v\n%s", err, out)
 		}
 	})
 	t.Run("repl-host", func(t *testing.T) {
@@ -414,7 +530,7 @@ func TestInteractiveCLI(t *testing.T) {
 			t.Skip("Python 3 unavailable")
 		}
 		stdout, stderr := run("3 ** -2\nimport python \"math\" as m\nm.sqrt(3)\nhelp(m.sqrt)\nimport python \"math\"\nmath.sqrt(3)\nhelp()\nhelp(len)\nhelp([1,2])\nm.missing()\nm.sqrt(4)\n:quit\n", "repl")
-		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 交互帮助\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
+		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 1.0 交互帮助\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
 			t.Fatalf("stdout %q stderr %q", stdout, stderr)
 		}
 	})
@@ -453,6 +569,22 @@ func TestInteractiveCLI(t *testing.T) {
 		stdout, stderr = run(":quit\n", "learn", "-progress", path)
 		if stderr != "" || !strings.Contains(stdout, "arithmetic") {
 			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("v1-lessons", func(t *testing.T) {
+		for _, test := range []struct{ id, answer string }{
+			{"entries", "n+OFFSET"},
+			{"flows", "n |>Double |>adjust(delta=3)"},
+			{"modules", "{total:n |>pricing.Adjust,base:pricing.BASE}"},
+		} {
+			stdout, stderr := run(test.answer+"\n:quit\n", "learn", "-lesson", test.id)
+			if stderr != "" || !strings.Contains(stdout, "LIP 1.0") || strings.Count(stdout, "用例 ") != 2 || !strings.Contains(stdout, "通过") {
+				t.Fatal(test.id, stdout, stderr)
+			}
+		}
+		stdout, stderr := run("{total:n |>pricing.add,base:pricing.BASE}\n{total:n |>pricing.Adjust,base:pricing.BASE}\n:quit\n", "learn", "-lesson", "modules")
+		if !strings.Contains(stderr, "E-EXPORT") || strings.Count(stdout, "通过") != 1 {
+			t.Fatal("module rejection must allow retry", stdout, stderr)
 		}
 	})
 	t.Run("full-program", func(t *testing.T) {
@@ -542,6 +674,9 @@ try:
     t.value('"Ae\u0301"\x1b[D\x7fB\x1b[F\r', '"AB"')
     t.value('"A👩‍💻"\x1b[D\x7fB\x1b[F\r', '"AB"')
     t.value('\x1b[200~if true {\r\n2 ** 3\r\n} else {0}\x1b[201~\r', '8')
+    t.send('msg="""\r'); t.ready()
+    t.send(':quit\r'); t.ready()
+    t.value('"""\r', '"\\u000a:quit\\u000a"')           # commands inside a multiline string are text
     t.send('fn broken(x:number)->number {\r'); t.ready()
     t.send('unfinished\x03'); t.wait(b'^C'); t.ready()
     t.value('1+2\r', '3')                         # Ctrl-C clears pending cell
@@ -569,3 +704,111 @@ try:
 finally:
     t.close()
 `
+
+const webServingProbe = `
+import json, signal, subprocess, sys, urllib.request, urllib.error
+p = subprocess.Popen([sys.argv[1], 'serve', '-addr', '127.0.0.1:0', '-routes', sys.argv[2]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    line = p.stderr.readline().decode()
+    if 'socket: operation not permitted' in line or 'socket: permission denied' in line:
+        print('TCP_LISTEN_NOT_PERMITTED')
+        raise SystemExit(77)
+    assert ' at http://' in line, line
+    base = line.split(' at ', 1)[1].strip()
+    with urllib.request.urlopen(base+'/', timeout=5) as r:
+        assert r.status == 200 and 'LIP 网站' in r.read().decode()
+    with urllib.request.urlopen(base+'/api/hello/Ada', timeout=5) as r:
+        assert json.load(r) == {'message':'Hello, Ada'}
+    request = urllib.request.Request(base+'/api/echo?x=1&x=2', data=b'{"value":3}', headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(request, timeout=5) as r:
+        assert json.load(r) == {'received':{'value':3}, 'query':{'x':['1','2']}}
+    try: urllib.request.urlopen(urllib.request.Request(base+'/', method='HEAD'), timeout=5)
+    except urllib.error.HTTPError as e:
+        assert e.code == 405 and e.headers['Allow'] == 'GET'
+    else: raise AssertionError('HEAD fell back to GET')
+    request = urllib.request.Request(base+'/api/echo', data=b'{"x":1,"x":2}', headers={'Content-Type':'application/json'})
+    try: urllib.request.urlopen(request, timeout=5)
+    except urllib.error.HTTPError as e: assert e.code == 400
+    else: raise AssertionError('duplicate JSON fields accepted')
+    p.send_signal(signal.SIGINT)
+    assert p.wait(timeout=8) == 0
+finally:
+    if p.poll() is None: p.kill(); p.wait()
+`
+
+func TestLocalSourceSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "main.lip")
+	dep := filepath.Join(dir, "dep.lip")
+	if err := os.WriteFile(root, []byte("import lip \"./dep.lip\" as d\nflow Main()->number{return d.answer()}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dep, []byte("export fn answer()->number{42}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := LoadSourceSet(root, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dep, []byte("export fn answer()->number{99}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "42" {
+		t.Fatal("compile reread frozen source", report, err)
+	}
+	logical := filepath.Join(t.TempDir(), "project")
+	if err := os.Symlink(dir, logical); err == nil {
+		for _, filename := range []string{root, filepath.Join(logical, "main.lip")} {
+			if _, err := LoadSourceSet(filename, logical); err != nil {
+				t.Fatal("physical project root", err)
+			}
+		}
+	}
+	if err := os.Remove(dep); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, dep); err != nil {
+		t.Skip(err)
+	}
+	if _, err := LoadSourceSet(root, dir); err == nil || err.(*Diagnostic).Code != "E-MODULE" {
+		t.Fatal("source symlink accepted", err)
+	}
+	if err := os.Remove(dep); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(root, dep); err != nil {
+		t.Skip(err)
+	}
+	if _, err := LoadSourceSet(root, dir); err == nil || err.(*Diagnostic).Code != "E-MODULE" {
+		t.Fatal("duplicate physical source accepted", err)
+	}
+}
+
+func TestSessionPipelineDeclarationSurvivesCells(t *testing.T) {
+	s, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, source := range []string{`fn twice(n:number)->number{n*2}`, `alias=twice`} {
+		if _, err := s.Eval(context.Background(), source, Options{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := s.Eval(context.Background(), `3 |> twice`, Options{})
+	if err != nil || display(t, result.Value) != "6" {
+		t.Fatal(result, err)
+	}
+	if _, err := s.Eval(context.Background(), `3 |> alias`, Options{}); err == nil {
+		t.Fatal("dynamic stage accepted")
+	}
+	s.Reset()
+	if _, err := s.Eval(context.Background(), `3 |> twice`, Options{}); err == nil {
+		t.Fatal("reset retained a declaration")
+	}
+}

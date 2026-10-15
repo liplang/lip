@@ -26,12 +26,15 @@ func run(ctx context.Context, args []string) error {
 	}
 	command := args[0]
 	switch command {
+	case "serve":
+		return serve(ctx, args[1:])
 	case "repl":
 		return repl(ctx, args[1:])
 	case "learn":
 		return learn(ctx, args[1:])
 	case "help", "-h", "--help":
-		fmt.Println("lipc run [-host demo] [-input JSON] [-parallel N] program.lip\nlipc emit-go [-host demo] -o program.go program.lip\nlipc build [-host demo] -o executable program.lip\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
+		fmt.Println("LIP 1.0 · pure values, structured Flows, Claim facts, effect/perform")
+		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
 		return nil
 	case "run", "emit-go", "build":
 		args = args[1:]
@@ -42,7 +45,11 @@ func run(ctx context.Context, args []string) error {
 	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	output := flags.String("o", "", "generated Go or executable destination")
 	input := flags.String("input", "{}", "Flow inputs as a JSON object")
-	parallel := flags.Int("parallel", 1, "maximum active graph nodes")
+	entry := flags.String("entry", "", "root Flow declaration to run or compile")
+	project := flags.String("project", "", "project root for static LIP imports; defaults to source directory")
+	entryInput := flags.String("entry-input", "", "EntryInput JSON with positional and named fields")
+	entryOutput := flags.Bool("entry-output", false, "print the value/void success envelope")
+	parallel := flags.Int("parallel", 1, "maximum active leaf evaluations (waiting containers yield)")
 	steps := flags.Int64("steps", 10000000, "step budget (0 unlimited)")
 	elements := flags.Int64("elements", 1000000, "list allocation budget (0 unlimited)")
 	if err := flags.Parse(args); err != nil {
@@ -50,6 +57,14 @@ func run(ctx context.Context, args []string) error {
 	}
 	if flags.NArg() != 1 {
 		return usage()
+	}
+	hasInput, hasEntryInput := false, false
+	flags.Visit(func(f *flag.Flag) {
+		hasInput = hasInput || f.Name == "input"
+		hasEntryInput = hasEntryInput || f.Name == "entry-input"
+	})
+	if hasInput && hasEntryInput {
+		return fmt.Errorf("choose -input or -entry-input")
 	}
 	host := script.Host{}
 	goOptions := script.GoOptions{}
@@ -72,28 +87,32 @@ func run(ctx context.Context, args []string) error {
 	}
 	host = script.NewNativeHost(host)
 	defer host.Close()
-	source, err := os.ReadFile(flags.Arg(0))
+	sources, err := script.LoadSourceSet(flags.Arg(0), *project)
 	if err != nil {
 		return err
 	}
-	program, err := script.Compile(string(source), host)
+	program, err := script.CompileSourceSet(sources, host, script.CompileOptions{Entry: *entry})
 	if err != nil {
 		return err
 	}
 	if command == "run" {
-		data, err := script.DecodeData([]byte(*input))
+		inputJSON := *entryInput
+		if !hasEntryInput {
+			inputJSON = "{\"positional\":[],\"named\":" + *input + "}"
+		}
+		data, err := script.DecodeEntryInput([]byte(inputJSON))
 		if err != nil {
 			return err
 		}
-		fields, ok := data.Fields()
-		if !ok {
-			return fmt.Errorf("input must be a JSON object")
-		}
-		report, err := program.Run(ctx, fields, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000})
+		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000})
 		if err != nil {
 			return err
 		}
-		dataJSON, err := script.EncodeJSON(report.Output)
+		outputValue := report.Output
+		if *entryOutput {
+			outputValue = *report.EntryOutput
+		}
+		dataJSON, err := script.EncodeJSON(outputValue)
 		if err != nil {
 			return err
 		}
@@ -136,5 +155,5 @@ func writeFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
 }
 func usage() error {
-	return fmt.Errorf("usage: lipc {run|emit-go|build|repl|learn}; see lipc help")
+	return fmt.Errorf("usage: lipc {run|emit-go|build|serve|repl|learn}; see lipc help")
 }

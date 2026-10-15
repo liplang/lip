@@ -1,184 +1,254 @@
-# LIP beta 0.9
+# LIP 1.0
 
 [简体中文](README.md) | [English](README.en.md)
 
-LIP is a small computational language for organizing calculations, parallel tasks, and tool calls. You describe inputs, dependencies, and results; the runtime builds a dependency graph and runs eligible work concurrently.
+**Compute with values. Organize work as a graph. Build results from facts.**
 
-We build only the language core. Files, networking, databases, models, and other library capabilities primarily come from the **Go / Python ecosystems**, connected through a single external operation interface.
+LIP is a small language for composable computation, parallel analysis, and tool collaboration. Pure functions compute values, Flows organize dependent work, Claims collect facts with provenance, and effect / perform connects external capabilities. Together they describe the whole journey from input to result: what can run concurrently, when a result is complete, and how external actions take place.
 
-## Three mechanisms to know
+The focus is a solid computational core. Math, files, networking, databases, and models come through the **Go / Python ecosystems**. Interactive exploration and generated Go share the same value, dependency, identity, and call rules. LIP fits programs that break down tasks, collect evidence, call tools, and produce an explicit conclusion.
 
-**Graph-based parallelism.** A computation that uses another computation's result waits for it to finish. Independent work that permits concurrency can run at the same time. This lets you organize multiple analysis tasks without managing threads, task queues, or completion counters yourself.
+[Language specification](spec/LIP-1.0-SPEC.md) · [Example tutorial](examples/README.md) · [Implementation and validation](IMPLEMENTATION.md)
 
-**Claim collects facts.** Parallel tasks submit results with `<+`, without overwriting existing facts. A complete Claim read waits for the relevant producers to finish, then returns records ordered by their logical program positions. Each record carries its value and source position, making it easier to combine results, check for missing evidence, and trace conclusions.
+## One program, the whole model
 
-**effect / perform calls external operations.** `effect` creates a request; `perform` executes it. All Go, Python, and Host operations use this same interface, with consistent checks for arguments, return values, permissions, and call records. You can save a request and use it as input to a later step; `import` itself does not execute native code.
+This is the core of [26_flows.lip](examples/advanced/26_flows.lip):
 
 ```lip
-import go "strings" as text
+export OFFSET:number = 2
+fn add(value:number, delta:number)->number { value + delta }
 
-flow Analyze() -> list {
-    facts = claim()                 # Create a store for collecting facts.
-    for name in ["ada", "lin", "sam"] parallel {
-        # The Host has registered this Go operation and permits concurrent reads.
-        result = perform effect text.ToUpper(name)
-        facts <+ {input: name, result: result}  # Append a fact.
+export flow Adjust(value:number)->number {
+    return value |> add(delta=OFFSET)
+}
+
+flow Main(xs:list)->object {
+    facts = claim()
+    for x in xs parallel {
+        result = x |> Adjust
+        facts <+ result
     }
-    # Reading facts waits for contributions; row.value contains the submitted data.
-    return [row.value for row in facts]
+    return {values:[row.value for row in facts], count:facts |> len}
 }
 ```
 
-Immutable values, pure functions, conditions, loops that carry values between iterations, and these three mechanisms are enough to build **ReAct** programs: “think → call a tool → observe the result → decide again.” Reactive workflows can follow “receive an event → run a computation → collect results → perform an action.” The graph manages dependencies within one run; the Host handles ongoing event reception and starts subsequent runs. A live Claim snapshot is a single observation, with no automatic subscription or threshold trigger.
+```sh
+make build
+./lipc run -entry Main -parallel 4 -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+# {"count":3,"values":[5,3,4]}
+```
+
+This program adds 2 to each input, allows the iterations to run concurrently, and collects results in input order. Its four declarations have distinct roles:
+
+| Declaration | Role in the program | Accessible from other LIP modules? |
+|---|---|---|
+| `OFFSET` | Immutable module-level static data with value `2`; `number` is its type annotation | Yes, through `export` |
+| `add` | A pure function computing the sum of two numbers | No, private by default |
+| `Adjust` | A reusable Flow template using `add` and `OFFSET` | Yes, through `export` |
+| `Main` | A Flow template that creates a Claim, expands the loop, and collects results | No; `-entry Main` selects it as this run's root entry |
+
+### How `OFFSET` connects modules and computation
+
+Each `.lip` file is a module. Uppercase `OFFSET` is a naming convention; its value is fixed in the code and included in the build snapshot. `export` controls visibility outside the module; `-entry` selects the entry point.
+
+Another file at the project root can use `import lip "./examples/advanced/26_flows.lip" as adjust`, then read `adjust.OFFSET` or call `x |> adjust.Adjust`. The importer chooses the namespace alias `adjust`. The imported `Adjust` always uses `OFFSET` and the private function `add` from its **defining module**. Local values with the same names in the caller do not change its computation. Removing `export` from `OFFSET` would still let `Adjust` use it within this module; external reads of `adjust.OFFSET` would be rejected. See [Child Flows, pipelines, and static modules](#child-flows-pipelines-and-static-modules) for the complete two-file example.
+
+### From declarations to a running result
+
+At build time, the tool freezes the source and imported dependencies, then collects and checks static data, functions, and Flow declarations. Imports establish module relationships; the bodies of `Main` and `Adjust`, including `claim()`, execute when called.
+
+This run establishes the following work and dependencies:
+
+1. `-entry Main` selects the entry point, and the JSON input binds `[3,1,2]` to `xs`. After input validation, a run is created. The `Main` instance creates **one `facts` Claim shared by all three iterations**.
+2. The `for` source `xs` is evaluated once, and three iterations expand in original index order. Each `result = x |> Adjust` instantiates its own `Adjust` subgraph, with separate parameters and structural identity. In the first iteration, the pipeline fixes `3` and passes it to `Adjust(value=3)`. Inside that Flow, `value |> add(delta=OFFSET)` computes `add(value=3, delta=2)`, producing `5`. The pure function `add` computes a value within the current node.
+3. Each `facts <+ result` waits for its corresponding subgraph to succeed completely, then submits a record to the shared Claim. The three iterations contribute `5`, `3`, and `4`; their work can interleave.
+4. The final `return` reads `facts` completely, waiting for all contribution work. The snapshot orders records by logical position: iterations 0, 1, and 2 in this example. `row.value` extracts each record's value, and `len` counts the records. Once the entire entry graph succeeds, the Host receives `{"count":3,"values":[5,3,4]}`.
+
+This diagram shows the example's value dependencies; each `Adjust` box contains its own subgraph:
+
+```mermaid
+flowchart TD
+    M["Main: xs = [3,1,2], create facts"]
+    M --> A["Iteration 0: Adjust(3) → 5"]
+    M --> B["Iteration 1: Adjust(1) → 3"]
+    M --> C["Iteration 2: Adjust(2) → 4"]
+    A --> JA["facts <+ 5"]
+    B --> JB["facts <+ 3"]
+    C --> JC["facts <+ 4"]
+    JA --> R["Read facts completely, order records by iteration"]
+    JB --> R
+    JC --> R
+    R --> O["values = [5,3,4], count = 3"]
+```
+
+Thus `[5,3,4]` preserves input position; neither numeric order nor completion timing changes that order. `|>` evaluates its left side once and completes each stage before entering the next. Pure function stages compute within a node; Flow stages instantiate subgraphs.
+
+`-parallel 4` allows at most four active leaf evaluations across the entire run. Parent and child graphs share one scheduler and budget. Containers waiting for children yield their worker slots so the scheduler can execute child nodes. Set the limit to `1`, and the same program still completes with the same result.
+
+## What makes LIP distinctive
+
+### Values and work each have a clear expression
+
+A `fn` is a pure function capturing immutable values, suitable for transformations, validation, recursion, and reduction. A `flow` is a reusable graph template for dependencies, branches, loops, and external calls. Bindings connect results. A successful child Flow means its entire selected subgraph has completed, including work beyond the return expression. Receiving the result also establishes that the stage has finished.
+
+Pure functions support proper tail calls, including direct, mutual, and indirect recursion. Flows repeat work with explicit loops. Local expressions and arguments evaluate from left to right; independent graph nodes follow dependencies and operation contracts. Program structure explains both sequence and concurrency.
+
+### Claim gives parallel collection a completion boundary, provenance, and order
+
+`claim()` creates an append-only collection of facts; `<+` submits contributions with structural identities. An identical contribution under the same identity can be delivered again. Equal values under different identities remain distinct facts. A complete read waits for all producers, then returns records containing values and source positions.
+
+Counts, missing evidence, rankings, scores, and final reports are ordinary pure projections. Fact collection and business decisions can be reused independently, while each result remains traceable to its contributing work. Use a live snapshot for a single immediate observation; read the Claim directly for a complete conclusion.
+
+### Every external action follows one protocol
+
+`effect` fixes an operation and its arguments into a request value. `perform` handles admission, invocation, and recording. Host contracts declare schemas, versions, permissions, effects, concurrency, and resource requirements. The runtime uses them to overlap eligible reads and preserve ordering around writes.
+
+Direct Go/Python library calls lower to this protocol too. Interactive convenience, explicit operation contracts, and generated programs share the same external call path. Argument and authorization checks precede actual operations.
+
+### Dynamic work has stable structural identity
+
+Loop iterations, child Flows, contributions, and calls derive identities from source positions and dynamic paths. These identities connect diagnostics, Claim provenance, and call records without numbering work by arrival or completion. Modules are frozen into one source snapshot at build time; source contents, versions, and dependency resolution determine its build identity.
+
+Under the specification's conditions—fixed inputs and external responses, fair and finite termination, no live snapshot, and no cancellation or budget interference—legal schedules produce the same successful result or primary error. Claim order and structural identities make those results inspectable. See [specification §13](spec/LIP-1.0-SPEC.md#13-确定性与保证边界) for the complete conditions.
+
+### One program, from exploration to a Go executable
+
+The REPL, 18 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
+
+These LIP 1.0 mechanisms are implemented in an executable compiler and runtime. Tests build and run generated programs, comparing outputs, errors, identities, and call boundaries. Composition tests combine modules, closures, loops, child graphs, and pipelines at worker limits 1, 2, and 4. [Implementation and validation](IMPLEMENTATION.md) maps specification sections to concrete tests.
 
 ## Getting started
 
-Go **1.25 or newer** is required. No specific patch release or `toolchain` version is pinned. The current validation environment uses Go 1.27. Basic Python lessons use the Python 3 standard library; scientific examples also require the corresponding third-party packages.
-
-Install the command from the beta project root, which contains `go.mod`:
-
-```sh
-go install ./cmd/lipc
-```
-
-Go installs `lipc` in the directory specified by `go env GOBIN`. If GOBIN is empty, it uses the `bin` directory under GOPATH, usually `~/go/bin`. Add that directory to PATH to start the interactive tools from any directory:
-
-```sh
-export PATH="$(go env GOPATH)/bin:$PATH"  # When using the default installation directory.
-lipc help
-lipc repl
-lipc learn
-lipc learn -lesson power
-lipc run /path/to/program.lip
-lipc build -o /path/to/program /path/to/program.lip
-```
-
-You can also choose an installation directory, for example on Linux/macOS:
-
-```sh
-mkdir -p "$HOME/.local/bin"
-GOBIN="$HOME/.local/bin" go install ./cmd/lipc
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-For continued use, add the appropriate PATH setting to your shell configuration. On Windows, add the installation directory to your user PATH; the command is named `lipc.exe`. The REPL and learning tool include their runtime and lessons, so these commands do not require the source directory after installation.
-
-The module name in `go.mod` is currently `lipbeta`, so the commands above install from local source. A remote `go install repository/path/cmd/lipc@version` command will be provided once the published module path is established.
-
-If linking fails with `mapping output file failed: no space left on device`, the temporary filesystem used by Go usually lacks free space or inodes. Clear caches you have confirmed are no longer needed there and retry, or select a temporary directory with enough space. At this point lipc has not started, so it cannot clean up automatically or append a project-specific hint to the Go command's error.
-
-Check the actual build locations. The commands below assume the default temporary directory, `/tmp`; if you set `GOTMPDIR` or `TMPDIR`, check that directory instead:
-
-```sh
-df -h . /tmp
-df -i . /tmp
-go env GOTMPDIR GOCACHE
-```
-
-`/tmp` may be a separate, small tmpfs. Go links in its temporary directory before copying to the installation directory, so free space at the destination does not ensure the build can succeed. `go clean -cache` only clears the build cache selected by `go env GOCACHE`; if that cache is on another filesystem, clearing it cannot free space in the full temporary filesystem. For other Go build caches, confirm the directory and its purpose before using `GOCACHE=/confirmed/cache/directory go clean -cache`. Keep active build directories and other files.
-
-Alternatively, choose a writable temporary directory with enough space in the current terminal, then install:
-
-```sh
-mkdir -p .build/tmp
-export GOTMPDIR="$PWD/.build/tmp"
-export TMPDIR="$GOTMPDIR"
-go install ./cmd/lipc
-```
-
-These variables affect only the current terminal and its child processes. A direct `go install` does not read Makefile settings; `make build` automatically uses a project-local temporary directory. Automatic Go adapters and `lipc build` also need temporary space, so retain these variables if the default directory remains full. `make clean` removes `.build`; recreate the directory before further use, or choose another writable directory on a disk with enough space.
-
-To try examples from the source directory, build locally:
+Use **Go 1.25 or newer**. Basic Python examples use the Python 3 standard library; scientific examples require the respective packages in the active Python environment. From the project root containing `go.mod`:
 
 ```sh
 make build
 ./lipc run examples/basics/01_hello.lip
+# "Hello, LIP!"
 ./lipc run -parallel 4 examples/evidence.lip
-./lipc run -host demo examples/ecosystem/17_go_python.lip
+# {"missing":["b","c"]}
+./lipc repl
+./lipc learn -lesson flows
 ```
 
-The respective outputs are:
+Install the command to use the bundled runtime and lessons from other directories:
 
-```text
-"Hello, LIP!"
-{"missing":["b","c"]}
-{"digest":"a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4","mean":2}
+```sh
+go install ./cmd/lipc
+export PATH="$(go env GOPATH)/bin:$PATH"  # Default location when GOBIN is empty.
+lipc help
+lipc learn -list
 ```
 
-The [example tutorial](examples/README.md) starts with Hello World, bindings, and arithmetic, then introduces functions, branches, loops, parallelism, Claim, and external calls. The tutorial and comments in the LIP programs under `examples/` are currently in Chinese.
+If GOBIN is set, add that directory to PATH. A custom location can be selected with `GOBIN="$HOME/.local/bin" go install ./cmd/lipc`. Save PATH in your shell configuration; on Windows, configure user PATH and use `lipc.exe`. The current Go module name is `lipbeta`; these installation commands use local source.
 
-Arithmetic supports `+ - * / // % ** */`. `**` is exponentiation; `a */ b` computes the logarithm of a with base b, the operand on the right:
+## Language core and program structure
+
+Bindings are immutable; inner scopes can shadow ordinary names. Values include null, bool, finite binary64 numbers, UTF-8 strings, lists, objects, pure functions, and requests. **Data** recursively excludes functions and requests and is the boundary format for Flows, Hosts, and Claims. An `any` annotation still requires the type and Data checks of its eventual use.
+
+| Work to express | Syntax |
+|---|---|
+| Pure transformation | `fn twice(x:number)->number { x * 2 }` |
+| Conditions and dispatch | `if ... { ... } else { ... }`, `match` |
+| List transformation and reduction | Comprehensions, `map`, `fold` |
+| Carry a result between iterations | `for x in xs with total=0 { next total+x }` |
+| Independent work and fact collection | `for x in xs parallel { facts <+ x*x }` |
+| Structured stages | `x |> Adjust |> Finish` |
+| External request and execution | `request=effect op(args)`, `perform request` |
+
+Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; domain errors and non-finite results raise `E-NUMBER`. See the [tutorial](examples/README.md) for numerical, string, and control-structure examples.
+
+### Entry points and successful results
+
+Files can declare static literal Data, pure functions, and multiple Flows. A sole root Flow is selected automatically; use `-entry` with multiple Flows. All declarations in the source closure are checked, including unselected ones.
 
 ```lip
-flow Numbers() -> object {
-    return {
-        power: 2 ** 3,             # 8
-        chain: 2 ** 3 ** 2,        # 512, equivalent to 2 ** (3 ** 2)
-        negative: -3 ** 2,         # -9, equivalent to -(3 ** 2)
-        square: (-3) ** 2,         # 9; parentheses make the negative number the base.
-        reciprocal: 2 ** -3,       # 0.125
-        logarithm: 8 */ 2          # 3, the same number as 3.0
-    }
+BASE:number = 2
+fn add_base(x:number)->number { x + BASE }
+flow Add(x:number)->number { return add_base(x) }
+flow Empty()->void {}
+```
+
+Save as `program.lip`, then run:
+
+```sh
+./lipc run -entry Add -input '{"x":3}' program.lip
+# 5
+./lipc run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output program.lip
+# {"kind":"value","value":5}
+./lipc run -entry Empty -entry-output program.lip
+# {"kind":"void"}
+```
+
+`-input` takes a JSON object of named arguments; `-entry-input` takes the full EntryInput. They are mutually exclusive. Validation happens before allocating a run_id, journal, or graph; invalid inputs raise `E-SCHEMA`. Default output is JSON. `-entry-output` preserves the success envelope, distinguishing void from a returned null, `{"kind":"value","value":null}`. Successful output waits for the entire graph. Logging and file writes are external operations; the teaching Host writes console output to stderr, keeping stdout for results.
+
+### Child Flows, pipelines, and static modules
+
+Child Flows receive context through parameters; bindings and Claims belong to individual instances. Explicit Flow arguments must be Pure Data. Use a binding or pipeline when another call must complete first. Flow targets are static; recursive Flow call graphs are rejected at compile time.
+
+Pipeline stages are named functions, Flows, exported module functions/Flows, or core pure functions. Function values and native library functions use ordinary calls. `|>` binds less tightly than `||`; compare stage results with `(x |> F) == y`. Business values such as `{ok:false}` are ordinary Data; use `if` or `match` to decide what follows.
+
+Modules publish declarations with `export` and use their own static data, functions, and imports. Save this `reuse.lip` at the project root to reuse the opening example:
+
+```lip
+import lip "./examples/advanced/26_flows.lip" as adjust
+flow Main(xs:list)->list {
+    return [x |> adjust.Adjust for x in xs]
 }
 ```
 
-`*/` has the same precedence as multiplication and division and associates from left to right. Logarithms require a positive left operand and a positive base other than 1. Powers with a negative base require an integer exponent. `0 ** 0` is defined as 1; `0 ** -1` is an error. Exponentiation and logarithms use the fixed binary64 algorithms in the specification. Results are approximate and are not guaranteed to be correctly rounded; domain errors and non-finite results raise `E-NUMBER`. Use Go/Python libraries through the Host for other numerical capabilities.
-
-Pass Flow arguments as a JSON object:
-
 ```sh
-./lipc run -input '{"name":"Ada","scores":[0.6,0.9]}' examples/advanced/15_inputs.lip
+./lipc run -input '{"xs":[3,1,2]}' reuse.lip
+# [5,3,4]
 ```
 
-The CLI writes the final result as JSON. Use registered external operations to print messages or write files. The demo Host's `console.write` writes to stderr, leaving stdout for the result.
+`run`, `emit-go`, `build`, and `serve` freeze the complete dependency closure. `-project` selects the project root, defaulting to the entry file's directory. Symlinks below the root, escaping paths, and duplicate physical files are rejected. Builds allow up to 4,096 sources and 64 MiB total. LIP module imports resolve declarations; rebuild after source changes.
 
-## Interactive computation and learning
+## Connecting Go / Python
 
-```sh
-./lipc repl
-./lipc repl -host demo
-./lipc learn
-./lipc learn -list
-./lipc learn -lesson claim
-```
-
-In the REPL, you can enter expressions, immutable bindings, functions, and requests directly:
+CLI file execution, builds, and the REPL enable the generic library bridge by default. Call libraries in the current Go/Python environment, or register Host contracts with explicit schemas, effects, and concurrency guarantees.
 
 ```text
-In [1]: x = 6
-6
-In [2]: fn twice(n:number) -> number { n * 2 }
-In [3]: twice(x)
-12
-```
-
-The REPL enables a general Go adapter by default. Import a standard library or a third-party package resolved by the current Go module to call exported functions, construct types, read attributes, and invoke methods without a per-package registry:
-
-```text
-In [4]: import go "strings"
-In [5]: strings.ToUpper("1waht")
-"1WAHT"
-In [6]: strings.ToTitle("waht 12 ase? as a")
-"WAHT 12 ASE? AS A"
-In [7]: import go "bytes"
-In [8]: buffer = bytes.NewBufferString("hello")
+In [1]: import go "strings"
+In [2]: strings.ToUpper("hello, lip")
+"HELLO, LIP"
+In [3]: import go "bytes"
+In [4]: buffer = bytes.NewBufferString("hello")
 <go *bytes.Buffer>
-In [9]: buffer.WriteString("!")
+In [5]: buffer.WriteString("!")
 1
-In [10]: buffer.String()
+In [6]: buffer.String()
 "hello!"
+In [7]: import python "math"
+In [8]: math.sqrt(9)
+3
 ```
 
-Third-party Go libraries use **full, case-sensitive package paths**. A project name or website label does not replace the package path; `as` provides a convenient name for calls. For example:
+Direct calls, methods, and attribute reads lower to ordinary `perform effect` before checking. Constructing an `effect` only saves the request. Generic operations are Unknown and follow write restrictions. Explicit registrations take precedence; `parallel` admits only operations declared Concurrent ReadOnly.
 
-| Library | Go package path | Import example |
-|---|---|---|
-| Gonum matrices | `gonum.org/v1/gonum/mat` | `import go "gonum.org/v1/gonum/mat" as mat` |
-| Gorgonia | `gorgonia.org/gorgonia` | `import go "gorgonia.org/gorgonia" as gorgonia` |
-| Gin | `github.com/gin-gonic/gin` | `import go "github.com/gin-gonic/gin" as gin` |
-| Viper | `github.com/spf13/viper` | `import go "github.com/spf13/viper" as viper` |
+The [teaching Host](script/adapters.go) demonstrates parallel reads and sequential writes through explicit contracts:
 
-Configure a Go module in your own working directory, then start the installed lipc there. Skip initialization if you already have a `go.mod`. Run these commands in your terminal:
+```sh
+./lipc run -host demo -parallel 4 examples/ecosystem/19_parallel_read_write.lip
+# ["ADA","LIN","SAM"]; console logs go to stderr.
+./lipc run -host demo examples/ecosystem/17_go_python.lip
+# {"digest":"a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4","mean":2}
+```
+
+Multi-round tool programs progress through “think → call → observe → decide again.” [recorded_iteration](examples/ecosystem/20_recorded_iteration.lip) passes recorded responses into the next iteration; [evidence](examples/evidence.lip) collects complete evidence; [refine](examples/refine.lip) carries values through iterative improvement. Models and business tools can use the same Host contracts. The Host receives ongoing events and starts independent runs for them.
+
+### Third-party libraries and runtime environment
+
+Go imports use full, case-sensitive package paths. The working directory's Go module resolves dependencies:
+
+| Library | Import |
+|---|---|
+| Gonum matrices | `import go "gonum.org/v1/gonum/mat" as mat` |
+| Gorgonia | `import go "gorgonia.org/gorgonia" as gorgonia` |
+| Gin | `import go "github.com/gin-gonic/gin" as gin` |
+| Viper | `import go "github.com/spf13/viper" as viper` |
+
+Configure your project in the terminal, then start the installed lipc:
 
 ```sh
 mkdir analysis
@@ -188,8 +258,6 @@ go get gonum.org/v1/gonum/mat
 lipc repl
 ```
 
-Then call the library in the REPL:
-
 ```text
 In [1]: import go "gonum.org/v1/gonum/mat" as mat
 In [2]: m = mat.NewDense(2,2,[1,2,3,4])
@@ -198,58 +266,86 @@ In [3]: m.At(1,0)
 3
 ```
 
-For other libraries, configure the corresponding package path with `go get` in the terminal before importing it in LIP. Installing lipc does not configure your working directory's dependencies; `import` does not add dependencies or map short names to preset projects. Gonum contains multiple packages, so choose the path for the functionality you need. These libraries all use the generic adapter.
+With an existing `go.mod`, configure dependencies directly. Imports and completion neither execute library initialization nor install dependencies. Go export discovery uses the toolchain; Python loads modules on the first actual operation. Automatic Go adapters require the Go toolchain, CGO, and Go plugin support (Linux, macOS, FreeBSD). Generic Go functions are instantiated from actual argument types; register application-specific types and instances that cannot be inferred explicitly.
 
-`fmt.Print`, `Printf`, and `Println` use the same adapter; their returned byte counts appear as expression results. `import go "string"` reports a missing package at import time; the correct package name is `strings`.
-
-Python uses a persistent worker with a separate protocol channel to load libraries from the current Python environment. Module attributes, submodules, classes, methods, keyword arguments, and native function references share this bridge:
+Python uses a persistent worker and a separate protocol channel, retaining modules and objects in the current environment:
 
 ```text
-In [11]: import python "scipy" as sp
-In [12]: sp.__version__
-...the installed SciPy version...
-In [13]: import python "numpy" as np
-In [14]: a = np.array([1,2,3], dtype=np.int64)
+In [1]: import python "numpy" as np
+In [2]: import python "scipy" as sp
+In [3]: a = np.array([1,2,3], dtype=np.int64)
 <python numpy.ndarray>
-In [15]: a.reshape(3,1).tolist()
+In [4]: a.reshape(3,1).tolist()
 [[1],[2],[3]]
-In [16]: sp.linalg.norm(a)
+In [5]: sp.linalg.norm(a)
 3.7416573867739413
 ```
 
-Without `as`, the last path component becomes the alias, so `import python "scipy"` allows `scipy.__version__`. `help()` shows interactive help; `help(module)` and `help(module.member)` show Python documentation or Go export signatures. `help(value)` describes language values, and `help("math.sqrt")` looks up Python documentation. Completion never executes library code.
+Module attributes, submodules, classes, methods, named arguments, and native function references use the same bridge. `help()`, `help(module)`, `help(module.member)`, and `help(value)` provide interactive guidance, library documentation, and Go export signatures. `help("math.sqrt")` queries Python documentation. Without `as`, the final path component becomes the name. Go's string package is `strings`.
 
-Direct calls and attribute reads lower to ordinary `perform effect` operations before checking. File execution, the REPL, and generated programs use the same path. Explicit application contracts take precedence; generic operations declare `Unknown` without inferring purity or concurrency. Imports declare namespaces: Go uses its toolchain to discover exports, while Python loads a module on its first actual operation. Neither installs dependencies. Package initialization occurs during an actual Host-authorized operation.
+### Values and resources
 
-Open parentheses or braces allow multiline input; other continuations use a trailing `\`. `:vars` shows saved values, `:history` shows input history, `:reset` clears the session, `:cancel` discards unfinished input, and `:quit` exits. Piped input automatically hides prompts:
+| Value or operation | Bridge behavior |
+|---|---|
+| null, bool, finite number, string | Ordinary Data; native integers must convert exactly within the supported range |
+| LIP list / object | Convert to the Go target type or Python list / dict |
+| Ordinary Python list / tuple / string-keyed dict | Language containers, potentially containing resource references |
+| Go containers, structs, pointers, functions; Python arrays, DataFrames, bytes, etc. | Resource references scoped to the Host |
+| `native_data(value)` | A finite, acyclic Data snapshot through perform; supports Go containers/exported fields and Python containers/`tolist()` |
+| `native_release(value)` | Release that reference; close files and similar resources with their own methods |
+
+Go numbers are checked against target integer ranges; string-to-`[]byte` conversion uses UTF-8. Safe integral Python arguments become int; other numbers become float. Take snapshots or encode bytes to cross Go/Python runtimes. Non-finite numbers and cyclic objects cannot become Data. A trailing error among multiple Go results is the failure channel; a sole error result remains a native resource, with nil as null. Native function references can be passed within a runtime; language pure functions need an application adapter to serve as native callbacks. The `native_data` / `native_release` helpers follow lexical name resolution; local declarations take precedence.
+
+The Host owns workers, objects, and permissions. Closing or resetting invalidates existing references. Cancellation or lost communication never automatically repeats an external action. Native libraries have their process or worker's OS permissions; applications supply deployment isolation when needed.
+
+## Interactive computation and learning
+
+```sh
+./lipc repl
+./lipc repl -host demo
+./lipc learn
+./lipc learn -list
+./lipc learn -lesson modules
+```
+
+The REPL retains values, pure functions, and closures from successful cells. Historical actions run once. Failed cells commit no new bindings; external actions already performed remain. Each cell is an independent run. Named functions can serve as pipeline stages across cells:
+
+```text
+In [1]: x = 6
+6
+In [2]: fn twice(n:number)->number { n * 2 }
+In [3]: x |> twice
+12
+```
+
+Complete Flows, static Data declarations, and LIP modules use the file path through `:run`:
+
+```text
+:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+:run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output "path with spaces/program.lip"
+```
+
+`:run` accepts normal file options for entry, project root, and inputs, inheriting the session Host by default. File runs are independent of REPL bindings. Single/double quotes group paths or JSON; command arguments are parsed literally. `:vars` shows values, `:history` shows inputs, `:reset` clears the session, `:cancel` discards a draft, and `:quit` exits. Piped input automatically hides prompts:
 
 ```sh
 printf 'x=6\nx*2\n:quit\n' | ./lipc repl
 ```
 
-Each input uses the same compilation and execution rules. Successful inputs preserve values and closures, without rerunning earlier `perform` calls. Failed inputs do not save new bindings, and external actions that have already occurred are not rolled back. Each input has its own run identity. Use `:run examples/advanced/14_parallel_claim.lip` to execute a complete Flow with Claim and parallel collection. File runs do not read or change REPL bindings.
+The REPL and learn share an editor:
 
-The REPL and learning tool share a terminal editor that lets you edit input before submitting it. Common shortcuts are:
-
-| Key | Action |
+| Keys | Action |
 |---|---|
-| ← / →; Ctrl-B / Ctrl-F | Move left / right |
-| Home / End; Ctrl-A / Ctrl-E | Move to the start / end of the line |
-| Alt-B / Alt-F; Ctrl-← / Ctrl-→ | Move by word |
-| Backspace / Delete; Ctrl-D | Delete the previous / next character; Ctrl-D exits on empty input |
-| Ctrl-U / Ctrl-K / Ctrl-W; Alt-D | Cut to the start / end of the line / previous word / next word |
-| Ctrl-Y | Paste the most recently cut text |
-| Ctrl-_ (often Ctrl-/ in terminals) | Undo the last edit |
-| Ctrl-T | Swap the two characters near the cursor |
-| ↑ / ↓; Ctrl-R | Browse / search history; Ctrl-G cancels a search, Enter submits |
-| Tab | Complete core names, saved REPL names, registered import members, and commands |
-| Ctrl-L; Ctrl-C | Clear the screen / discard current input and unfinished program drafts |
+| ← / →, Ctrl-B / F; Home / End, Ctrl-A / E | Move or reach line boundaries |
+| Alt-B / F, Ctrl-← / → | Move by word |
+| Backspace / Delete, Ctrl-D | Delete; Ctrl-D exits on empty input |
+| Ctrl-U / K / W, Alt-D; Ctrl-Y | Cut to start/end, previous/next word; paste back |
+| Ctrl-_ (often Ctrl-/); Ctrl-T | Undo; transpose nearby characters |
+| ↑ / ↓, Ctrl-R | History and search; Ctrl-G cancels search, Enter submits |
+| Tab; Ctrl-L; Ctrl-C | Complete; clear screen; discard input and draft |
 
-Bracketed paste is supported: paste a multiline program and press Enter to submit it. Chinese characters, common combining characters, and emoji can be moved over and deleted as units. Terminal raw mode is active only while editing; original settings are restored before executing programs or calling providers. Piped input stays in plain text mode. Terminal editing supports Linux, macOS/BSD, and Windows consoles with VT enabled; Linux is the platform tested so far.
+Open brackets, braces, and triple-quoted strings support multiline input; otherwise use a trailing `\`. The editor supports bracketed paste, Chinese text, and common combining characters. Raw mode applies only during editing and is restored before provider calls; pipes use plain text. Terminal interfaces support Linux, macOS/BSD, and VT-enabled Windows consoles; current platform validation is Linux.
 
-`learn` includes 15 lessons, from strings, exponentiation, and logarithms to parallel Claim collection and tool calls. The built-in lesson text is currently in Chinese. Enter an answer for the template to validate it; `:hint` shows a hint, `:demo` runs an explanatory example, and `:next` advances to the next lesson. Use `:edit` to begin a complete program and `:submit` to submit it. Lessons check results with multiple inputs; running a demo does not automatically mark a lesson complete.
-
-Learning progress is not saved by default. To save it, specify a file:
+The 18 lessons cover values and arithmetic, functions, entries, child Flows/pipelines, modules, control structures, Claims, and tools. Enter an answer to validate it; `:hint` gives guidance, `:demo` runs the example, and `:next` advances. `:edit` / `:submit` edits and submits a complete program. Lessons check multiple inputs; module sources are bundled for learning away from the repository. Progress is saved only when requested:
 
 ```sh
 ./lipc learn -progress /path/to/progress.json
@@ -258,31 +354,70 @@ Learning progress is not saved by default. To save it, specify a file:
 ## Generating Go programs
 
 ```sh
+./lipc build -entry Main -o .build/flows examples/advanced/26_flows.lip
+./.build/flows -input '{"xs":[3,1,2]}'
+# {"count":3,"values":[5,3,4]}
+
 ./lipc emit-go -o .build/hello.go examples/basics/01_hello.lip
 go build -o .build/hello .build/hello.go
 ./.build/hello
-
-# You can also generate an executable in one step.
-./lipc build -o .build/refine examples/refine.lip
-./.build/refine
+# "Hello, LIP!"
 ```
 
-In restricted environments, use the Makefile to keep caches inside the project:
+Generated programs fix the entry and source snapshot and accept `-input`, `-entry-input`, `-entry-output`, `-parallel`, `-steps`, and `-elements`. They verify Host contracts at startup. Pure core programs and the Go portion of the teaching Host use only the standard library. Python operations require their runtime environment; automatic Go adapters still require the toolchain, CGO, and plugins.
+
+Use the Makefile for project-local caches:
 
 ```sh
 make compile SOURCE=examples/ecosystem/17_go_python.lip HOST=demo OUTPUT=.build/interop
 ./.build/interop -parallel 4
 ```
 
-The generator compiles LIP expressions into dedicated Go functions and includes the graph scheduler and external operation runtime. Generated programs do not parse LIP source or depend on the source directory. The pure core and demo Host require only the Go standard library. Generic Python calls need Python and the relevant packages on the runtime machine. Automatically discovered Go packages compile and load their adapters at runtime, so they require a matching Go toolchain, CGO, and a platform supporting Go plugins.
+`make compile` also accepts `ENTRY` and `PROJECT`. Adapters and compilation need writable temporary space. `make build/test/race/vet` configure caches under `.build`; direct Go commands can set `GOTMPDIR` / `TMPDIR`. Recreate those directories after `make clean`.
 
-Interpreted execution and generated Go programs share rules for numbers, function calls, Claim, errors, and the Host boundary. Generated programs check Host contracts at startup to prevent differences between operation definitions at compile time and runtime. Executables support `-input`, `-parallel`, `-steps`, and `-elements`.
+## Websites and HTTP integration
 
-## Connecting Go / Python
+The HTTP Host converts requests to Data and runs a Flow independently for each request. Entries have the form `flow Name(request:object)->object`:
 
-The CLI enables the generic bridge by default. Embedded applications enable it with `script.NewNativeHost(host)` or create a bridged session with `script.NewInteractiveSession(host)`. `script.NewSession(host)` retains the supplied Host configuration. Call `Close()` when finished; `:reset` clears bindings and invalidates resource references. Complete programs support direct library calls as well as explicit `effect` creation and execution.
+```sh
+./lipc serve examples/web/23_home.lip
+# http://127.0.0.1:8080/
+./lipc serve -route 'POST /api/echo' examples/web/24_echo.lip
+curl -H 'Content-Type: application/json' -d '{"name":"Ada"}' http://127.0.0.1:8080/api/echo
+```
 
-The Go adapter uses export type information and reflection for variadic arguments, multiple results, structs, interfaces, and objects passed between packages. A trailing error in a multi-result signature is the failure channel; a sole error result remains a native object, allowing `errors.New`, `fmt.Errorf`, and error comparisons to compose. Register explicit contracts for other error mappings. Generic functions infer concrete type arguments from actual inputs. Automatic loading requires the Go toolchain, CGO, Go plugin support (Linux, macOS, or FreeBSD), and dependencies resolved by the current module. Embedded applications can also register Go exports directly, avoiding dynamic compilation:
+Requests provide method, path, raw_path, host, params, query, headers, body, and json. Repeated query/header values are preserved, header keys are lowercase, and bodies explicitly use utf-8 or base64. Responses contain status, optionally json or body, and headers with string or string-list values. Triple-quoted strings can contain HTML; use an escaping template library for dynamic content. See [23_home.lip](examples/web/23_home.lip).
+
+Configure multiple routes with `./lipc serve -routes routes.json`. Source paths are relative to the manifest, and each route can select an entry:
+
+```json
+[
+  {"pattern":"GET /{$}","source":"examples/web/23_home.lip"},
+  {"pattern":"POST /api/echo","source":"examples/web/24_echo.lip"},
+  {"pattern":"GET /api/hello/{name}","source":"examples/web/25_greeting.lip"}
+]
+```
+
+Routes use explicit-method ServeMux patterns; compilation and conflict checks happen before listening. HEAD matches only explicit HEAD routes, and a 405 Allow header lists only configured methods. For `/{x}` matching `/a%2Fb`, path is `/a/b`, raw_path is `/a%2Fb`, and params.x is `a/b`. Runs, Claims, records, budgets, and cancellation are isolated per request; responses commit after validation succeeds.
+
+Defaults are 30 seconds, 1 MiB each for request/response bodies, 8 MiB each for canonical Data, and 64 concurrent requests across routes. CLI options are `-timeout`, `-concurrent`, `-body-bytes`, `-response-bytes`, `-parallel`, `-steps`, and `-elements`; zero selects defaults. Embedded configuration also provides `HTTPOptions.MaxDataBytes`.
+
+`serve` uses pure core or explicit teaching contracts with `-host demo`. Embed through `NewHTTPHandler` / `NewHTTPMux` and application authentication middleware. Authorization and operations receive the same context; applications own Hosts and connection pools. `HTTPOptions.OnError` receives server diagnostics while public errors use fixed categories. HTTP uses explicit Host operations; the generic native bridge currently serves files, sessions, and generated programs. See [specification §12.1](spec/LIP-1.0-SPEC.md#121-可选-http-host-接入).
+
+## Embedding and build identity
+
+The Go import path is `lipbeta/script`:
+
+| Purpose | API |
+|---|---|
+| Single-source compilation and entry selection | `Compile`, `CompileWithOptions` |
+| Freeze disk modules / use in-memory sources | `LoadSourceSet`, `CompileSourceSet` |
+| Strict entry protocol | `DecodeEntryInput`, `Program.RunEntry` |
+| Named-input convenience | `Program.Run` |
+| Libraries / interactive sessions | `NewNativeHost`, `NewInteractiveSession`, `NewSession` |
+| Go generation | `Program.EmitGo`, `GoOptions.HostSource` |
+
+For example, register application Go exports:
 
 ```go
 host := script.NewNativeHost(script.Host{})
@@ -293,53 +428,30 @@ host.Native.Go.RegisterPackage("application/text", map[string]any{
 // LIP: import go "application/text" as text; text.Upper("hello")
 ```
 
-For generic functions whose type parameters cannot be inferred, generic types, and application-specific types, register concrete instances or constructors. When emitting these programs, supply the same registration through `GoOptions.HostSource`. LIP pure functions cannot serve directly as native callbacks; pass native function references within the same runtime or register a dedicated application adapter.
+Explicit contracts use `Host.Contracts`, with `GoHandler` / `PythonHandler` adapters. `DemoHost` and `DemoHostGoSource` provide matching teaching registrations. Use `GoOptions.HostSource` to supply the same application Host configuration in generated programs.
 
-The persistent Python worker retains modules and objects within a Host. Responses use a dedicated pipe, separate from library stdout. Imports, attributes, and calls use Python's own protocols, without a package whitelist or premature conversion of arrays to lists. Cancellation or connection loss never triggers an automatic restart or retry; close or reset the session to continue.
+`Program.BuildInfo()` returns root, entry, revision, source_table, and dependency_lock; `SourceSet.Lock` checks locked resolution. SourceTable sorts by SourceID; StaticSite orders the root first, then other sources by SourceID. `Options.After` accepts node/region/site wire completion constraints, including empty regions and dynamic work not yet expanded.
 
-| Value | Generic bridge behavior |
-|---|---|
-| null, bool, finite number, string | Ordinary Data; native integers outside the safe range are rejected |
-| LIP list / object | Convert according to the Go target type, or to Python list / dict |
-| Ordinary Python list / tuple / string-keyed dict | Convert to Data, possibly containing resource references |
-| Go containers, structs, pointers, functions; Python arrays, DataFrames, bytes, complex values, etc. | Preserve native objects behind Host-scoped resource references |
-| `native_data(value)` | Explicit Data snapshot: Go recursively reads containers and exported fields; Python supports containers and `tolist()`; other objects need library conversion methods |
-| `native_release(value)` | Invalidate the reference; subsequent access fails. This does not replace an object's own file/resource close method |
+`Report.EntryOutput` exists only after the entire graph succeeds; `Report.Output` is the default display value. MemoryJournal supports in-process call recording and replay; the optional durable crash-recovery profile remains future work. HTTP provides bounded complete requests and responses; applications organize ongoing subscriptions, WebSocket, SSE, and deployment authentication.
 
-Go checks numeric conversions against the target signature; string to `[]byte` explicitly uses UTF-8. Python converts safe integral numeric inputs to `int` and other numbers to `float`. Use library types and constructors to preserve a specific dtype. Transfer values between Go and Python through explicit Data snapshots or byte encodings; native references cannot cross runtimes. Non-finite numbers and cyclic objects cannot become Data.
-
-Applications can still register stricter contracts through `script.Host`, declaring versions, schemas, effects, concurrency, capabilities, and resources. `GoHandler` adapts fixed signatures and supports context injection. `PythonHandler` provides one process per call for explicitly registered operations. Authorization and parameter validation precede invocation. Conversion failures after a completed action retain that fact, and replay does not repeat the action.
-
-The [demo Host](script/adapters.go) registers Go string and digest operations, Python mean and sum operations, and console output. Enable it explicitly with `-host demo`. `script.DemoHost()` creates the same configuration, and `script.DemoHostGoSource()` provides the corresponding registration code for generated programs. Applications can also embed the core with `Compile(source, host)` and `Program.Run(...)`, or generate Go programs containing their own Host configuration through `Program.EmitGo(...)`.
-
-## Project layout
-
-```text
-cmd/lipc/       File execution, Go generation, REPL, and lessons
-script/         Compilation, static checks, immutable values, function evaluation,
-                graph scheduling, and the Host interface
-examples/       LIP programs with comments
-tests/          Public API, interactive CLI, and interpreter/compiler consistency tests
-spec/           The beta 0.9 specification (currently in Chinese)
-.agents/skills/ Reusable beta development guidance
-```
-
-Code is organized by semantics into files with substantive responsibilities. REPL session management lives in `script/session.go` and reuses the compiler and execution engine. CLI interaction and lessons live in `cmd/lipc/interactive.go`, with the shared terminal editor in `cmd/lipc/editor.go`. Platform-specific terminal interfaces are separated with build tags.
-
-## Guarantees, scope, and validation
-
-With fixed external responses and the prerequisites in the [specification](spec/BETA-0.9-SPEC.md), legal schedules produce the same result or the same primary error. A live Claim snapshot records the state at the moment of observation and can depend on scheduling. Once an error occurs, external actions that have already started are not rolled back; different schedules may also start different calls.
-
-The current implementation includes an interpreter, Go code generation, and Go/Python operation interfaces. `MemoryJournal` provides recording and replay within a run. **The optional durable recovery profile is not implemented**: there is no resume, reconcile, or fencing after a process crash. Libraries, ongoing event listeners, storage, and deployment are supplied by applications and the Go/Python ecosystems.
-
-`Options.After` currently supports dependency constraints for top-level nodes and regions. `Options` also supports budgets for steps, individual list size, graph size, and non-tail call frames. Tail calls do not accumulate function stack frames. See the API and specification for the precise limits.
+## Development and validation
 
 ```sh
-make test       # Examples, interaction, and semantic regressions; runs generated Go programs.
-make race       # Checks parallel data races in the interpreter and generated programs.
+make test       # Core, lessons, examples, interaction, actual generated Go programs.
+make race       # Race detection on both execution paths.
 make vet
-make examples   # Shows validation results for each example.
-make clean     # Removes lipc, .build, and Python caches.
+make examples   # Inspect example validation results.
+make clean      # Remove artifacts and project-local caches.
 ```
 
-Examples run through both the interpreter and generated Go programs, with concurrency limits of 1 and 4. Regression coverage also includes exponentiation and logarithm precedence and numerical boundaries, tail calls, type and argument checks, unselected branches, request chains, error ordering, call replay, and permission checks. Interactive tests use real pseudoterminals on Linux to check shortcuts and terminal setting restoration; plain piped input is checked separately. Development conventions and validation guidance are available in the [beta development skill](.agents/skills/lipbeta-development/SKILL.md), currently in Chinese.
+Numerical and encoding checks use fixed specification vectors. Scheduling tests check overlap, prerequisites, Claim completion, and primary errors; Host tests check admission, resources, and replay. Tests verify error locations and zero additional calls as well as successful output. Environment-dependent tests state prerequisites and skips explicitly. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for coverage and validation results.
+
+```text
+cmd/lipc/  CLI, REPL, bundled lessons, HTTP
+script/    Compilation, checking, evaluation, scheduling, Go generation, Host
+examples/  Annotated executable programs
+tests/     Core rules and interpreter/generated-program agreement
+spec/      LIP 1.0 language contract
+```
+
+Core and tooling stay together by responsibility. New library capabilities come through Go/Python and the Host, keeping the language small and complete.

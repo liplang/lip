@@ -17,8 +17,23 @@ func TestCompiledProgramFactoriesDoNotRewriteRunningMetadata(t *testing.T) {
             for i := 0; i < 50; i++ {
                 program, err := generatedProgram(Host{})
                 if err != nil { t.Error(err); return }
-                if _, err := program.Run(context.Background(), nil, Options{}); err != nil {
+                owner, later := program.syntax.body.items[0], program.syntax.body.items[1]
+                child := program.syntax.flows["Child"].body.items[0]
+                target := Position{{owner.tok.site,"0"},{owner.expr.tok.site,"0"},{child.tok.site,"0"}}
+                after := After{
+                    Target: ListValue(textValue("node"),target.Wire()),
+                    Requires: ListValue(textValue("node"),Position{{later.tok.site,"0"}}.Wire()),
+                }
+                report, err := program.Run(context.Background(), nil, Options{After: []After{after}})
+                if err != nil {
                     t.Error(err); return
+                }
+                if report.Output.n != 5 { t.Error("incorrect child output"); return }
+                positions := map[string]bool{}
+                for _, n := range report.Nodes {
+                    key := identityKey(n.Position.Wire())
+                    if positions[key] { t.Error("source/body position collision"); return }
+                    positions[key] = true
                 }
             }
         }()

@@ -1,6 +1,7 @@
 package script
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -8,6 +9,7 @@ import (
 
 type token struct {
 	kind, text         string
+	source             string
 	site, line, column int
 	value              Value
 }
@@ -64,7 +66,7 @@ func lex(src string) ([]token, error) {
 				l.advance()
 			}
 			t.text, t.kind = src[start:l.i], "id"
-			if strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform true false null void ", " "+t.text+" ") {
+			if strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null void ", " "+t.text+" ") {
 				t.kind = t.text
 			}
 		} else if asciiDigit(c) {
@@ -110,15 +112,41 @@ func lex(src string) ([]token, error) {
 				return nil, at(diagnostic("E-LEX", "non-finite number"), t)
 			}
 		} else if c == '"' {
+			multiline := strings.HasPrefix(src[l.i:], `"""`)
 			l.advance()
+			if multiline {
+				l.advance()
+				l.advance()
+			}
 			var b strings.Builder
 			closed := false
 			for l.i < len(src) {
 				c = src[l.i]
-				if c == '"' {
+				if multiline && strings.HasPrefix(src[l.i:], `"""`) {
+					l.advance()
+					l.advance()
 					l.advance()
 					closed = true
 					break
+				}
+				if !multiline && c == '"' {
+					l.advance()
+					closed = true
+					break
+				}
+				if multiline && (c == '\n' || c == '\t') {
+					b.WriteByte(c)
+					l.advance()
+					continue
+				}
+				if multiline && c == '\r' {
+					if l.i+1 >= len(src) || src[l.i+1] != '\n' {
+						return nil, at(diagnostic("E-LEX", "bare carriage return in multiline string"), t)
+					}
+					l.i++
+					l.advance()
+					b.WriteByte('\n')
+					continue
 				}
 				if c < 32 {
 					return nil, at(diagnostic("E-LEX", "bare control character in string"), t)
@@ -167,12 +195,15 @@ func lex(src string) ([]token, error) {
 				}
 			}
 			if !closed {
+				if multiline {
+					return nil, at(diagnostic("E-LEX", "unterminated multiline string"), t)
+				}
 				return nil, at(diagnostic("E-LEX", "unterminated string"), t)
 			}
 			t.kind, t.text, t.value = "string", src[start:l.i], textValue(b.String())
 		} else {
 			matched := false
-			for _, op := range []string{"<+", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "//", "**", "*/"} {
+			for _, op := range []string{"<+", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "//", "**", "*/", "|>"} {
 				if strings.HasPrefix(src[l.i:], op) {
 					t.kind, t.text = op, op
 					l.advance()
@@ -267,9 +298,27 @@ type importDecl struct {
 	language, path, alias string
 	tok                   token
 }
+type flowDecl struct {
+	name, result string
+	params       []parameter
+	body         *block
+	tok          token
+	summary      analysis
+	checking     bool
+	check        *checker
+}
+type dataDecl struct {
+	typ   string
+	value Value
+	tok   token
+}
 type syntax struct {
 	imports          []importDecl
 	functions        map[string]*expression
+	flows            map[string]*flowDecl
+	data             map[string]dataDecl
+	exports          map[string]bool
+	declarations     bool
 	flowName, result string
 	params           []parameter
 	body             *block
@@ -281,6 +330,7 @@ type analysis struct {
 	unknown    bool
 	effect     EffectClass
 	concurrent bool
+	hasFlow    bool
 }
 
 type function struct {
@@ -308,50 +358,182 @@ func parse(source string) (*syntax, error) {
 		return nil, err
 	}
 	p := &parser{ts: ts}
-	s := &syntax{source: source, functions: map[string]*expression{}, flowName: "main", result: "void"}
+	s := &syntax{source: source, functions: map[string]*expression{}, flows: map[string]*flowDecl{}, data: map[string]dataDecl{}, exports: map[string]bool{}, flowName: "main", result: "void"}
 	p.padding()
 	for p.peek().kind == "import" {
 		s.imports = append(s.imports, p.importDeclaration())
-		p.separator()
+		p.declarationEnd()
 	}
-	for p.peek().kind == "fn" {
-		t := p.take()
-		name := p.need("id").text
-		e := p.function(t)
-		e.name = name
-		if _, exists := s.functions[name]; exists {
-			p.err = at(diagnostic("E-DUPLICATE", "duplicate function "+name), t)
+	names := map[string]bool{}
+	for p.peek().kind != "eof" && p.err == nil {
+		exported := p.accept("export")
+		if exported {
+			s.declarations = true
 		}
-		s.functions[name] = e
-		p.padding()
-	}
-	if p.accept("flow") {
-		s.flowName = p.need("id").text
-		s.params = p.params()
-		p.need("->")
-		s.result = p.typeName(true)
-		s.body = p.block("stmt")
-		p.padding()
-		p.need("eof")
-	} else {
-		s.body = &block{}
-		for p.peek().kind != "eof" && p.err == nil {
-			s.body.items = append(s.body.items, p.stmt())
-			if p.peek().kind != "eof" {
-				p.separator()
+		t := p.peek()
+		name := ""
+		switch {
+		case t.kind == "fn" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == "id":
+			p.take()
+			name = p.need("id").text
+			e := p.function(t)
+			e.name = name
+			s.functions[name] = e
+			p.padding()
+		case t.kind == "flow":
+			s.declarations = true
+			p.take()
+			name = p.need("id").text
+			f := &flowDecl{name: name, tok: t, params: p.params()}
+			p.need("->")
+			f.result = p.typeName(true)
+			f.body = p.block("stmt")
+			s.flows[name] = f
+			p.padding()
+		case t.kind == "id" && p.i+1 < len(p.ts) && p.ts[p.i+1].kind == ":":
+			s.declarations = true
+			name = p.take().text
+			p.need(":")
+			typ := p.typeName(false)
+			p.need("=")
+			value := p.staticData()
+			s.data[name] = dataDecl{typ: typ, value: value, tok: t}
+			p.declarationEnd()
+		default:
+			if s.declarations || exported {
+				p.fail(t, "declaration files cannot contain top-level statements")
+				break
+			}
+			s.body = &block{}
+			for p.peek().kind != "eof" && p.err == nil {
+				s.body.items = append(s.body.items, p.stmt())
+				if p.peek().kind != "eof" {
+					p.separator()
+				}
 			}
 		}
-		p.need("eof")
+		if name != "" {
+			if names[name] && p.err == nil {
+				p.err = at(diagnostic("E-DUPLICATE", "duplicate declaration "+name), t)
+			}
+			names[name] = true
+			if exported {
+				s.exports[name] = true
+			}
+		}
 	}
+	p.need("eof")
 	if p.err != nil {
 		return nil, p.err
 	}
 	return s, nil
 }
+
+// Selection only fixes the root instance. Other declarations are checked too.
+func (s *syntax) selectEntry(name string) error {
+	if !s.declarations {
+		if name != "" && name != "main" {
+			return diagnostic("E-ENTRY", "unknown entry "+name)
+		}
+		if s.body == nil {
+			s.body = &block{}
+		}
+		return nil
+	}
+	if name == "" {
+		if len(s.flows) != 1 {
+			return diagnostic("E-ENTRY", "select an entry from the root Flow declarations")
+		}
+		for declared := range s.flows {
+			name = declared
+		}
+	}
+	f, ok := s.flows[name]
+	if !ok {
+		return diagnostic("E-ENTRY", "entry is not a root Flow: "+name)
+	}
+	s.flowName, s.result, s.params, s.body = f.name, f.result, f.params, f.body
+	return nil
+}
+
+func sortedFlowNames(flows map[string]*flowDecl) []string {
+	names := make([]string, 0, len(flows))
+	for name := range flows {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return flows[names[i]].tok.site < flows[names[j]].tok.site })
+	return names
+}
+
+func (p *parser) declarationEnd() {
+	if p.peek().kind != "eof" {
+		p.separator()
+	}
+}
+
+// Static initializers are literal trees, not expressions evaluated by a run.
+func (p *parser) staticData() Value {
+	t := p.peek()
+	switch t.kind {
+	case "number", "string", "true", "false", "null":
+		p.take()
+		if t.kind == "true" || t.kind == "false" {
+			return BoolValue(t.kind == "true")
+		}
+		return t.value
+	case "+", "-":
+		p.take()
+		x := p.need("number").value
+		if t.kind == "-" {
+			return number(-x.n)
+		}
+		return x
+	case "[", "{":
+		p.take()
+		p.soft++
+		defer func() { p.soft-- }()
+		if t.kind == "[" {
+			var xs []Value
+			for p.peek().kind != "]" && p.err == nil {
+				xs = append(xs, p.staticData())
+				if !p.accept(",") {
+					break
+				}
+			}
+			p.need("]")
+			return ListValue(xs...)
+		}
+		fields := map[string]Value{}
+		for p.peek().kind != "}" && p.err == nil {
+			key := p.take()
+			if key.kind != "id" && key.kind != "string" {
+				p.fail(key, "static object key must be an identifier or string")
+			}
+			name := key.text
+			if key.kind == "string" {
+				name = key.value.s
+			}
+			p.need(":")
+			value := p.staticData()
+			if _, duplicate := fields[name]; duplicate && p.err == nil {
+				p.err = at(diagnostic("E-DUPLICATE", "duplicate static object field "+name), key)
+			}
+			fields[name] = value
+			if !p.accept(",") {
+				break
+			}
+		}
+		p.need("}")
+		return object(fields)
+	default:
+		p.fail(t, "static data requires a literal tree")
+		return Value{}
+	}
+}
 func (p *parser) importDeclaration() importDecl {
 	t := p.need("import")
 	lang := p.need("id")
-	if lang.text != "go" && lang.text != "python" && lang.text != "host" {
+	if lang.text != "go" && lang.text != "python" && lang.text != "host" && lang.text != "lip" {
 		p.fail(lang, "invalid import language")
 	}
 	path := p.need("string").value.s
@@ -359,6 +541,9 @@ func (p *parser) importDeclaration() importDecl {
 	if p.accept("as") {
 		alias = p.need("id").text
 	} else {
+		if lang.text == "lip" {
+			p.fail(lang, "LIP imports require an explicit alias")
+		}
 		index := strings.LastIndexAny(path, "/.")
 		alias = path[index+1:]
 		if !validID(alias) {
@@ -584,7 +769,7 @@ func (p *parser) stmt() *statement {
 	default:
 		s.tag = "eval"
 		s.expr = p.expr(0)
-		if s.expr != nil && s.expr.tag != "call" && s.expr.tag != "perform" {
+		if s.expr != nil && s.expr.tag != "call" && s.expr.tag != "perform" && s.expr.tag != "pipe" {
 			p.fail(t, "only calls and perform may be statements")
 		}
 	}
@@ -723,6 +908,25 @@ func (p *parser) expr(min int) *expression {
 			if precedence(p.peek().kind) == prec {
 				p.fail(p.peek(), "comparison operators are non-associative")
 			}
+		}
+	}
+	if min == 0 {
+		for p.err == nil && p.accept("|>") {
+			t := p.need("id")
+			target := &expression{tag: "id", name: t.text, tok: t}
+			if p.accept(".") {
+				target = &expression{tag: "field", name: p.need("id").text, tok: t, x: target}
+			}
+			stage := &expression{tag: "call", state: "stage", tok: t, x: target, args: []argument{{expr: &expression{tag: "id", name: "$pipe", tok: t}}}}
+			if p.peek().kind == "(" {
+				for _, arg := range p.arguments() {
+					if arg.name == "" {
+						p.fail(t, "pipeline stages only accept named arguments")
+					}
+					stage.args = append(stage.args, arg)
+				}
+			}
+			e = &expression{tag: "pipe", tok: t, x: e, y: stage}
 		}
 	}
 	return e

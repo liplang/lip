@@ -6,6 +6,7 @@ import (
 	. "lipbeta/script"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,10 +33,181 @@ func display(t *testing.T, v Value) string {
 	}
 	return string(b)
 }
+
+func TestEntryInputBoundary(t *testing.T) {
+	var calls atomic.Int64
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "touch"}, Version: "1", Result: Schema{Type: "null"}, Effect: WriteEffect,
+		Invoke: func(context.Context, Request) Response { calls.Add(1); return Result(NullValue()) },
+	}}}
+	p, err := Compile(`import host "app"
+flow Main(x:number,y:string)->object {perform effect app.touch(); return {x:x,y:y}}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{`{"positional":[2],"named":{"y":"a"}}`, `{"positional":[],"named":{"x":2,"y":"a"}}`} {
+		value, err := DecodeEntryInput([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := p.RunEntry(context.Background(), value, Options{})
+		if err != nil || report.EntryOutput == nil || display(t, *report.EntryOutput) != `{"kind":"value","value":{"x":2,"y":"a"}}` {
+			t.Fatal(report, err)
+		}
+	}
+	before := calls.Load()
+	for _, input := range []string{
+		`null`, `{}`, `{"positional":[]}`, `{"positional":[],"named":{},"extra":1}`,
+		`{"positional":{},"named":{}}`, `{"positional":[],"named":null}`,
+		`{"positional":[2],"named":{"x":2,"y":"a"}}`, `{"positional":[2,"a",3],"named":{}}`,
+		`{"positional":[2],"named":{}}`, `{"positional":[2],"named":{"y":"a","z":1}}`,
+		`{"positional":["2"],"named":{"y":"a"}}`, `{"positional":[2],"named":{"y":null}}`,
+		`{"positional":[],"named":{"x":2,"x":3,"y":"a"}}`, `{"positional":[],"positional":[],"named":{}}`,
+		`{"positional":[1e999],"named":{"y":"a"}}`, `{"positional":[],"named":{"y":"\ud800"}}`,
+	} {
+		value, err := DecodeEntryInput([]byte(input))
+		journal := NewMemoryJournal()
+		var report Report
+		if err == nil {
+			report, err = p.RunEntry(context.Background(), value, Options{Journal: journal})
+		}
+		d, ok := err.(*Diagnostic)
+		if !ok || d.Code != "E-SCHEMA" || d.Site != -1 || len(d.Position) != 0 || report.Error != nil || report.Journal != nil || len(report.Nodes) != 0 || report.Steps != 0 || report.EntryOutput != nil || len(journal.Records()) != 0 || calls.Load() != before {
+			t.Fatalf("%s: report=%+v error=%v calls=%d", input, report, err, calls.Load())
+		}
+	}
+	session, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	cell, err := session.Eval(context.Background(), `fn()->number {1}`, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	label, _ := StringValue("a")
+	nested, _ := ObjectValue(map[string]Value{"x": ListValue(cell.Value), "y": label})
+	if report, err := p.Run(context.Background(), map[string]Value{"x": nested, "y": label}, Options{}); err == nil || report.Journal != nil || calls.Load() != before {
+		t.Fatal("non-Data input entered a run", report, err)
+	}
+}
+
+func TestEntryOutputCompletion(t *testing.T) {
+	for _, test := range []struct{ source, want string }{
+		{`flow Main()->null {return null}`, `{"kind":"value","value":null}`},
+		{`flow Main()->void {return}`, `{"kind":"void"}`},
+		{"", `{"kind":"void"}`},
+		{`fn helper()->number {1}`, `{"kind":"void"}`},
+		{`fn()->number {1}()`, `{"kind":"void"}`},
+	} {
+		report := runSource(t, test.source, Host{}, Options{})
+		if report.EntryOutput == nil || display(t, *report.EntryOutput) != test.want {
+			t.Fatal(test.source, report)
+		}
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "audit"}, Version: "1", Result: Schema{Type: "null"}, Effect: WriteEffect,
+		Invoke: func(ctx context.Context, r Request) Response {
+			close(entered)
+			select {
+			case <-release:
+				return Result(NullValue())
+			case <-ctx.Done():
+				return Uncertain(ctx.Err().Error())
+			}
+		},
+	}}}
+	p, err := Compile("import host \"app\"\nflow Main()->null {perform effect app.audit(); return null}", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan Report, 1)
+	go func() { report, _ := p.Run(ctx, nil, Options{Parallelism: 2}); done <- report }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("audit did not start")
+	}
+	select {
+	case report := <-done:
+		t.Fatal("output published before selected audit completed", report)
+	default:
+	}
+	close(release)
+	report := <-done
+	if report.Error != nil || report.EntryOutput == nil {
+		t.Fatal(report)
+	}
+	p, err = Compile(`flow Main()->null {ignored=fail("stop");return null}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{Parallelism: 2})
+	if err == nil || report.EntryOutput != nil {
+		t.Fatal("failed run published success", report, err)
+	}
+}
+
+func TestDeclarationFilesAndEntrySelection(t *testing.T) {
+	source := `flow First(CONFIG:number)->object {return {local:CONFIG,static:read_config()}}
+export fn read_config()->object {CONFIG}
+flow Second()->number {return CONFIG.values[0]}
+CONFIG:object={values:[-0,+2,null,true],label:"fixed"}`
+	if _, err := Compile(source, Host{}); err == nil || err.(*Diagnostic).Code != "E-ENTRY" {
+		t.Fatal("ambiguous entry accepted", err)
+	}
+	for _, name := range []string{"Missing", "CONFIG", "read_config"} {
+		if _, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: name}); err == nil || err.(*Diagnostic).Code != "E-ENTRY" {
+			t.Fatal("non-Flow entry accepted", name, err)
+		}
+	}
+	p, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), map[string]Value{"CONFIG": number(7)}, Options{})
+	if err != nil || display(t, report.Output) != `{"local":7,"static":{"label":"fixed","values":[0,2,null,true]}}` {
+		t.Fatal("entry shadowing changed module function capture", report, err)
+	}
+	p, err = CompileWithOptions(source, Host{}, CompileOptions{Entry: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "0" {
+		t.Fatal(report, err)
+	}
+	for _, test := range []struct{ source, code string }{
+		{`LIMIT:number=2`, "E-ENTRY"}, {`export fn helper()->number {1}`, "E-ENTRY"},
+		{`flow Main()->number {return 2} x=1`, "E-PARSE"}, {"x=1\nLIMIT:number=2", "E-PARSE"},
+		{"flow Main()->number {return LIMIT}\nLIMIT:number=len([])", "E-PARSE"},
+		{"flow Main()->number {return 1}\nLIMIT:number=2 flow Other()->number {return 2}", "E-PARSE"},
+		{"flow Main()->number {return 1}\nLIMIT:number=2\nLIMIT:number=3", "E-DUPLICATE"},
+		{"fn Main()->number {1}\nflow Main()->number {return 1}", "E-DUPLICATE"},
+		{"flow Main()->number {return 1}\nLIMIT:object={x:1,\"x\":2}", "E-DUPLICATE"},
+		{"flow Main()->number {return 1}\nLIMIT:number=\"bad\"", "E-TYPE"},
+		{"flow Main()->number {return 1}\nLIMIT:function=null", "E-TYPE"},
+		{"flow Main()->number {return 1}\nflow Unused()->number {return missing}", "E-NAME"},
+		{"flow Main()->number {return 1}\nflow Unused(x:effect)->number {return 1}", "E-TYPE"},
+		{`flow Main()->any {return Main}`, "E-TYPE"},
+	} {
+		_, err := CompileWithOptions(test.source, Host{}, CompileOptions{Entry: "Main"})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != test.code {
+			t.Fatalf("%s: %v; want %s", test.source, err, test.code)
+		}
+	}
+	for _, source := range []string{`import host "app"`, "flow Main()->number {return LIMIT}\nLIMIT:number=2"} {
+		if _, err := Compile(source, Host{}); err != nil {
+			t.Fatal("EOF required a newline", source, err)
+		}
+	}
+}
 func TestSpecTailAndFilter(t *testing.T) {
 	source := `fn sum_to(n: number, acc: number) -> number {
     if n == 0 { acc } else { sum_to(n - 1, acc + n) }
 }
+
 fn filter_fold(xs: list, p: function) -> list {
     fold(xs, [], fn(acc: list, x: any) -> list {
         if p(x) { concat(acc, [x]) } else { acc }
@@ -51,6 +223,40 @@ flow Main() -> object {
 		t.Fatal(got)
 	}
 }
+func TestMultilineStrings(t *testing.T) {
+	for _, tt := range []struct{ source, want string }{
+		{`""""""`, ""},
+		{`"""one " and "" two # [] {}"""`, `one " and "" two # [] {}`},
+		{"\"\"\"\n  你好\t🙂\n\"\"\"", "\n  你好\t🙂\n"},
+		{"\"\"\"a\r\nb\r\n\"\"\"", "a\nb\n"},
+		{`"""\""" \\ \n \r \t \u{1f642}"""`, "\"\"\" \\ \n \r \t 🙂"},
+	} {
+		r := runSource(t, "flow Main()->string {return "+tt.source+"}", Host{}, Options{})
+		got, _ := r.Output.Text()
+		if got != tt.want {
+			t.Fatalf("%q: got %q want %q", tt.source, got, tt.want)
+		}
+	}
+	for _, source := range []string{
+		`"""unfinished`, `"""bad\x"""`, `"""\u{d800}"""`,
+		"\"\"\"bare\rCR\"\"\"", "\"\"\"bad\x00control\"\"\"", "\"\"\"bad\\\ncontinuation\"\"\"",
+		"\"ordinary\nnewline\"", "\"ordinary\ttab\"",
+	} {
+		_, err := Compile("flow Main()->string {return "+source+"}", Host{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-LEX" {
+			t.Fatalf("%q: %v", source, err)
+		}
+	}
+	p, err := Compile("flow Main()->any {\n text=\"\"\"\nline\r\n\"\"\"\n return [0][3]\n}", Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Run(context.Background(), nil, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Line != 5 {
+		t.Fatalf("diagnostic after multiline string: %v", err)
+	}
+}
+
 func TestCarryElseIfAndBreak(t *testing.T) {
 	r := runSource(t, `flow Main() -> number {
  answer = for x in [1,2,3,4] with s = 0 {
@@ -79,8 +285,10 @@ func TestDirectAndIndirectTailCalls(t *testing.T) {
 flow Main()->number { return loop(100000) }`,
 		`fn loop(n:number, callback:function)->number { if n == 0 {0} else {callback(n-1,callback)} }
 flow Main()->number { return loop(100000,loop) }`,
+		`fn loop(n:number)->number {if n==0 {0} else {n-1 |> loop}}
+flow Main()->number {return 100000 |> loop}`,
 	} {
-		r := runSource(t, source, Host{}, Options{MaxSteps: 2000000})
+		r := runSource(t, source, Host{}, Options{MaxSteps: 2000000, MaxFrames: 16})
 		if num(r.Output) != 0 {
 			t.Fatal(r.Output)
 		}
@@ -379,4 +587,283 @@ func formatNumber(n float64) string {
 		panic(err)
 	}
 	return s
+}
+
+func TestStructuredFlowAndPipeline(t *testing.T) {
+	var calls atomic.Int64
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "read"}, Version: "1", Params: []Parameter{{Name: "x", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true, Invoke: func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) }}}}
+	source := `import host "app"
+fn plus(x:number,delta:number)->number {x+delta}
+flow Read(x:number)->number {
+ facts=claim()
+ for n in [x,x+1] parallel {facts <+ n}
+ observed=perform effect app.read(x)
+ return observed+len(facts)
+}
+flow Main()->object {
+ values=[x |> Read |> plus(delta=3) for x in [1,2]]
+ nested={first=Read(4);second=Read(first);second}
+ sum=for x in [1,2] with acc=0 {value=Read(x);next acc+value}
+ return {values:values,nested:nested,sum:sum}
+}`
+	p, err := CompileWithOptions(source, host, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, parallel := range []int{1, 4} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		report, err := p.Run(ctx, nil, Options{Parallelism: parallel, RunID: "structured"})
+		cancel()
+		if err != nil || display(t, report.Output) != `{"nested":8,"sum":7,"values":[6,7]}` {
+			t.Fatal(report, err)
+		}
+		seen := map[string]bool{}
+		for _, n := range report.Nodes {
+			key := display(t, n.Position.Wire())
+			if seen[key] {
+				t.Fatal("duplicate node position", key)
+			}
+			seen[key] = true
+		}
+		if len(report.Journal.Records()) != 6 {
+			t.Fatal("child calls were replayed or omitted", len(report.Journal.Records()))
+		}
+	}
+	if calls.Load() != 12 {
+		t.Fatal(calls.Load())
+	}
+}
+
+func TestFlowBoundaries(t *testing.T) {
+	for _, test := range []struct{ source, code string }{
+		{`flow Main()->number {return Other()} flow Other()->number {return Main()}`, "E-FLOW-CYCLE"},
+		{`flow Main()->number {return 1} flow Other()->number {return Other()}`, "E-FLOW-CYCLE"},
+		{`fn bad()->number {Other()} flow Main()->number{return 1} flow Other()->number{return 1}`, "E-PURITY"},
+		{`flow Read(x:number)->number{return x} flow Main()->number{return Read(Read(1))}`, "E-PURITY"},
+		{`flow Read(x:number)->number{return x} flow Main()->number{return 1 |>Read(x=2)}`, "E-ARITY"},
+		{`flow Main()->number{return 1 |>map}`, "E-ARITY"},
+		{`fn f(x:number)->number{x} flow Main()->number{alias=f;return 1 |>alias}`, "E-TYPE"},
+		{`flow Read(x:number)->number{return x} flow Main()->number{return match 1 {1 if Read(1)==1 => 1,_ => 2}}`, "E-PURITY"},
+		{`flow Empty()->void{} flow Main()->any{return Empty()}`, "E-TYPE"},
+		{`flow Empty(x:number)->void{} flow Main()->any{return 1 |>Empty}`, "E-TYPE"},
+	} {
+		_, err := CompileWithOptions(test.source, Host{}, CompileOptions{Entry: "Main"})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != test.code {
+			t.Fatalf("%s: %v; want %s", test.source, err, test.code)
+		}
+	}
+	p, err := CompileWithOptions(`flow Bad()->number {return fail("child")} flow Main()->number{return 1 |>Bad}`, Host{}, CompileOptions{Entry: "Main"})
+	if err == nil {
+		t.Fatal("arity should reject before execution", p)
+	}
+	p, err = CompileWithOptions(`flow Bad(x:number)->number {return fail("child")} fn later(x:number,delta:number)->number{x+delta} flow Main()->number{return 1 |>Bad |>later(delta=fail("later"))}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err == nil || report.Error == nil || report.Error.Message != "child" || len(report.Error.Position) != 3 {
+		t.Fatal("child cause was replaced", report, err)
+	}
+	for _, n := range report.Nodes {
+		if n.Status == Error && len(n.Position) != 3 {
+			t.Fatal("boundary created another root error", n)
+		}
+	}
+}
+
+func TestStaticModuleSnapshot(t *testing.T) {
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "local", Text: `import lip "./lib/a.lip" as a
+import lip "./lib/b.lip" as b
+flow Main(RATE:number)->object {return {a:3 |>a.Adjust,b:b.total(3),local:RATE,static:a.RATE}}
+`},
+		"lib/a.lip": {Version: "1", Text: `export RATE:number=2
+fn helper(x:number)->number {x+RATE}
+export flow Adjust(x:number)->number{return helper(x)}`},
+		"lib/b.lip": {Version: "2", Text: `RATE:number=10
+fn helper(x:number)->number{x*RATE}
+export fn total(x:number)->number{helper(x)}`},
+	}}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), map[string]Value{"RATE": number(100)}, Options{Parallelism: 1})
+	if err != nil || display(t, report.Output) != `{"a":5,"b":30,"local":100,"static":2}` {
+		t.Fatal(report, err)
+	}
+	fields, _ := p.BuildInfo().Fields()
+	lock := fields["dependency_lock"]
+	set.Lock = &lock
+	if _, err := CompileSourceSet(set, Host{}, CompileOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	source := set.Sources["lib/a.lip"]
+	source.Text += "\n# new revision"
+	set.Sources["lib/a.lip"] = source
+	if _, err := CompileSourceSet(set, Host{}, CompileOptions{}); err == nil || err.(*Diagnostic).Code != "E-MODULE" {
+		t.Fatal("stale lock accepted", err)
+	}
+	set.Lock = nil
+	changed, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := changed.BuildInfo().Fields()
+	if display(t, fields["revision"]) == display(t, next["revision"]) {
+		t.Fatal("dependency edit did not change revision")
+	}
+	for _, test := range []struct{ root, dep, code string }{
+		{`import lip "./dep.lip" as d
+flow Main()->number{return d.secret()}`, `fn secret()->number{1}`, "E-EXPORT"},
+		{`import lip "./dep.lip" as d
+flow Main()->number{return 1}`, `import lip "./main.lip" as main`, "E-MODULE-CYCLE"},
+		{`import lip "./dep.lip" as d
+flow Main()->number{return 1}`, `x=1`, "E-MODULE"},
+		{`import lip "./dep.lip" as d
+flow Main()->number{return 1}`, `export fn invalid()->number{missing}`, "E-NAME"},
+		{`import lip "./dep.lip" as d
+flow Main()->number{return 1}`, `export flow Invalid()->number{return Invalid()}`, "E-FLOW-CYCLE"},
+		{`import lip "./dep.lip" as d
+flow Main()->any{return d}`, `export V:number=1`, "E-TYPE"},
+	} {
+		_, err := CompileSourceSet(SourceSet{Root: "main.lip", Sources: map[string]Source{"main.lip": {Version: "local", Text: test.root}, "dep.lip": {Version: "1", Text: test.dep}}}, Host{}, CompileOptions{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != test.code {
+			t.Fatalf("%s: %v;want %s", test.dep, err, test.code)
+		}
+	}
+}
+
+func TestModuleLexicalIsolation(t *testing.T) {
+	for _, test := range []struct{ name, root, dep, code string }{
+		{"data", "secret:number=7\nflow Main()->number{return d.read()}", `export fn read()->number{secret}`, "E-NAME"},
+		{"function", "fn secret()->number{7}\nflow Main()->number{return d.read()}", `export fn read()->number{secret()}`, "E-NAME"},
+		{"flow", "flow Secret()->number{return 7}\nflow Main()->number{return d.Read()}", `export flow Read()->number{return Secret()}`, "E-NAME"},
+		{"operation", "import go \"strings\" as text\nflow Main()->string{return d.Read()}", `export flow Read()->string{return perform effect text.ToUpper("ada")}`, "E-OPERATION"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host, err := DemoHost()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer host.Close()
+			_, err = CompileSourceSet(SourceSet{Root: "main.lip", Sources: map[string]Source{
+				"main.lip": {Version: "local", Text: "import lip \"./dep.lip\" as d\n" + test.root},
+				"dep.lip":  {Version: "1", Text: test.dep},
+			}}, host, CompileOptions{Entry: "Main"})
+			if d, ok := err.(*Diagnostic); !ok || d.Code != test.code || d.SourceID != "dep.lip" {
+				t.Fatalf("dependency captured importer scope: %v; want %s in dep.lip", err, test.code)
+			}
+		})
+	}
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "local", Text: `import lip "./dep.lip" as d
+facts:number=40
+fn base()->number{facts}
+flow Main()->list{facts=claim();facts <+ d.echo(base());return [row.value for row in facts]}`},
+		"dep.lip": {Version: "1", Text: `export fn echo(facts:number)->number{facts}`},
+	}}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal("unrelated Claim name leaked into module function scope", err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "[40]" {
+		t.Fatal(report, err)
+	}
+}
+
+func TestSubFlowErrorPathAndEmptyBudget(t *testing.T) {
+	p, err := CompileWithOptions(`flow Bad(x:number)->number{return fail("child")} flow Main()->list{return [Bad(x) for x in [1,2]]}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err == nil || len(report.Error.EvalPath) != 0 || len(report.Error.Position) != 4 || report.Error.Position[1].Index != "0" {
+		t.Fatal("caller path overwrote child root path", report.Error, err)
+	}
+	p, err = CompileWithOptions(`flow Empty(x:number)->void{} flow Main()->void{for x in [1,2,3] {Empty(x)}}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{MaxNodes: 6, MaxSteps: 1000})
+	if err == nil || report.Error.Code != "E-BUDGET" {
+		t.Fatal("empty Flow instances escaped node budget", report, err)
+	}
+}
+
+func TestModuleStaticSiteVector(t *testing.T) {
+	set := SourceSet{Root: "z.lip", Sources: map[string]Source{
+		"a.lip": {Version: "1", Text: `export flow Value(x:number)->number {return x}`},
+		"z.lip": {Version: "local", Text: "import lip \"./a.lip\" as a\nflow Main()->number{return a.Value(2)}"},
+	}}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || num(report.Output) != 2 {
+		t.Fatal(report, err)
+	}
+	found := false
+	for _, n := range report.Nodes {
+		if len(n.Position) > 1 {
+			found = true
+			if got := display(t, n.Position.Wire()); got != `[["13","0"],["14","0"],["32","0"]]` {
+				t.Fatal("source ordinal/call prefix changed", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("callee was not represented in the parent graph")
+	}
+	original, _ := p.BuildInfo().Fields()
+	for id, source := range set.Sources {
+		source.Text = strings.ReplaceAll(source.Text, "\n", "\r\n")
+		set.Sources[id] = source
+	}
+	normalized, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := normalized.BuildInfo().Fields()
+	same, _ := Equal(original["revision"], next["revision"])
+	if !same {
+		t.Fatal("CRLF changed revision")
+	}
+}
+
+func TestLoopSourceFlowAndBodyPositions(t *testing.T) {
+	p, err := CompileWithOptions(`flow Items()->list{return [1,2]} flow Main()->void{for x in Items(){unused=x}}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, parallel := range []int{1, 4} {
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var selector, source, body Position
+		seen := map[string]bool{}
+		for _, n := range report.Nodes {
+			key := display(t, n.Position.Wire())
+			if seen[key] {
+				t.Fatal("source/body collision", key)
+			}
+			seen[key] = true
+			switch len(n.Position) {
+			case 1:
+				selector = n.Position
+			case 3:
+				source = n.Position
+			case 2:
+				if n.Position[0].Index == "0" {
+					body = n.Position
+				}
+			}
+		}
+		if len(selector) != 1 || len(source) != 3 || len(body) != 2 || source[0] != selector[0] || body[0] != selector[0] || source[1].Site >= body[1].Site {
+			t.Fatal("selector invocation prefix was confused with iteration zero", report.Nodes)
+		}
+	}
 }

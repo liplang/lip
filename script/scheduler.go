@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/big"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -33,20 +34,30 @@ type Options struct {
 	After       []After
 }
 
-// After constrains a top-level statement to wait for another top-level
-// statement or entire region. Sites are exposed by Program.Sites.
-type After struct{ Site, DependsOn int }
+// After adds a completion dependency between nodes, regions, or static sites.
+// Target and Requires use the specification's AfterTarget_wire encoding.
+type After struct {
+	Site, DependsOn  int   // Compatibility shorthand for root statements.
+	Target, Requires Value // Strict AfterTarget_wire values; both must be present.
+}
 type Program struct {
 	syntax *syntax
 	check  *checker
 	host   Host
+	build  Value
+}
+type CompileOptions struct {
+	Entry string // Empty selects the sole root Flow, or the implicit main.
 }
 type Report struct {
-	Output  Value
-	Error   *Diagnostic
-	Journal *MemoryJournal
-	Nodes   []NodeRecord
-	Steps   int64
+	Output Value
+	// EntryOutput is the logical {kind:"value",value:Data} / {kind:"void"}
+	// success envelope. It is nil on rejection, failure, or cancellation.
+	EntryOutput *Value
+	Error       *Diagnostic
+	Journal     *MemoryJournal
+	Nodes       []NodeRecord
+	Steps       int64
 }
 type NodeRecord struct {
 	Position   Position
@@ -57,6 +68,14 @@ type NodeRecord struct {
 }
 
 func Compile(source string, host Host) (*Program, error) {
+	return CompileWithOptions(source, host, CompileOptions{})
+}
+
+func CompileWithOptions(source string, host Host, options CompileOptions) (*Program, error) {
+	return CompileSourceSet(SourceSet{Root: "main.lip", Sources: map[string]Source{"main.lip": {Version: "local", Text: source}}}, host, options)
+}
+func (p *Program) BuildInfo() Value { return p.build }
+func compileSyntax(s *syntax, host Host, build Value) (*Program, error) {
 	contracts := make([]Contract, len(host.Contracts))
 	for i, c := range host.Contracts {
 		if err := validateContract(c); err != nil {
@@ -70,10 +89,7 @@ func Compile(source string, host Host) (*Program, error) {
 		capabilities[k] = granted
 	}
 	host.Capabilities = capabilities
-	s, err := parse(source)
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	host, err = lowerNative(context.Background(), s, host, nil)
 	if err != nil {
 		return nil, err
@@ -82,7 +98,7 @@ func Compile(source string, host Host) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Program{s, c, host}, nil
+	return &Program{syntax: s, check: c, host: host, build: build}, nil
 }
 func (p *Program) Sites() map[int]string {
 	out := map[int]string{}
@@ -95,11 +111,84 @@ func (p *Program) Run(ctx context.Context, inputs map[string]Value, opts Options
 	return p.run(ctx, inputs, opts, nil)
 }
 
+// DecodeEntryInput is the strict JSON boundary; RunEntry subsequently checks
+// positional/named binding and annotations against the selected signature.
+func DecodeEntryInput(data []byte) (Value, error) {
+	value, err := DecodeData(data)
+	if err != nil {
+		return Value{}, diagnostic("E-SCHEMA", "invalid EntryInput: "+err.Error())
+	}
+	if err := checkEntryInput(value); err != nil {
+		return Value{}, err
+	}
+	return value, nil
+}
+
+func checkEntryInput(input Value) error {
+	if input.k != Object || len(input.o) != 2 || input.o["positional"].k != List || input.o["named"].k != Object || !input.IsData() {
+		return diagnostic("E-SCHEMA", "EntryInput requires exactly positional:list<Data> and named:object<string,Data>")
+	}
+	return nil
+}
+
+func (p *Program) bindEntry(input Value) (map[string]Value, error) {
+	if p == nil || p.syntax == nil || p.check == nil || p.syntax.body == nil {
+		return nil, diagnostic("E-ENTRY", "no selected entry")
+	}
+	if err := checkEntryInput(input); err != nil {
+		return nil, err
+	}
+	positional, named := input.o["positional"].l, input.o["named"].o
+	if len(positional) > len(p.syntax.params) {
+		return nil, diagnostic("E-SCHEMA", "too many positional entry inputs")
+	}
+	bound := make(map[string]Value, len(p.syntax.params))
+	for i, param := range p.syntax.params {
+		value, present := named[param.name]
+		if i < len(positional) {
+			if present {
+				return nil, diagnostic("E-SCHEMA", "duplicate entry input "+param.name)
+			}
+			value, present = positional[i], true
+		}
+		if !present {
+			return nil, diagnostic("E-SCHEMA", "missing entry input "+param.name)
+		}
+		if err := checkType(value, param.typ); err != nil {
+			return nil, diagnostic("E-SCHEMA", "entry input "+param.name+": "+err.Error())
+		}
+		bound[param.name] = value
+	}
+	if len(named)+len(positional) != len(bound) {
+		return nil, diagnostic("E-SCHEMA", "unknown entry input")
+	}
+	return bound, nil
+}
+
+func (p *Program) RunEntry(ctx context.Context, input Value, opts Options) (Report, error) {
+	bound, err := p.bindEntry(input)
+	if err != nil {
+		return Report{}, err
+	}
+	return p.runBound(ctx, bound, opts, nil)
+}
+
 // A non-nil saved map belongs to an interactive cell. Existing values are
 // immutable inputs; successful top-level results are committed after scheduling.
 func (p *Program) run(ctx context.Context, inputs map[string]Value, opts Options, saved map[string]Value) (Report, error) {
+	bound, err := p.bindEntry(object(map[string]Value{"positional": ListValue(), "named": object(inputs)}))
+	if err != nil {
+		return Report{}, err
+	}
+	return p.runBound(ctx, bound, opts, saved)
+}
+
+func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Options, saved map[string]Value) (Report, error) {
 	if ctx == nil {
 		return Report{}, diagnostic("E-VALUE", "nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return Report{}, err
 	}
 	if opts.Parallelism <= 0 {
 		opts.Parallelism = 1
@@ -125,31 +214,33 @@ func (p *Program) run(ctx context.Context, inputs map[string]Value, opts Options
 	for name, value := range saved {
 		env.values[name] = value
 	}
+	for name, declaration := range p.syntax.data {
+		env.values[name] = declaration.value
+	}
 	for name, e := range p.syntax.functions {
 		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env}}
 	}
-	for _, param := range p.syntax.params {
-		x, ok := inputs[param.name]
-		if !ok {
-			return Report{}, diagnostic("E-SCHEMA", "missing Flow input "+param.name)
-		}
-		if !x.IsData() {
-			return Report{}, diagnostic("E-SCHEMA", "Flow input is not Data")
-		}
-		if err := checkType(x, param.typ); err != nil {
-			return Report{}, diagnostic("E-SCHEMA", err.Error())
-		}
-		env.values[param.name] = x
-	}
-	if len(inputs) != len(p.syntax.params) {
-		return Report{}, diagnostic("E-SCHEMA", "unknown Flow input")
+	entryEnv := newEnvironment(env)
+	for name, value := range inputs {
+		entryEnv.values[name] = value
 	}
 	for name := range p.check.stores {
 		r.stores[name] = newClaimStore(opts.RunID)
 	}
-	r.root = &region{kind: "block", status: Running}
-	r.buildBlock(p.syntax.body, env, nil, r.root, nil)
+	entryEnv.stores = r.stores
+	r.env = env
+	r.entry = &flowInstance{result: p.syntax.result, name: p.syntax.flowName, stores: r.stores}
+	r.templates = makeTemplates(p.syntax)
+	if err := r.configureAfter(); err != nil {
+		return Report{}, err
+	}
+	r.root = &region{kind: "block", status: Running, instance: r.entry}
+	r.attachRegionAfter(r.root)
+	r.buildBlock(p.syntax.body, entryEnv, nil, r.root, nil)
 	for _, constraint := range opts.After {
+		if constraint.Target.k != Null || constraint.Requires.k != Null {
+			continue
+		}
 		a, b := r.topWork(constraint.Site), r.topWork(constraint.DependsOn)
 		b.kind = "after"
 		if a.node == nil && a.region == nil || b.node == nil && b.region == nil {
@@ -161,7 +252,14 @@ func (p *Program) run(ctx context.Context, inputs map[string]Value, opts Options
 			a.region.entry.deps = append(a.region.entry.deps, b)
 		}
 	}
+	r.refreshAfter()
+	if r.buildErr != nil {
+		return Report{}, r.buildErr
+	}
 	if r.hasCycle() {
+		if len(r.afterRules) > 0 {
+			return Report{}, diagnostic("E-AFTER-CYCLE", "combined After dependency cycle")
+		}
 		return Report{}, diagnostic("E-GRAPH-CYCLE", "combined dependency cycle")
 	}
 	report := r.schedule()
@@ -186,6 +284,11 @@ func (p *Program) run(ctx context.Context, inputs map[string]Value, opts Options
 			}
 		}
 	}
+	output := object(map[string]Value{"kind": textValue("void")})
+	if p.syntax.result != "void" {
+		output = object(map[string]Value{"kind": textValue("value"), "value": report.Output})
+	}
+	report.EntryOutput = &output
 	return report, nil
 }
 
@@ -219,28 +322,57 @@ func (d dependency) cause() string {
 }
 
 type node struct {
-	pos        Position
-	stmt       *statement
-	env        *environment
-	parent     *region
-	deps       []dependency
-	status     Status
-	cause      string
-	value      Value
-	err        *Diagnostic
-	causeErr   *Diagnostic
-	effect     EffectClass
-	concurrent bool
-	control    string
-	cut        atomic.Bool
-	ticket     uint64
+	permitCancel context.CancelFunc
+	wake         flowResult
+	pos          Position
+	instance     *flowInstance
+	waiting      *region
+	resume       chan flowResult
+	parked       bool
+	called       map[int]bool
+	localRanges  sync.Map
+	stmt         *statement
+	env          *environment
+	parent       *region
+	deps         []dependency
+	status       Status
+	cause        string
+	value        Value
+	err          *Diagnostic
+	causeErr     *Diagnostic
+	effect       EffectClass
+	concurrent   bool
+	control      string
+	cut          atomic.Bool
+	ticket       uint64
+}
+type flowInstance struct {
+	name   string
+	prefix Position
+	result string
+	stores map[string]*claimStore
+	output Value
+}
+type flowResult struct {
+	release func()
+	value   Value
+	err     error
+}
+type flowRequest struct {
+	definition *flowDecl
+	inputs     map[string]Value
+	prefix     Position
+	resume     chan flowResult
 }
 type region struct {
+	owner                *node
+	instance             *flowInstance
 	kind                 string
 	stmt                 *statement
 	entry                *node
 	parent               *region
 	children             []dependency
+	deps                 []dependency
 	status               Status
 	cause                string
 	causeErr             *Diagnostic
@@ -253,31 +385,54 @@ type region struct {
 	active               int
 	hasCalls, hasBarrier bool
 	writers              map[string]bool
+	symbol               *afterTarget
+}
+
+func (g *region) work() []dependency {
+	if len(g.deps) == 0 {
+		return g.children
+	}
+	return append(append([]dependency(nil), g.deps...), g.children...)
+}
+
+type permitRequest struct {
+	need   map[string]uint64
+	resume chan flowResult
 }
 type nodeEvent struct {
-	node    *node
-	value   Value
-	control string
-	err     error
+	permit      *permitRequest
+	permitReady bool
+	release     func()
+	node        *node
+	value       Value
+	control     string
+	err         error
+	flow        *flowRequest
 }
 type runState struct {
-	program  *Program
-	ctx      context.Context
-	opts     Options
-	journal  *MemoryJournal
-	root     *region
-	nodes    []*node
-	regions  []*region
-	stores   map[string]*claimStore
-	events   chan nodeEvent
-	steps    atomic.Int64
-	calls    atomic.Int64
-	main     *Diagnostic
-	keep     map[*node]bool
-	required map[*region]bool
-	running  int
-	buildErr error
-	readySeq uint64
+	permits      int
+	program      *Program
+	env          *environment
+	entry        *flowInstance
+	ctx          context.Context
+	opts         Options
+	journal      *MemoryJournal
+	root         *region
+	nodes        []*node
+	regions      []*region
+	stores       map[string]*claimStore
+	events       chan nodeEvent
+	steps        atomic.Int64
+	calls        atomic.Int64
+	main         *Diagnostic
+	keep         map[*node]bool
+	required     map[*region]bool
+	running      int
+	buildErr     error
+	readySeq     uint64
+	templates    map[int]*nodeTemplate
+	afterRules   []afterRule
+	afterTargets []*afterTarget
 }
 
 var errorCut = errors.New("internal error cut")
@@ -387,7 +542,7 @@ func (r *runState) buildBlock(b *block, env *environment, prefix Position, paren
 	controls := []dependency{}
 	for _, s := range b.items {
 		pos := append(prefix.Copy(), Pair{s.tok.site, "0"})
-		n := &node{pos: pos, stmt: s, env: env, parent: parent, status: Pending, concurrent: true}
+		n := &node{instance: parent.instance, pos: pos, stmt: s, env: env, parent: parent, status: Pending, concurrent: true}
 		if s.expr != nil {
 			n.effect = s.expr.info.effect
 			n.concurrent = s.expr.info.concurrent
@@ -398,10 +553,10 @@ func (r *runState) buildBlock(b *block, env *environment, prefix Position, paren
 		}
 		n.deps = append(n.deps, r.expressionDeps(s.expr, env)...)
 		if s.tag == "claim" {
-			r.stores[s.name].declaration = n
+			parent.instance.stores[s.name].declaration = n
 		}
 		if s.tag == "join" {
-			n.deps = append(n.deps, dependency{node: r.stores[s.name].declaration})
+			n.deps = append(n.deps, dependency{node: parent.instance.stores[s.name].declaration})
 		}
 		r.nodes = append(r.nodes, n)
 		if r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) > r.opts.MaxNodes {
@@ -410,13 +565,14 @@ func (r *runState) buildBlock(b *block, env *environment, prefix Position, paren
 		work := dependency{node: n}
 		if s.tag == "for" || s.tag == "if" || s.tag == "match" {
 			calls, barrier, writers := staticSummary(s)
-			g := &region{kind: s.tag, stmt: s, entry: n, parent: parent, status: Running, env: env, prefix: prefix.Copy(), loop: loop, next: new(big.Int), hasCalls: calls, hasBarrier: barrier, writers: writers}
+			g := &region{kind: s.tag, stmt: s, entry: n, instance: parent.instance, parent: parent, status: Running, env: env, prefix: prefix.Copy(), loop: loop, next: new(big.Int), hasCalls: calls, hasBarrier: barrier, writers: writers}
 			r.regions = append(r.regions, g)
 			if r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) > r.opts.MaxNodes {
 				r.buildErr = at(diagnostic("E-BUDGET", "graph instance budget exhausted"), s.tok)
 			}
 			work = dependency{region: g}
 		}
+		r.attachAfter(n)
 		parent.children = append(parent.children, work)
 		if s.tag == "bind" {
 			next := newEnvironment(env)
@@ -431,7 +587,7 @@ func (r *runState) buildBlock(b *block, env *environment, prefix Position, paren
 		if hasControl(s) {
 			controls = append(controls, work)
 		}
-		for name, store := range r.stores {
+		for name, store := range parent.instance.stores {
 			_, _, writers := staticSummary(s)
 			if writers[name] {
 				store.producers = append(store.producers, work)
@@ -446,7 +602,7 @@ func (r *runState) expressionDeps(e *expression, env *environment) []dependency 
 	names := freeNames(e)
 	deps := []dependency{}
 	for name := range names {
-		if store, ok := r.stores[name]; ok {
+		if store := findStore(env, name); store != nil {
 			if store.declaration != nil {
 				deps = append(deps, dependency{node: store.declaration})
 			}
@@ -470,7 +626,7 @@ func (r *runState) expressionDeps(e *expression, env *environment) []dependency 
 			return
 		}
 		if x.tag == "proposal" && x.name == "claim.snapshot" && len(x.args) == 1 {
-			if store := r.stores[x.args[0].expr.value.s]; store != nil && store.declaration != nil {
+			if store := findStore(env, x.args[0].expr.value.s); store != nil && store.declaration != nil {
 				deps = append(deps, dependency{node: store.declaration})
 			}
 		}
@@ -664,7 +820,7 @@ func (r *runState) effectiveDeps(n *node) []dependency {
 	}
 	barrier := n.effect != ReadOnlyEffect || !n.concurrent
 	for _, other := range r.nodes {
-		if other == n || other.effect == PureEffect || comparePosition(other.pos, n.pos) >= 0 {
+		if other == n || nodeAncestor(other, n) || other.effect == PureEffect || comparePosition(other.pos, n.pos) >= 0 {
 			continue
 		}
 		if barrier || other.effect != ReadOnlyEffect || !other.concurrent {
@@ -693,20 +849,31 @@ func isAncestor(a, b *region) bool {
 func (r *runState) hasCycle() bool {
 	visiting := map[*node]bool{}
 	done := map[*node]bool{}
+	regionVisiting, regionDone := map[*region]bool{}, map[*region]bool{}
 	var visit func(*node) bool
 	var work func(dependency) bool
 	work = func(d dependency) bool {
 		if d.node != nil {
 			return visit(d.node)
 		}
-		if visit(d.region.entry) {
+		g := d.region
+		if g == nil || regionDone[g] {
+			return false
+		}
+		if regionVisiting[g] {
 			return true
 		}
-		for _, child := range d.region.children {
+		regionVisiting[g] = true
+		if visit(g.entry) {
+			return true
+		}
+		for _, child := range g.work() {
 			if work(child) {
 				return true
 			}
 		}
+		delete(regionVisiting, g)
+		regionDone[g] = true
 		return false
 	}
 	visit = func(n *node) bool {
@@ -717,6 +884,9 @@ func (r *runState) hasCycle() bool {
 			return true
 		}
 		visiting[n] = true
+		if n.waiting != nil && work(dependency{region: n.waiting}) {
+			return true
+		}
 		for _, d := range r.effectiveDeps(n) {
 			if work(d) {
 				return true
@@ -752,8 +922,13 @@ func (r *runState) recomputeKeep() {
 			return
 		}
 		r.required[g] = true
+		if g.symbol != nil {
+			for _, future := range g.symbol.future {
+				workKeep(dependency{region: future})
+			}
+		}
 		nodeKeep(g.entry)
-		for _, child := range g.children {
+		for _, child := range g.work() {
 			workKeep(child)
 		}
 	}
@@ -762,6 +937,9 @@ func (r *runState) recomputeKeep() {
 			return
 		}
 		r.keep[n] = true
+		if n.waiting != nil && n.waiting.causeErr == nil {
+			workKeep(dependency{region: n.waiting})
+		}
 		for _, d := range r.effectiveDeps(n) {
 			workKeep(d)
 		}
@@ -777,6 +955,10 @@ func (r *runState) schedule() Report {
 	for {
 		r.recomputeKeep()
 		progress := r.updateRegions()
+		r.refreshAfter()
+		if len(r.afterRules) > 0 && r.hasCycle() && r.buildErr == nil {
+			r.buildErr = diagnostic("E-AFTER-CYCLE", "cycle after dynamic expansion")
+		}
 		if r.buildErr != nil && r.main == nil {
 			d := at(r.buildErr, r.program.syntax.body.tok)
 			r.main = d
@@ -785,6 +967,9 @@ func (r *runState) schedule() Report {
 		for _, n := range r.nodes {
 			if n.status == Running {
 				n.cut.Store(!r.allowed(n))
+				if n.permitCancel != nil && (!r.allowed(n) || r.ctx.Err() != nil) {
+					n.permitCancel()
+				}
 			}
 		}
 		sort.SliceStable(r.nodes, func(i, j int) bool { return comparePosition(r.nodes[i].pos, r.nodes[j].pos) < 0 })
@@ -817,6 +1002,36 @@ func (r *runState) schedule() Report {
 			})
 		}
 		for _, n := range r.nodes {
+			if n.status == Running && n.parked && n.waiting != nil && (terminal(n.waiting.status) || n.permitCancel == nil && (!r.allowed(n) || r.ctx.Err() != nil)) && r.running < r.opts.Parallelism {
+				result := flowResult{value: n.waiting.instance.output}
+				if n.waiting.kind == "permit" {
+					result = n.wake
+					n.wake = flowResult{}
+				}
+				if r.ctx.Err() != nil {
+					result.err = r.ctx.Err()
+				} else if !r.allowed(n) {
+					result.err = errorCut
+				} else if n.waiting.status != Completed {
+					result.err = n.waiting.causeErr
+					if result.err == nil {
+						result.err = errorCut
+					}
+				}
+				if result.err != nil && result.release != nil {
+					result.release()
+					result.release = nil
+				}
+				if n.permitCancel != nil {
+					n.permitCancel()
+					n.permitCancel = nil
+				}
+				n.parked = false
+				n.waiting = nil
+				r.running++
+				n.resume <- result
+				progress = true
+			}
 			if n.status != Pending {
 				continue
 			}
@@ -865,7 +1080,7 @@ func (r *runState) schedule() Report {
 				} else if n.stmt.tag == "join" {
 					event.value, event.err = v.result(n.stmt.expr, n.env)
 					if event.err == nil {
-						event.err = r.stores[n.stmt.name].join(n.pos, event.value)
+						event.err = n.instance.stores[n.stmt.name].join(n.pos, event.value)
 					}
 				} else if n.stmt.tag == "match" {
 					x, e := v.result(n.stmt.expr, n.env)
@@ -887,8 +1102,8 @@ func (r *runState) schedule() Report {
 				if event.err == nil && n.stmt.tag == "return" {
 					if !event.value.IsData() {
 						event.err = diagnostic("E-SCHEMA", "Flow output is not Data")
-					} else if r.program.syntax.result != "void" {
-						if err := checkType(event.value, r.program.syntax.result); err != nil {
+					} else if n.instance.result != "void" {
+						if err := checkType(event.value, n.instance.result); err != nil {
 							event.err = diagnostic("E-SCHEMA", err.Error())
 						}
 					}
@@ -902,10 +1117,67 @@ func (r *runState) schedule() Report {
 				r.events <- event
 			}(n)
 		}
-		if r.running > 0 {
+		if r.running > 0 || r.permits > 0 {
 			event := <-r.events
+			if event.permitReady {
+				r.permits--
+				n := event.node
+				n.wake = flowResult{release: event.release, err: event.err}
+				n.waiting.status = Completed
+				continue
+			}
 			r.running--
 			n := event.node
+			if event.permit != nil {
+				request := event.permit
+				n.waiting = &region{kind: "permit", status: Running, instance: n.instance, expanded: true}
+				n.resume = request.resume
+				n.parked = true
+				ctx, cancel := context.WithCancel(r.ctx)
+				n.permitCancel = cancel
+				r.permits++
+				go func() {
+					release, err := r.program.host.Resources.acquire(ctx, request.need)
+					r.events <- nodeEvent{node: n, permitReady: true, release: release, err: err}
+				}()
+				continue
+			}
+			if event.flow != nil {
+				request := event.flow
+				budgetError := r.step()
+				if budgetError == nil && r.opts.MaxNodes > 0 && len(r.nodes)+len(r.regions) >= r.opts.MaxNodes {
+					budgetError = diagnostic("E-BUDGET", "Flow instance budget exhausted")
+				}
+				if budgetError != nil {
+					r.running++
+					request.resume <- flowResult{err: budgetError}
+					continue
+				}
+				if n.called == nil {
+					n.called = map[int]bool{}
+				}
+				n.called[request.prefix[len(request.prefix)-1].Site] = true
+				instance := &flowInstance{result: request.definition.result, name: request.definition.name, prefix: request.prefix, stores: map[string]*claimStore{}}
+				env := newEnvironment(r.env)
+				for name, value := range request.inputs {
+					env.values[name] = value
+				}
+				env.stores = instance.stores
+				for _, stmt := range request.definition.body.items {
+					if stmt.tag == "claim" {
+						instance.stores[stmt.name] = newClaimStore(r.opts.RunID)
+					}
+				}
+				g := &region{kind: "flow", owner: n, instance: instance, parent: n.parent, prefix: request.prefix, status: Running, expanded: true}
+				r.attachRegionAfter(g)
+				r.regions = append(r.regions, g)
+				n.waiting, n.resume, n.parked = g, request.resume, true
+				r.buildBlock(request.definition.body, env, request.prefix, g, nil)
+				if len(r.opts.After) > 0 && r.hasCycle() {
+					r.buildErr = at(diagnostic("E-GRAPH-CYCLE", "cycle after Flow expansion"), n.stmt.tok)
+				}
+				continue
+			}
 			n.value = event.value
 			n.control = event.control
 			if event.err != nil {
@@ -913,6 +1185,8 @@ func (r *runState) schedule() Report {
 					n.status, n.cause = Skipped, "error_cut"
 				} else if r.ctx.Err() != nil {
 					n.status, n.cause = Cancelled, "cancelled"
+				} else if d, ok := event.err.(*Diagnostic); ok && len(d.Position) > 0 {
+					n.status, n.cause, n.causeErr = Skipped, "dependency_failure", d
 				} else {
 					n.status = Error
 					n.err = at(event.err, n.stmt.tok)
@@ -923,6 +1197,9 @@ func (r *runState) schedule() Report {
 				}
 			} else {
 				n.status = Completed
+				if n.stmt.tag == "return" {
+					n.instance.output = n.value
+				}
 				if event.control != "" {
 					r.closeIteration(n, event.control)
 				}
@@ -940,7 +1217,7 @@ func (r *runState) schedule() Report {
 	report := Report{Error: r.main, Journal: r.journal, Steps: r.steps.Load()}
 	for _, n := range r.nodes {
 		report.Nodes = append(report.Nodes, NodeRecord{Position: n.pos.Copy(), Status: n.status, Cause: n.cause, Error: cloneDiagnostic(n.err), CauseError: cloneDiagnostic(n.causeErr)})
-		if n.stmt.tag == "return" && n.status == Completed {
+		if n.stmt.tag == "return" && n.status == Completed && n.instance == r.entry {
 			report.Output = n.value
 		}
 	}
@@ -1033,7 +1310,7 @@ func (r *runState) updateRegions() bool {
 		all := true
 		failed := false
 		active := 0
-		for _, w := range g.children {
+		for _, w := range g.work() {
 			if !terminal(w.status()) {
 				all = false
 				active++
@@ -1053,6 +1330,9 @@ func (r *runState) updateRegions() bool {
 			limit := 1
 			if g.stmt.parallel {
 				limit = r.opts.Parallelism
+				if len(r.afterRules) > 0 {
+					limit = len(g.source.l)
+				}
 			}
 			for !g.stopped && active < limit && (g.stmt.expr == nil || g.next.IsInt64() && g.next.Int64() < int64(len(g.source.l))) {
 				if r.ctx.Err() != nil {
@@ -1082,7 +1362,7 @@ func (r *runState) updateRegions() bool {
 				if g.stmt.name != "" {
 					local.values[g.stmt.name] = g.source.l[g.next.Int64()]
 				}
-				iteration := &region{kind: "iteration", parent: g, status: Running, env: local, prefix: prefix, loop: g, expanded: true}
+				iteration := &region{kind: "iteration", parent: g, status: Running, instance: g.instance, env: local, prefix: prefix, loop: g, expanded: true}
 				r.regions = append(r.regions, iteration)
 				g.children = append(g.children, dependency{region: iteration})
 				r.buildBlock(g.stmt.body, local, prefix, iteration, g)
@@ -1109,7 +1389,7 @@ func (r *runState) updateRegions() bool {
 	}
 	all := true
 	failed := false
-	for _, w := range r.root.children {
+	for _, w := range r.root.work() {
 		if !terminal(w.status()) {
 			all = false
 		}
@@ -1249,8 +1529,12 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 				return record
 			}
 			var e error
-			release, e = r.program.host.Resources.acquire(v.ctx, p.contract.Resources)
+			release, e = v.acquirePermit(p.contract.Resources)
 			if e != nil {
+				if e == errorCut {
+					record.aborted = true
+					return record
+				}
 				record.admission = true
 				record.Response = Rejected("E-RESOURCE", e.Error())
 				return record
@@ -1263,7 +1547,7 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 		}
 		if p.contract.Operation == (Operation{"lip", "claim", "snapshot"}) {
 			bound, _ := bindContract(p.contract, p.positional, p.named)
-			store := r.stores[bound[0].s]
+			store := v.node.instance.stores[bound[0].s]
 			value, e := store.read()
 			if e != nil {
 				record.admission = true
@@ -1311,4 +1595,638 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 		e.Code = "E-EFFECT-REJECTED"
 	}
 	return Value{}, &e
+}
+
+func nodeAncestor(a, b *node) bool {
+	for g := b.parent; g != nil; g = g.parent {
+		if g.owner == a || g.entry == a {
+			return true
+		}
+	}
+	return false
+}
+func findStore(env *environment, name string) *claimStore {
+	for ; env != nil; env = env.parent {
+		if store := env.stores[name]; store != nil {
+			return store
+		}
+	}
+	return nil
+}
+func (v *evaluator) invokeFlow(e *expression, env *environment) (Value, error) {
+	f := v.run.program.syntax.flows[e.name]
+	order, err := argumentOrder(&function{params: f.params}, e.args)
+	if err != nil {
+		return Value{}, err
+	}
+	values := make([]Value, len(f.params))
+	for i, arg := range e.args {
+		value, err := v.result(arg.expr, env)
+		if err != nil {
+			return Value{}, err
+		}
+		values[order[i]] = value
+	}
+	inputs := make(map[string]Value, len(f.params))
+	for i, param := range f.params {
+		value := values[i]
+		if !value.IsData() {
+			return Value{}, diagnostic("E-SCHEMA", "Flow input must be Data")
+		}
+		if err := checkType(value, param.typ); err != nil {
+			return Value{}, diagnostic("E-SCHEMA", err.Error())
+		}
+		inputs[param.name] = value
+	}
+	prefix := append(v.node.pos.Copy(), v.path...)
+	prefix = append(prefix, Pair{e.tok.site, "0"})
+	request := &flowRequest{definition: f, inputs: inputs, prefix: prefix, resume: make(chan flowResult, 1)}
+	v.run.events <- nodeEvent{node: v.node, flow: request}
+	result := <-request.resume
+	return result.value, result.err
+}
+
+// Static templates decode positions without guessing their meaning from numeric
+// prefixes. They also retain future producers for symbolic After completion.
+type callTemplate struct {
+	expression *expression
+	loops      []int
+}
+type nodeTemplate struct {
+	statement *statement
+	flow      string
+	loops     []int
+	calls     []callTemplate
+}
+type afterRule struct{ target, requires *afterTarget }
+type pathRange struct {
+	owner Position
+	path  Position
+}
+type afterTarget struct {
+	kind           string
+	site           int
+	position       Position
+	static         bool
+	boundary       *region
+	owners, needed []Position
+	ranges         []pathRange
+	future         []*region
+}
+
+func makeTemplates(s *syntax) map[int]*nodeTemplate {
+	out := map[int]*nodeTemplate{}
+	visited := map[string]bool{}
+	var flow func(string, *block)
+	var graph func(string, *block, []int)
+	graph = func(name string, b *block, loops []int) {
+		if b == nil {
+			return
+		}
+		for _, st := range b.items {
+			t := &nodeTemplate{statement: st, flow: name, loops: append([]int(nil), loops...)}
+			out[st.tok.site] = t
+			var expr func(*expression, []int)
+			var localBlock func(*block, []int)
+			var localStmt func(*statement, []int)
+			localStmt = func(st *statement, path []int) {
+				expr(st.expr, path)
+				bodyPath := path
+				if st.tag == "for" {
+					bodyPath = append(append([]int(nil), path...), st.tok.site)
+				}
+				localBlock(st.body, bodyPath)
+				localBlock(st.otherwise, path)
+				if st.other != nil {
+					localStmt(st.other, path)
+				}
+				for _, a := range st.arms {
+					expr(a.guard, path)
+					expr(a.result, path)
+					localBlock(a.body, path)
+				}
+			}
+			localBlock = func(b *block, path []int) {
+				if b == nil {
+					return
+				}
+				for _, st := range b.items {
+					localStmt(st, path)
+				}
+				expr(b.tail, path)
+				if b.exit != nil {
+					localStmt(b.exit, path)
+				}
+			}
+			expr = func(e *expression, path []int) {
+				if e == nil {
+					return
+				}
+				if e.tag == "flow" {
+					t.calls = append(t.calls, callTemplate{e, append([]int(nil), path...)})
+					if f := s.flows[e.name]; f != nil {
+						flow(e.name, f.body)
+					}
+				}
+				if e.tag == "fn" {
+					return
+				}
+				if e.tag == "carry" || e.tag == "comprehension" {
+					expr(e.y, path)
+					next := append(append([]int(nil), path...), e.tok.site)
+					if e.tag == "carry" {
+						expr(e.x, path)
+						localBlock(e.body, next)
+					} else {
+						expr(e.x, next)
+						expr(e.z, next)
+					}
+					return
+				}
+				expr(e.x, path)
+				expr(e.y, path)
+				expr(e.z, path)
+				for _, a := range e.args {
+					expr(a.expr, path)
+				}
+				for _, x := range e.elems {
+					expr(x, path)
+				}
+				for _, f := range e.fields {
+					expr(f.expr, path)
+				}
+				localBlock(e.body, path)
+				for _, a := range e.arms {
+					expr(a.guard, path)
+					expr(a.result, path)
+					localBlock(a.body, path)
+				}
+			}
+			expr(st.expr, nil)
+			for _, a := range st.arms {
+				expr(a.guard, nil)
+			}
+			childLoops := loops
+			if st.tag == "for" {
+				childLoops = append(append([]int(nil), loops...), st.tok.site)
+			}
+			graph(name, st.body, childLoops)
+			graph(name, st.otherwise, loops)
+			if st.other != nil {
+				graph(name, &block{items: []*statement{st.other}}, loops)
+			}
+			for _, a := range st.arms {
+				graph(name, a.body, loops)
+			}
+		}
+	}
+	flow = func(name string, b *block) {
+		if visited[name] {
+			return
+		}
+		visited[name] = true
+		graph(name, b, nil)
+	}
+	flow(s.flowName, s.body)
+	return out
+}
+func canonicalNatural(s string) bool {
+	if s == "0" {
+		return true
+	}
+	if len(s) == 0 || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if !asciiDigit(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+func decodePosition(value Value) (Position, error) {
+	if value.k != List {
+		return nil, diagnostic("E-AFTER-CYCLE", "position must be a pair list")
+	}
+	out := Position{}
+	for _, pair := range value.l {
+		if pair.k != List || len(pair.l) != 2 || pair.l[0].k != String || pair.l[1].k != String || !canonicalNatural(pair.l[0].s) || !canonicalNatural(pair.l[1].s) {
+			return nil, diagnostic("E-AFTER-CYCLE", "invalid position pair")
+		}
+		site, err := strconv.Atoi(pair.l[0].s)
+		if err != nil {
+			return nil, diagnostic("E-AFTER-CYCLE", "unknown site ordinal")
+		}
+		out = append(out, Pair{site, pair.l[1].s})
+	}
+	return out, nil
+}
+func positionPrefix(prefix, pos Position) bool {
+	return len(prefix) <= len(pos) && comparePosition(prefix, pos[:len(prefix)]) == 0
+}
+func (r *runState) parseAfter(wire Value) (*afterTarget, error) {
+	bad := func() (*afterTarget, error) {
+		return nil, diagnostic("E-AFTER-CYCLE", "invalid or unknown AfterTarget")
+	}
+	if wire.k != List || len(wire.l) < 2 || wire.l[0].k != String {
+		return bad()
+	}
+	t := &afterTarget{boundary: &region{kind: "after", status: Pending, expanded: true}}
+	t.boundary.symbol = t
+	switch wire.l[0].s {
+	case "site":
+		if len(wire.l) != 3 || wire.l[1].k != String || wire.l[2].k != String || !canonicalNatural(wire.l[2].s) {
+			return bad()
+		}
+		site, err := strconv.Atoi(wire.l[2].s)
+		if err != nil {
+			return bad()
+		}
+		t.kind, t.site, t.static = wire.l[1].s, site, true
+		valid := false
+		for _, n := range r.templates {
+			if n.statement.tok.site == site && (t.kind == "node" || t.kind == "loop" && n.statement.tag == "for" || t.kind == "branch" && (n.statement.tag == "if" || n.statement.tag == "match")) {
+				valid = true
+			}
+			for _, call := range n.calls {
+				if call.expression.tok.site == site && t.kind == "call" {
+					valid = true
+				}
+			}
+		}
+		if !valid {
+			return bad()
+		}
+	case "node":
+		if len(wire.l) != 2 {
+			return bad()
+		}
+		pos, err := decodePosition(wire.l[1])
+		if err != nil {
+			return nil, err
+		}
+		t.kind, t.position = "node", pos
+	case "region":
+		if len(wire.l) != 3 || wire.l[1].k != String {
+			return bad()
+		}
+		pos, err := decodePosition(wire.l[2])
+		if err != nil {
+			return nil, err
+		}
+		t.kind, t.position = wire.l[1].s, pos
+		if t.kind != "flow" && t.kind != "loop" && t.kind != "branch" {
+			return bad()
+		}
+	default:
+		return bad()
+	}
+	if !t.static {
+		var decode func(string, int) bool
+		decode = func(flow string, start int) bool {
+			if t.kind == "flow" && start == len(t.position) {
+				return true
+			}
+			for _, node := range r.templates {
+				if node.flow != flow {
+					continue
+				}
+				end := start + len(node.loops) + 1
+				if end > len(t.position) {
+					continue
+				}
+				valid := true
+				for i, site := range node.loops {
+					valid = valid && t.position[start+i].Site == site
+				}
+				last := t.position[end-1]
+				if !valid || last.Site != node.statement.tok.site || last.Index != "0" {
+					continue
+				}
+				owner := t.position[:end].Copy()
+				if end == len(t.position) {
+					if t.kind == "node" || t.kind == "loop" && node.statement.tag == "for" || t.kind == "branch" && (node.statement.tag == "if" || node.statement.tag == "match") {
+						t.site = last.Site
+						t.needed = append(t.needed, owner)
+						return true
+					}
+					continue
+				}
+				for _, call := range node.calls {
+					callEnd := end + len(call.loops) + 1
+					if callEnd > len(t.position) {
+						continue
+					}
+					valid := true
+					for i, site := range call.loops {
+						valid = valid && t.position[end+i].Site == site
+					}
+					pair := t.position[callEnd-1]
+					if !valid || pair.Site != call.expression.tok.site || pair.Index != "0" {
+						continue
+					}
+					t.owners = append(t.owners, owner)
+					t.needed = append(t.needed, owner)
+					t.ranges = append(t.ranges, pathRange{owner, t.position[end : callEnd-1].Copy()})
+					if t.kind == "flow" && callEnd == len(t.position) {
+						t.site = pair.Site
+						return true
+					}
+					if decode(call.expression.name, callEnd) {
+						return true
+					}
+					t.owners = t.owners[:len(t.owners)-1]
+					t.needed = t.needed[:len(t.needed)-1]
+					t.ranges = t.ranges[:len(t.ranges)-1]
+				}
+			}
+			return false
+		}
+		if !decode(r.program.syntax.flowName, 0) {
+			return bad()
+		}
+	}
+	r.afterTargets = append(r.afterTargets, t)
+	return t, nil
+}
+func (r *runState) configureAfter() error {
+	for _, constraint := range r.opts.After {
+		if constraint.Target.k == Null && constraint.Requires.k == Null {
+			continue
+		}
+		target, err := r.parseAfter(constraint.Target)
+		if err != nil {
+			return err
+		}
+		requires, err := r.parseAfter(constraint.Requires)
+		if err != nil {
+			return err
+		}
+		if target.kind == requires.kind && target.static == requires.static &&
+			(target.static && target.site == requires.site || !target.static && comparePosition(target.position, requires.position) == 0) {
+			return diagnostic("E-AFTER-CYCLE", "After target cannot await itself")
+		}
+		if !target.static && !requires.static {
+			if requires.kind == "flow" && positionPrefix(requires.position, target.position) {
+				return diagnostic("E-AFTER-CYCLE", "descendant cannot await its Flow ancestor")
+			}
+			for _, owner := range target.owners {
+				if requires.kind == "node" && comparePosition(owner, requires.position) == 0 {
+					return diagnostic("E-AFTER-CYCLE", "descendant cannot await its owner")
+				}
+			}
+		}
+		r.afterRules = append(r.afterRules, afterRule{target, requires})
+	}
+	return nil
+}
+func targetMatchesNode(t *afterTarget, n *node) bool {
+	if t.static {
+		return t.site == n.stmt.tok.site && (t.kind == "node" || t.kind == "loop" && n.stmt.tag == "for" || t.kind == "branch" && (n.stmt.tag == "if" || n.stmt.tag == "match"))
+	}
+	return (t.kind == "node" || t.kind == "loop" || t.kind == "branch") && comparePosition(t.position, n.pos) == 0
+}
+func targetMatchesFlow(t *afterTarget, g *region) bool {
+	if g.kind != "flow" && g.kind != "block" {
+		return false
+	}
+	if t.static {
+		return t.kind == "call" && g.kind == "flow" && len(g.prefix) > 0 && g.prefix[len(g.prefix)-1].Site == t.site
+	}
+	return t.kind == "flow" && comparePosition(t.position, g.prefix) == 0
+}
+func (r *runState) attachAfter(n *node) {
+	for _, rule := range r.afterRules {
+		match := targetMatchesNode(rule.target, n)
+		for g := n.parent; g != nil && !match; g = g.parent {
+			match = targetMatchesFlow(rule.target, g)
+		}
+		if match {
+			n.deps = append(n.deps, dependency{region: rule.requires.boundary, kind: "after"})
+		}
+	}
+}
+func (r *runState) attachRegionAfter(g *region) {
+	for _, rule := range r.afterRules {
+		if targetMatchesFlow(rule.target, g) {
+			g.deps = append(g.deps, dependency{region: rule.requires.boundary, kind: "after"})
+		}
+	}
+}
+func (r *runState) containsAfter(flow string, t *afterTarget, seen map[string]bool) bool {
+	if seen[flow] {
+		return false
+	}
+	seen[flow] = true
+	for _, node := range r.templates {
+		if node.flow != flow {
+			continue
+		}
+		if node.statement.tok.site == t.site && t.kind != "call" && t.kind != "flow" {
+			return true
+		}
+		for _, call := range node.calls {
+			if (t.kind == "call" || t.kind == "flow") && call.expression.tok.site == t.site || r.containsAfter(call.expression.name, t, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+func (r *runState) bodyContainsAfter(b *block, t *afterTarget) bool {
+	if b == nil {
+		return false
+	}
+	found := false
+	for _, st := range b.items {
+		if st.tok.site == t.site && t.kind != "call" && t.kind != "flow" {
+			return true
+		}
+		template := r.templates[st.tok.site]
+		if template != nil {
+			for _, call := range template.calls {
+				if (t.kind == "call" || t.kind == "flow") && call.expression.tok.site == t.site || r.containsAfter(call.expression.name, t, map[string]bool{}) {
+					return true
+				}
+			}
+		}
+		found = found || r.bodyContainsAfter(st.body, t) || r.bodyContainsAfter(st.otherwise, t)
+		if st.other != nil {
+			found = found || r.bodyContainsAfter(&block{items: []*statement{st.other}}, t)
+		}
+		for _, a := range st.arms {
+			found = found || r.bodyContainsAfter(a.body, t)
+		}
+	}
+	return found
+}
+func (r *runState) refreshAfter() {
+	for _, t := range r.afterTargets {
+		boundary := t.boundary
+		boundary.children = nil
+		t.future = nil
+		matched := false
+		add := func(d dependency) {
+			for _, old := range boundary.children {
+				if old.node == d.node && old.region == d.region {
+					return
+				}
+			}
+			boundary.children = append(boundary.children, d)
+		}
+		for _, n := range r.nodes {
+			if t.kind == "node" && targetMatchesNode(t, n) {
+				add(dependency{node: n})
+				matched = true
+			}
+			if terminal(n.status) {
+				continue
+			}
+			if !t.static {
+				needed := false
+				for _, owner := range t.owners {
+					needed = needed || comparePosition(owner, n.pos) == 0
+				}
+				if !needed {
+					continue
+				}
+			}
+			template := r.templates[n.stmt.tok.site]
+			if template == nil {
+				continue
+			}
+			for _, call := range template.calls {
+				if n.called[call.expression.tok.site] && len(call.loops) == 0 {
+					continue
+				}
+				if (t.kind == "call" || t.kind == "flow") && call.expression.tok.site == t.site || r.containsAfter(call.expression.name, t, map[string]bool{}) {
+					add(dependency{node: n})
+				}
+			}
+		}
+		groups := append([]*region{r.root}, r.regions...)
+		for _, g := range groups {
+			if g == nil {
+				continue
+			}
+			if targetMatchesFlow(t, g) || g.entry != nil && t.kind != "node" && t.kind != "flow" && t.kind != "call" && targetMatchesNode(t, g.entry) {
+				add(dependency{region: g})
+				matched = true
+			}
+			if g.stmt == nil {
+				continue
+			}
+			if !t.static && g.kind == "for" && g.expanded && g.stmt.expr != nil {
+				for _, pos := range t.needed {
+					i := len(g.prefix)
+					if positionPrefix(g.prefix, pos) && i < len(pos) && pos[i].Site == g.stmt.tok.site {
+						index, _ := new(big.Int).SetString(pos[i].Index, 10)
+						if index.Cmp(big.NewInt(int64(len(g.source.l)))) >= 0 {
+							r.buildErr = diagnostic("E-AFTER-CYCLE", "After loop index does not exist")
+						}
+					}
+				}
+			}
+			if terminal(g.status) {
+				continue
+			}
+			future := !g.expanded || g.kind == "for" && !g.stopped && (g.stmt.expr == nil || !g.next.IsInt64() || g.next.Int64() < int64(len(g.source.l)))
+			if !future {
+				continue
+			}
+			if !r.bodyContainsAfter(g.stmt.body, t) && !r.bodyContainsAfter(g.stmt.otherwise, t) {
+				has := false
+				if g.stmt.other != nil {
+					has = r.bodyContainsAfter(&block{items: []*statement{g.stmt.other}}, t)
+				}
+				for _, a := range g.stmt.arms {
+					has = has || r.bodyContainsAfter(a.body, t)
+				}
+				if !has {
+					continue
+				}
+			}
+			relevant := t.static
+			if !t.static {
+				for _, pos := range t.needed {
+					if !positionPrefix(g.prefix, pos) {
+						continue
+					}
+					if g.kind == "for" {
+						i := len(g.prefix)
+						if i >= len(pos) || pos[i].Site != g.stmt.tok.site {
+							continue
+						}
+						if g.expanded && g.stmt.expr != nil {
+							index, _ := new(big.Int).SetString(pos[i].Index, 10)
+							if index.Cmp(big.NewInt(int64(len(g.source.l)))) >= 0 {
+								r.buildErr = diagnostic("E-AFTER-CYCLE", "After loop index does not exist")
+								continue
+							}
+							if index.Cmp(g.next) < 0 {
+								continue
+							}
+						}
+					}
+					relevant = true
+				}
+			}
+			if relevant {
+				t.future = append(t.future, g)
+				if !g.expanded {
+					add(dependency{node: g.entry})
+				} else {
+					add(dependency{region: g})
+				}
+			}
+		}
+		// Runtime source lengths distinguish an impossible local index from a gate
+		// that was normally closed. Range publication uses sync.Map.
+		if !t.static {
+			for _, need := range t.ranges {
+				for _, n := range r.nodes {
+					if comparePosition(n.pos, need.owner) != 0 {
+						continue
+					}
+					for i, pair := range need.path {
+						key := identityKey(need.path[:i].Wire()) + ":" + strconv.Itoa(pair.Site)
+						if count, ok := n.localRanges.Load(key); ok {
+							index, _ := new(big.Int).SetString(pair.Index, 10)
+							if index.Cmp(big.NewInt(int64(count.(int)))) >= 0 {
+								r.buildErr = diagnostic("E-AFTER-CYCLE", "After local loop index does not exist")
+							}
+						}
+					}
+				}
+			}
+		}
+		boundary.status, boundary.cause, boundary.causeErr = Completed, "", nil
+		for _, d := range boundary.children {
+			if !terminal(d.status()) {
+				boundary.status = Pending
+			}
+			if d.status() == Error || d.status() == Cancelled || d.status() == Skipped && d.cause() != "break" && d.cause() != "continue" && d.cause() != "unselected_gate" {
+				boundary.status = Skipped
+				boundary.cause = "dependency_failure"
+				if source := d.rootError(); source != nil && (boundary.causeErr == nil || compareErrors(source, boundary.causeErr) < 0) {
+					boundary.causeErr = source
+				}
+			}
+		}
+		if !matched && len(boundary.children) == 0 {
+			boundary.status, boundary.cause = Skipped, "unselected_gate"
+		}
+	}
+}
+func (v *evaluator) recordRange(site, count int) {
+	if v.node != nil {
+		v.node.localRanges.Store(identityKey(v.path.Wire())+":"+strconv.Itoa(site), count)
+	}
+}
+
+func (v *evaluator) acquirePermit(need map[string]uint64) (func(), error) {
+	request := &permitRequest{need: need, resume: make(chan flowResult, 1)}
+	v.run.events <- nodeEvent{node: v.node, permit: request}
+	result := <-request.resume
+	return result.release, result.err
 }

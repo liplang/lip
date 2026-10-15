@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"errors"
+	"fmt"
 	. "lipbeta/script"
 	"os/exec"
 	"sort"
@@ -92,6 +93,28 @@ flow Main()->void {
 	r, err := p.Run(context.Background(), nil, Options{After: []After{{Site: sites[0], DependsOn: sites[2]}}})
 	if err == nil || r.Error.Message != "earlier" || calls.Load() != 2 {
 		t.Fatal(err, calls.Load())
+	}
+	var body Position
+	for _, n := range r.Nodes {
+		if len(n.Position) == 2 {
+			body = n.Position.Copy()
+		}
+	}
+	if len(body) == 0 {
+		t.Fatal(r.Nodes)
+	}
+	body[0].Index = "1"
+	node := func(pos Position) Value { return ListValue(textValue("node"), pos.Wire()) }
+	for _, requires := range []Value{
+		ListValue(textValue("region"), textValue("loop"), Position{{Site: sites[2], Index: "0"}}.Wire()),
+		ListValue(textValue("site"), textValue("node"), textValue(fmt.Sprint(body[1].Site))),
+		node(body),
+	} {
+		calls.Store(0)
+		r, err := p.Run(context.Background(), nil, Options{MaxSteps: 10000, After: []After{{Target: node(Position{{Site: sites[0], Index: "0"}}), Requires: requires}}})
+		if err == nil || r.Error.Message != "earlier" || calls.Load() != 2 {
+			t.Fatal("wire lost future prerequisite", display(t, requires), err, calls.Load(), r.Nodes)
+		}
 	}
 }
 func TestBlockOpsAndParallelCarry(t *testing.T) {
@@ -591,5 +614,243 @@ func TestFunctionCapturesSnapshotNotMutableInput(t *testing.T) {
 	r, e := p.Run(context.Background(), map[string]Value{"data": original}, Options{})
 	if e != nil || num(r.Output) != 1 {
 		t.Fatal(e)
+	}
+}
+
+func TestAfterWireAndChildCompletion(t *testing.T) {
+	p, err := CompileWithOptions(`flow Child()->number{value=2;return value} flow Main()->list{first=Child();later=3;return [first,later]}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := p.Run(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := []Position{}
+	child := []Position{}
+	for _, n := range baseline.Nodes {
+		if len(n.Position) == 1 {
+			root = append(root, n.Position)
+		} else {
+			child = append(child, n.Position)
+		}
+	}
+	sort.Slice(root, func(i, j int) bool { return root[i][0].Site < root[j][0].Site })
+	sort.Slice(child, func(i, j int) bool { return child[i][2].Site < child[j][2].Site })
+	if len(root) != 3 || len(child) != 2 {
+		t.Fatal(baseline.Nodes)
+	}
+	node := func(pos Position) Value { tag, _ := StringValue("node"); return ListValue(tag, pos.Wire()) }
+	region := func(kind string, pos Position) Value {
+		tag, _ := StringValue("region")
+		k, _ := StringValue(kind)
+		return ListValue(tag, k, pos.Wire())
+	}
+	for _, parallel := range []int{1, 4} {
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel, After: []After{{Target: node(child[0]), Requires: node(root[1])}}})
+		if err != nil || display(t, report.Output) != "[2,3]" {
+			t.Fatal(report, err)
+		}
+	}
+	for _, requires := range []Value{node(root[0]), region("flow", nil)} {
+		report, err := p.Run(context.Background(), nil, Options{After: []After{{Target: node(child[0]), Requires: requires}}})
+		if err == nil || !strings.Contains(err.Error(), "E-AFTER-CYCLE") || len(report.Nodes) != 0 {
+			t.Fatal("ancestor wait accepted", report, err)
+		}
+	}
+	invalid := append(child[0].Copy(), Pair{Site: 999, Index: "0"})
+	if _, err := p.Run(context.Background(), nil, Options{After: []After{{Target: node(root[0]), Requires: node(invalid)}}}); err == nil {
+		t.Fatal("invalid dynamic prefix accepted")
+	}
+	callSite := child[0][1].Site
+	site, _ := DecodeData([]byte(fmt.Sprintf(`["site","call","%d"]`, callSite)))
+	if _, err := p.Run(context.Background(), nil, Options{After: []After{{Target: node(root[0]), Requires: site}}}); err == nil || !strings.Contains(err.Error(), "CYCLE") {
+		t.Fatal("call completion cycle accepted", err)
+	}
+}
+
+func TestAfterRejectsImpossibleLoopInstances(t *testing.T) {
+	for _, source := range []string{
+		`flow Child()->number{return 2} flow Main(xs:list)->void{for x in xs parallel{value=Child()};done=1}`,
+		`flow Child()->number{return 2} flow Main(xs:list)->void{values=[Child() for x in xs];done=1}`,
+	} {
+		p, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: "Main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseline, err := p.Run(context.Background(), map[string]Value{"xs": ListValue(number(1))}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var child, done Position
+		for _, n := range baseline.Nodes {
+			if len(n.Position) > len(child) {
+				child = n.Position.Copy()
+			}
+			if len(n.Position) == 1 && (len(done) == 0 || n.Position[0].Site > done[0].Site) {
+				done = n.Position.Copy()
+			}
+		}
+		if len(child) < 3 {
+			t.Fatal(baseline.Nodes)
+		}
+		node := func(pos Position) Value { return ListValue(textValue("node"), pos.Wire()) }
+		for _, count := range []int{0, 1} {
+			pos := child.Copy()
+			if count == 1 {
+				// The first graph/local-loop pair is an iteration index.
+				index := 0
+				if !strings.Contains(source, "parallel") {
+					index = 1
+				}
+				pos[index].Index = "1"
+			}
+			xs := ListValue()
+			if count == 1 {
+				xs = ListValue(number(1))
+			}
+			_, err := p.Run(context.Background(), map[string]Value{"xs": xs}, Options{Parallelism: 4, After: []After{{Target: node(done), Requires: node(pos)}}})
+			if err == nil || !strings.Contains(err.Error(), "E-AFTER-CYCLE") {
+				t.Fatal("impossible instance accepted", count, pos, err)
+			}
+		}
+	}
+}
+
+func TestAfterCallSiteWaitsForEveryLocalInstance(t *testing.T) {
+	var reads atomic.Int64
+	host := testHost(func(_ context.Context, request Request) Response {
+		n := num(request.Positional[0])
+		if n == 9 && reads.Load() != 2 {
+			return Rejected("order", "call site released before its final instance")
+		}
+		if n != 9 {
+			reads.Add(1)
+		}
+		return Result(number(n))
+	})
+	p, err := CompileWithOptions(`import python "example.worker" as worker
+flow Child(x:number)->number{return perform effect worker.read(x)}
+flow Main()->number{values=[Child(x) for x in [1,2]];done=perform effect worker.read(9);return done}`, host, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invocation int
+	sites := []int{}
+	for site := range p.Sites() {
+		sites = append(sites, site)
+	}
+	sort.Ints(sites)
+	for _, n := range baseline.Nodes {
+		if len(n.Position) == 4 {
+			invocation = n.Position[2].Site
+		}
+	}
+	for _, parallel := range []int{1, 4} {
+		reads.Store(0)
+		target := ListValue(textValue("node"), Position{{Site: sites[1], Index: "0"}}.Wire())
+		requires := ListValue(textValue("site"), textValue("call"), textValue(fmt.Sprint(invocation)))
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel, After: []After{{Target: target, Requires: requires}}})
+		if err != nil || num(report.Output) != 9 || reads.Load() != 2 {
+			t.Fatal(report, err, reads.Load())
+		}
+	}
+}
+
+func TestAfterEmptyFlowCompletion(t *testing.T) {
+	p, err := CompileWithOptions(`flow Empty()->void{} flow Main()->number{Empty();marker=fail("later");return marker}`, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites := []int{}
+	for site := range p.Sites() {
+		sites = append(sites, site)
+	}
+	sort.Ints(sites)
+	call := ListValue(textValue("site"), textValue("call"), textValue(fmt.Sprint(sites[0])))
+	flow := ListValue(textValue("region"), textValue("flow"), Position{{Site: sites[0], Index: "0"}, {Site: sites[0], Index: "0"}}.Wire())
+	marker := ListValue(textValue("node"), Position{{Site: sites[1], Index: "0"}}.Wire())
+	for _, target := range []Value{call, flow} {
+		for _, parallel := range []int{1, 4} {
+			report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel, After: []After{{Target: target, Requires: marker}}})
+			if err == nil || report.Error.Message != "later" {
+				t.Fatal(report, err)
+			}
+			for _, n := range report.Nodes {
+				if n.Position[0].Site == sites[0] && n.Status != Skipped {
+					t.Fatal("empty child ignored its completion dependency", n)
+				}
+			}
+		}
+		if _, err := p.Run(context.Background(), nil, Options{After: []After{{Target: target, Requires: target}}}); err == nil || !strings.Contains(err.Error(), "E-AFTER-CYCLE") {
+			t.Fatal("empty child accepted self dependency", err)
+		}
+	}
+	if _, err := p.Run(context.Background(), nil, Options{After: []After{{Target: call, Requires: flow}}}); err == nil || !strings.Contains(err.Error(), "CYCLE") {
+		t.Fatal("empty child accepted equivalent completion cycle", err)
+	}
+}
+
+func TestPermitWaitYieldsWorker(t *testing.T) {
+	release, entered := make(chan struct{}), make(chan struct{}, 1)
+	host := Host{Resources: NewResourcePool(map[string]uint64{"one": 1}), Contracts: []Contract{
+		{Operation: Operation{Language: "host", Path: "app", Member: "read"}, Version: "1", Params: []Parameter{{Name: "n", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "null"}, Effect: ReadOnlyEffect, Concurrent: true, Resources: map[string]uint64{"one": 1}, Invoke: func(ctx context.Context, r Request) Response {
+			if num(r.Positional[0]) == 1 {
+				entered <- struct{}{}
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return Uncertain("cancelled")
+				}
+			}
+			return Result(NullValue())
+		}},
+		{Operation: Operation{Language: "host", Path: "app", Member: "release"}, Version: "1", Result: Schema{Type: "null"}, Effect: ReadOnlyEffect, Concurrent: true, Invoke: func(ctx context.Context, r Request) Response {
+			select {
+			case <-entered:
+				close(release)
+				return Result(NullValue())
+			case <-ctx.Done():
+				return Uncertain("worker did not yield")
+			}
+		}},
+	}}
+	p, err := Compile("import host \"app\"\nflow Main()->void{perform effect app.read(1);perform effect app.read(2);perform effect app.release()}", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	report, err := p.Run(ctx, nil, Options{Parallelism: 2})
+	if err != nil || len(report.Journal.Records()) != 3 {
+		t.Fatal("permit waiter consumed a worker", report, err)
+	}
+}
+
+func TestSubFlowBarrierCompletion(t *testing.T) {
+	var sequence []float64
+	var mu sync.Mutex
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "write"}, Version: "1", Params: []Parameter{{Name: "n", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "null"}, Effect: WriteEffect, Invoke: func(_ context.Context, r Request) Response {
+		mu.Lock()
+		sequence = append(sequence, num(r.Positional[0]))
+		mu.Unlock()
+		return Result(NullValue())
+	}}}}
+	p, err := CompileWithOptions(`import host "app"
+flow Write(n:number)->number{perform effect app.write(n);return n}
+flow Main()->number{perform effect app.write(0);value={perform effect app.write(1);Write(2)};perform effect app.write(3);return value}`, host, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, parallel := range []int{1, 4} {
+		sequence = nil
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil || fmt.Sprint(sequence) != "[0 1 2 3]" || num(report.Output) != 2 {
+			t.Fatal(sequence, report, err)
+		}
 	}
 }

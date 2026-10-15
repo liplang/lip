@@ -16,11 +16,11 @@ build: prepare
 	go build -o lipc ./cmd/lipc
 compile: build
 	@test -n "$(SOURCE)" -a -n "$(OUTPUT)" || (echo "set SOURCE and OUTPUT"; exit 1)
-	./lipc build $(if $(HOST),-host $(HOST),) -o "$(OUTPUT)" "$(SOURCE)"
+	./lipc build $(if $(HOST),-host "$(HOST)",) $(if $(ENTRY),-entry "$(ENTRY)",) $(if $(PROJECT),-project "$(PROJECT)",) -o "$(OUTPUT)" "$(SOURCE)"
 vet: prepare
 	go vet ./...
 examples: prepare
-	go test ./tests -run TestExamples -v
+	go test ./tests -run '^Test(Examples|WebExamplesInterpreterAndGo)$$' -v
 clean:
 	rm -rf .build lip lipc
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

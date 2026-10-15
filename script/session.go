@@ -17,6 +17,7 @@ type Session struct {
 	host     Host
 	baseHost Host
 	values   map[string]Value
+	declared map[string]bool
 	imports  []importDecl
 }
 
@@ -33,7 +34,7 @@ func NewSession(host Host) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{host: program.host, baseHost: program.host, values: map[string]Value{}}, nil
+	return &Session{host: program.host, baseHost: program.host, values: map[string]Value{}, declared: map[string]bool{}}, nil
 }
 
 // NewInteractiveSession enables the persistent, package-independent library bridge.
@@ -61,7 +62,7 @@ func (s *Session) Complete(prefix string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names := map[string]bool{}
-	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import as true false null any bool number string list object function void claim claim.snapshot") {
+	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import export as lip go python host true false null any bool number string list object function void claim claim.snapshot") {
 		names[name] = true
 	}
 	for name := range builtinArity {
@@ -119,6 +120,7 @@ func (s *Session) Reset() {
 	defer s.mu.Unlock()
 	s.host.Close()
 	s.values = map[string]Value{}
+	s.declared = map[string]bool{}
 	s.imports = nil
 	s.host = s.baseHost
 }
@@ -136,6 +138,11 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	if err != nil {
 		return CellResult{}, err
 	}
+	for _, im := range syntax.imports {
+		if im.language == "lip" {
+			return CellResult{}, at(diagnostic("E-MODULE", "static LIP imports require a complete file; use :run"), im.tok)
+		}
+	}
 	newImports := syntax.imports
 	syntax.imports = append(append([]importDecl(nil), s.imports...), newImports...)
 	imports := append([]importDecl(nil), syntax.imports...)
@@ -149,7 +156,7 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	}
 	initial := map[string]bindingInfo{}
 	for name, value := range s.values {
-		info := bindingInfo{info: pureInfo(value.k.String())}
+		info := bindingInfo{info: pureInfo(value.k.String()), static: s.declared[name]}
 		if value.k == Function {
 			info.builtin = value.f.builtin
 			if info.builtin == "" {
@@ -168,13 +175,16 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	if len(check.stores) != 0 {
 		return CellResult{}, diagnostic("E-SESSION", "Claim needs a complete Flow; use :run file.lip")
 	}
-	program := &Program{syntax, check, host}
+	program := &Program{syntax: syntax, check: check, host: host}
 	saved := copyValues(s.values)
 	report, err := program.run(ctx, nil, opts, saved)
 	if err != nil {
 		return CellResult{Report: report}, err
 	}
 	s.values, s.imports, s.host = saved, imports, host
+	for name := range syntax.functions {
+		s.declared[name] = true
+	}
 	hasValue := false
 	if n := len(syntax.body.items); n > 0 {
 		last := syntax.body.items[n-1]
@@ -183,7 +193,11 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (CellRe
 	return CellResult{Value: report.Output, HasValue: hasValue, Report: report, Help: help}, nil
 }
 
-const sessionHelp = `LIP 交互帮助
+const sessionHelp = `LIP 1.0 交互帮助
+输入表达式、不可变绑定和纯 fn；具名 fn 与核心纯函数可用作 |> 管道阶段。
+Flow 组织依赖，Claim 汇聚带来源的事实；完整读取等待所有贡献，外部动作通过 effect/perform。
+Flow、静态 Data 声明和 import lip 使用 :run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output] [-project DIR] file.lip；文件执行与生成 Go 使用同一核心。
+含空格的路径或 JSON 用单/双引号分组；:run 不执行 shell，也不读取或改变会话绑定。
 help(value) 查看值、纯函数、核心函数或请求的说明。
 help(module) / help(module.member) 查看 Go 导出签名或 Python 库文档。
 CLI 默认使用通用 Go/Python 桥接；包需由当前 Go module 或 Python 环境提供。
@@ -192,7 +206,7 @@ import python "math"; math.sqrt(3) 调用 Python 库。
 import go "strings"; strings.ToUpper("hello") 调用 Go 包导出的函数。
 native_data(value) 取得普通数据快照；native_release(value) 释放原生对象引用。
 直接外部调用经 Host 执行；effect 构造请求，perform 执行请求。
-:vars 查看保存的值；:reset 清空会话；:quit 退出。`
+:vars 查看保存的值；:history 查看输入；:reset 清空会话；:cancel 丢弃未完成输入；:quit 退出。`
 
 var sessionBuiltinHelp = map[string]string{
 	"len":          "len(value) -> number\n返回字符串的 Unicode 字符数、列表元素数或对象字段数。",
@@ -513,12 +527,12 @@ func sessionHelpFunction(t token, param string) *expression {
 }
 
 // CellIncomplete asks the real parser after checking delimiter balance. It
-// distinguishes an unfinished cell from a malformed one; strings cannot span
-// physical lines. A trailing backslash explicitly continues an expression.
+// distinguishes an unfinished cell from a malformed one. Triple-quoted strings
+// can span physical lines; ordinary strings still cannot.
 func CellIncomplete(source string) bool {
 	ts, err := lex(source)
 	if err != nil {
-		return false
+		return openMultilineString(err)
 	}
 	stack := []string{}
 	for _, t := range ts {
@@ -538,6 +552,18 @@ func CellIncomplete(source string) bool {
 	_, err = parseCell(strings.TrimRight(source, "\r\n"))
 	d, ok := err.(*Diagnostic)
 	return ok && d.Code == "E-PARSE" && d.Site == -1
+}
+
+func openMultilineString(err error) bool {
+	d, ok := err.(*Diagnostic)
+	return ok && d.Code == "E-LEX" && d.Message == "unterminated multiline string"
+}
+
+// CellInMultilineString reports an unfinished, otherwise lexically valid string.
+// Interactive commands on its subsequent lines are string content.
+func CellInMultilineString(source string) bool {
+	_, err := lex(source)
+	return openMultilineString(err)
 }
 
 // Cells extend the tooling grammar with bare expressions; function bodies,
@@ -569,8 +595,9 @@ func parseCell(source string) (*syntax, error) {
 	}
 	for p.peek().kind != "eof" && p.err == nil {
 		t := p.peek()
-		if t.kind == "flow" || t.kind == "return" {
-			return nil, at(diagnostic("E-SESSION", "enter expressions/bindings/functions; use :run for a complete Flow"), t)
+		staticData := t.kind == "id" && p.i+1 < len(ts) && ts[p.i+1].kind == ":"
+		if t.kind == "flow" || t.kind == "return" || t.kind == "export" || staticData {
+			return nil, at(diagnostic("E-SESSION", "enter expressions/bindings/functions; use :run for Flow, static Data, or export declarations"), t)
 		}
 		var stmt *statement
 		binding := t.kind == "id" && p.i+1 < len(ts) && (ts[p.i+1].kind == "=" || ts[p.i+1].kind == "<+")

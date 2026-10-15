@@ -16,6 +16,7 @@ import (
 
 type exampleCase struct {
 	path, input, want string
+	entry             string
 	demo, snapshot    bool
 }
 
@@ -25,6 +26,7 @@ var examples = []exampleCase{
 	{path: "basics/03_arithmetic.lip", want: `{"division":3.5,"grouped":20,"inverse_power":0.125,"logarithm":3,"logic":true,"negative_base":9,"negative_power":-9,"power":8,"power_chain":512,"quotient":-2,"remainder":1,"sum":14}`},
 	{path: "basics/04_containers.lip", want: `{"fields":["name","role"],"first":"Ada","has_age":false,"names":["Ada","Lin","Sam"],"original_role":"reader","updated":{"name":"Ada","role":"writer"}}`},
 	{path: "basics/05_strings_numbers.lip", want: `{"display":"score=0.8","length":3,"lexical_order":true,"middle":"𐀀","score":0.8,"words":["red","","blue"]}`},
+	{path: "basics/22_multiline_strings.lip", want: `{"html":"\u000a<main>\u000a  <h1 title=\"欢迎\">你好，LIP!</h1>\u000a</main>\u000a","prompt":"Read \"carefully\".\u000a# This is text, not a comment.\u000a","quotes":"Embedded triple quotes: \"\"\""}`},
 	{path: "structures/06_conditions.lip", want: `{"grade":"ready","safe":false}`},
 	{path: "structures/07_match.lip", want: `["empty","nonnegative","other","note","other"]`},
 	{path: "structures/08_functions_closures.lip", want: `{"mapped":[11,12,13],"product":20}`},
@@ -41,6 +43,7 @@ var examples = []exampleCase{
 	{path: "ecosystem/19_parallel_read_write.lip", demo: true, want: `["ADA","LIN","SAM"]`},
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
+	{path: "advanced/26_flows.lip", entry: "Main", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
 	{path: "refine.lip", want: `{"rounds":4,"score":0.8}`},
 	{path: "evidence.lip", want: `{"missing":["b","c"]}`},
 }
@@ -70,7 +73,7 @@ func TestExamples(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			program, err := Compile(string(source), host)
+			program, err := CompileWithOptions(string(source), host, CompileOptions{Entry: example.entry})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,6 +159,104 @@ func runNative(t *testing.T, executable string, args ...string) (string, string,
 	command.Stderr = &stderr
 	err := command.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func TestGoBackendDeclarationsAndEntryProtocol(t *testing.T) {
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "touch"}, Version: "1", Result: Schema{Type: "null"}, Effect: WriteEffect,
+		Invoke: func(context.Context, Request) Response { return Result(NullValue()) },
+	}}}
+	source := `import host "app"
+flow First(CONFIG:number,y:string)->object {perform effect app.touch();return {local:CONFIG,y:y,static:read_config()}}
+fn read_config()->object {CONFIG}
+flow Other()->null {return null}
+CONFIG:object={values:[-0,+2,null,true]}`
+	program, err := CompileWithOptions(source, host, CompileOptions{Entry: "First"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := GoOptions{HostSource: `package main
+import("context";"fmt";"os")
+func generatedHost()(Host,error){return Host{Contracts:[]Contract{{Operation:Operation{Language:"host",Path:"app",Member:"touch"},Version:"1",Result:Schema{Type:"null"},Effect:WriteEffect,Invoke:func(context.Context,Request)Response{fmt.Fprintln(os.Stderr,"provider called");return Result(NullValue())}}}},nil}
+`}
+	executable, _ := buildNative(t, program, options)
+	valid := `{"positional":[7],"named":{"y":"a"}}`
+	value, err := DecodeEntryInput([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := program.RunEntry(context.Background(), value, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runNative(t, executable, "-entry-input", valid, "-entry-output")
+	if err != nil || strings.TrimSpace(stdout) != display(t, *report.EntryOutput) || stderr != "provider called\n" {
+		t.Fatal(stdout, stderr, err)
+	}
+	for _, input := range []string{
+		`{"positional":[7],"named":{}}`,
+		`{"positional":[7],"named":{"CONFIG":8,"y":"a"}}`,
+		`{"positional":[7],"named":{"y":"a","y":"b"}}`,
+		`{"positional":[7],"named":{"y":1}}`,
+		`{"positional":[7],"named":{"y":"a"},"extra":1}`,
+	} {
+		stdout, stderr, err := runNative(t, executable, "-entry-input", input, "-entry-output")
+		if err == nil || stdout != "" || !strings.Contains(stderr, "E-SCHEMA") || strings.Contains(stderr, "provider called") {
+			t.Fatalf("%s: stdout=%q stderr=%q err=%v", input, stdout, stderr, err)
+		}
+	}
+	if stdout, stderr, err := runNative(t, executable, "-input", "{}", "-entry-input", valid); err == nil || stdout != "" || strings.Contains(stderr, "provider called") {
+		t.Fatal("ambiguous input format executed", stdout, stderr, err)
+	}
+	for _, input := range []string{`{"CONFIG":7,"y":"a","y":"b"}`, `{"CONFIG":7,"y":"\ud800"}`, `{"CONFIG":7,"y":`, `[]`, `{},"positional":[]`} {
+		stdout, stderr, err := runNative(t, executable, "-input", input)
+		if err == nil || stdout != "" || !strings.Contains(stderr, "E-SCHEMA") || strings.Contains(stderr, "provider called") {
+			t.Fatalf("named input %s: stdout=%q stderr=%q err=%v", input, stdout, stderr, err)
+		}
+	}
+	for _, test := range []struct{ source, want string }{
+		{`flow Main()->null {return null}`, `{"kind":"value","value":null}`},
+		{"", `{"kind":"void"}`},
+	} {
+		program, err := Compile(test.source, Host{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable, _ := buildNative(t, program, GoOptions{})
+		stdout, stderr, err := runNative(t, executable, "-entry-output")
+		if err != nil || strings.TrimSpace(stdout) != test.want || stderr != "" {
+			t.Fatal(stdout, stderr, err)
+		}
+	}
+}
+
+func TestWebExamplesInterpreterAndGo(t *testing.T) {
+	input := `{"request":{"params":{"name":"Ada"},"query":{"tag":["one","two"]},"json":{"value":3}}}`
+	value, err := DecodeData([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, _ := value.Fields()
+	for _, name := range []string{"23_home", "24_echo", "25_greeting"} {
+		t.Run(name, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("..", "examples", "web", name+".lip"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := Compile(string(source), Host{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := p.Run(context.Background(), fields, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable, _ := buildNative(t, p, GoOptions{})
+			stdout, stderr, err := runNative(t, executable, "-input", input)
+			if err != nil || strings.TrimSpace(stdout) != display(t, report.Output) {
+				t.Fatal(stdout, stderr, err)
+			}
+		})
+	}
 }
 
 func TestGoBackendNumericErrorsAndBudget(t *testing.T) {
@@ -264,7 +365,10 @@ func TestDynamicFlowOutputErrorBelongsToReturnNode(t *testing.T) {
 // valid LIP source program cannot generate twice. Compile a tiny standalone
 // runtime and test the delivery boundary there, keeping all tests under tests/.
 func TestNativeClaimConflictFixture(t *testing.T) {
-	p, err := Compile(`flow Main()->void{}`, Host{})
+	p, err := CompileWithOptions(`BASE:object={value:2}
+flow Child()->number{value=BASE.value;return value}
+flow Items()->list{return [1,2]}
+flow Main()->number{first=Child();later=3;for x in Items(){unused=x};return first+later}`, Host{}, CompileOptions{Entry: "Main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,5 +413,133 @@ flow Main()->string{return perform effect text.ToUpper("hello")}`, host)
 	stdout, stderr, err := runNative(t, executable)
 	if err == nil || stdout != "" || !strings.Contains(stderr, "compiled operation contract changed") {
 		t.Fatalf("contract drift: %v %s %s", err, stdout, stderr)
+	}
+}
+
+func TestGoBackendStructuredFlows(t *testing.T) {
+	source := `fn plus(x:number,delta:number)->number{x+delta}
+fn down(n:number)->number{if n==0 {0} else {n-1 |>down}}
+flow Read(x:number)->number {facts=claim();for n in [x,x+1] parallel {facts <+ n};return len(facts)+x}
+flow Source()->list{return [1,2]}
+flow Main()->object {
+ values=[x |>Read |>plus(delta=3) for x in Source()]
+ nested={a=Read(4);Read(a)}
+ return {values:values,nested:nested,tail:100000 |>down}
+}`
+	p, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, parallel := range []string{"1", "4"} {
+		stdout, stderr, err := runNative(t, executable, "-parallel", parallel)
+		if err != nil || strings.TrimSpace(stdout) != display(t, report.Output) {
+			t.Fatal(stdout, stderr, err)
+		}
+	}
+}
+
+func TestGoBackendStaticModules(t *testing.T) {
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "local", Text: `import lip "./lib.lip" as lib
+flow Main()->object{return {value:3 |>lib.Adjust,closure:lib.make(2)(3)}}`},
+		"lib.lip": {Version: "1", Text: `BASE:number=7
+export fn make(x:number)->function{fn(y:number)->number{x+y+BASE}}
+export flow Adjust(x:number)->number{return x+BASE}`},
+	}}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || strings.TrimSpace(stdout) != display(t, report.Output) {
+		t.Fatal(stdout, stderr, err)
+	}
+}
+
+// One frozen diamond dependency exercises the same dynamic contexts on both
+// execution paths; modes include gated calls and runtime Data boundary faults.
+func TestCoreCompositionConformance(t *testing.T) {
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "local", Text: `import lip "./left.lip" as left
+import lip "./right.lip" as right
+BASE:number=100
+fn decorate(x:number,delta:number)->number{x+delta}
+flow Main(mode:string)->any {
+ facts=claim()
+ values=for x in [1,2] with total=[] {value=x |>left.Work |>decorate(delta=1);next concat(total,[value])}
+ for x in right.Items() parallel {value=left.Work(x);facts <+ value}
+ if mode=="void" {0 |>left.Empty}
+ return match mode {
+  "ok" => {values:values,facts:[row.value for row in facts],closure:right.make(3)(4),own:BASE,checked:decorate(left.Work(1),0),shadow:{Work=fn(x:number)->number{x+10};Work(1)}},
+  "empty" => [x |>left.Work for x in []],
+  "skip" => if false {left.Fail()} else {null},
+  "void" => null,
+  "input" => left.Accept({f:fn()->number{1}}),
+  "output" => left.BadReturn(),
+  "stage_input" => 1 |>right.take(config={f:fn()->number{1}}),
+  _ => left.Fail()
+ }
+}`},
+		"left.lip": {Version: "1", Text: `import lip "./shared.lip" as base
+export flow Work(x:number)->number {facts=claim();facts <+ base.echo(x);return (x |>base.scale)+len(facts)}
+export flow Empty(x:number)->void{}
+export flow Accept(x:object)->object{return x}
+export flow BadReturn()->object{return {f:fn()->number{1}}}
+export flow Fail()->number{return fail("module child")}`},
+		"right.lip": {Version: "1", Text: `import lip "./shared.lip" as base
+export flow Items()->list{return [1,2]}
+export fn make(x:number)->function{fn(y:number)->number{base.scale(x+y)}}
+export fn take(x:number,config:object)->number{fail("body must not run")}`},
+		"shared.lip": {Version: "1", Text: `export BASE:number=2
+export fn echo(facts:number)->number{facts}
+fn double(x:number)->number{x*BASE}
+export fn scale(x:number)->number{x |>double}`},
+	}}
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, test := range []struct{ mode, want, code string }{
+		{"ok", `{"checked":3,"closure":14,"facts":[3,5],"own":100,"shadow":11,"values":[4,6]}`, ""},
+		{"empty", "[]", ""}, {"skip", "null", ""}, {"void", "null", ""},
+		{"input", "", "E-SCHEMA"}, {"output", "", "E-SCHEMA"}, {"stage_input", "", "E-SCHEMA"}, {"error", "", "E-FAIL"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			input := `{"mode":"` + test.mode + `"}`
+			value, _ := DecodeData([]byte(input))
+			fields, _ := value.Fields()
+			for _, parallel := range []int{1, 2, 4} {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				report, runErr := p.Run(ctx, fields, Options{Parallelism: parallel, RunID: "composition"})
+				cancel()
+				stdout, stderr, nativeErr := runNative(t, executable, "-input", input, "-parallel", fmt.Sprint(parallel))
+				if test.code == "" {
+					if runErr != nil || nativeErr != nil || display(t, report.Output) != test.want || strings.TrimSpace(stdout) != test.want {
+						t.Fatal(report, runErr, stdout, stderr, nativeErr)
+					}
+					seen := map[string]bool{}
+					for _, n := range report.Nodes {
+						key := display(t, n.Position.Wire())
+						if seen[key] {
+							t.Fatal("position collision", key)
+						}
+						seen[key] = true
+					}
+				} else if runErr == nil || report.Error == nil || report.Error.Code != test.code || nativeErr == nil || stdout != "" || !strings.Contains(stderr, runErr.Error()) {
+					t.Fatal("interpreter/generated boundary mismatch", report, runErr, stdout, stderr, nativeErr)
+				}
+			}
+		})
 	}
 }

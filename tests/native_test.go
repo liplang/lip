@@ -452,11 +452,12 @@ func TestNativeLibrariesInterpreterAndGeneratedProgram(t *testing.T) {
 	program, err := Compile(`import go "strings"
 import go "bytes"
 import python "collections" as py
+fn identity(value:any)->any{value}
 flow Main()->object {
     upper=perform effect strings.ToUpper("hello")
-    buffer=perform effect bytes.NewBufferString(upper)
+    buffer=perform effect bytes.NewBufferString(upper) |> identity |> identity
     size=perform effect buffer.WriteString("!")
-    counts=perform effect py.Counter(["a","b","a"])
+    counts=perform effect py.Counter(["a","b","a"]) |> identity
     return {text:buffer.String(), count:counts["a"], written:size}
 }`, host)
 	if err != nil {
@@ -474,5 +475,121 @@ flow Main()->object {
 	stdout, stderr, err := runNative(t, executable)
 	if err != nil || strings.TrimSpace(stdout) != want {
 		t.Fatalf("generated: %q %q %v", stdout, stderr, err)
+	}
+}
+
+func TestNativeModuleHelpers(t *testing.T) {
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "local", Text: `import lip "./lib.lip" as lib
+fn native_data(x:any)->any{fail("importer must not run")}
+flow Main()->object{return lib.Read()}`},
+		"lib.lip": {Version: "1", Text: `export flow Read()->object{value=native_data({x:1});if false {native_release(value)};return value}`},
+	}}
+	if _, err := CompileSourceSet(set, Host{}, CompileOptions{}); err == nil || !strings.Contains(err.Error(), "E-NAME") {
+		t.Fatal("disabled Host prelude captured importer function", err)
+	}
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	p, err := CompileSourceSet(set, host, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
+	if err != nil || display(t, report.Output) != `{"x":1}` {
+		t.Fatal(report, err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || strings.TrimSpace(stdout) != `{"x":1}` {
+		t.Fatal(stdout, stderr, err)
+	}
+}
+
+func TestNativeHelperLexicalScope(t *testing.T) {
+	var calls atomic.Int64
+	host := NewNativeHost(Host{Authorize: func(context.Context, Request) error {
+		calls.Add(1)
+		return nil
+	}})
+	defer host.Close()
+	source := `fn native_data(x:number)->number{x+10}
+fn native_release(x:number)->number{x+20}
+fn apply(native_data:function,x:number)->number{native_data(x)}
+flow WithParameter(native_release:number)->number{return native_release}
+flow Main()->list{
+    local=if true {native_release=fn(x:number)->number{x+30};native_release(2)}else{0}
+    applied=apply(fn(x:number)->number{x*2},3)
+    carried=for native_data in [fn(x:number)->number{x+40}] with state=0 {
+        next state+native_data(4)
+    }
+    facts=claim()
+    for native_release in [fn(x:number)->number{x+50}] {facts <+ native_release(5)}
+    return [native_data(1),native_release(1),local,applied,carried,[row.value for row in facts],2 |> native_data]
+}`
+	p, err := CompileWithOptions(source, host, CompileOptions{Entry: "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[11,21,32,6,44,[55],12]`
+	report, err := p.Run(context.Background(), nil, Options{Parallelism: 4})
+	if err != nil || display(t, report.Output) != want {
+		t.Fatal(report, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("pure lexical calls reached Host", calls.Load())
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || strings.TrimSpace(stdout) != want {
+		t.Fatal(stdout, stderr, err)
+	}
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cell := range []struct{ source, want string }{
+		{`fn native_data(x:number)->number{x+7}`, ""},
+		{`native_release=fn(x:number)->number{x+9}`, ""},
+		{`[native_data(1),native_release(2)]`, `[8,11]`},
+		{`(fn(native_data:function)->number{native_data(3)})(fn(x:number)->number{x*4})`, `12`},
+	} {
+		nativeCell(t, s, cell.source, cell.want)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("saved lexical calls reached Host", calls.Load())
+	}
+	if _, err := Compile(`flow Main()->number{native_data=claim();return native_data(2)}`, host); err == nil || !strings.Contains(err.Error(), "E-TYPE") {
+		t.Fatal("bridge helper bypassed a Claim binding", err)
+	}
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "1", Text: `import lip "./lib.lip" as native_data;flow Main()->number{return native_data(2)}`},
+		"lib.lip":  {Version: "1", Text: `export value:number=3`},
+	}}
+	if _, err := CompileSourceSet(set, host, CompileOptions{}); err == nil || !strings.Contains(err.Error(), "E-TYPE") {
+		t.Fatal("bridge helper bypassed a module alias", err)
+	}
+}
+
+func TestNativePipelineStagesRemainStatic(t *testing.T) {
+	var calls atomic.Int64
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/text", map[string]any{
+		"Upper": func(s string) string { calls.Add(1); return strings.ToUpper(s) },
+	})
+	for _, body := range []string{
+		`return "hello" |> text.Upper`,
+		`callable=text.Upper;return "hello" |> callable`,
+	} {
+		_, err := Compile(`import go "application/text" as text;flow Main()->string{`+body+`}`, host)
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-TYPE" {
+			t.Fatalf("%s: %v", body, err)
+		}
+	}
+	if _, err := Compile(`flow Main()->object{return {x:1} |> native_data}`, host); err == nil || !strings.Contains(err.Error(), "E-NAME") {
+		t.Fatal("bridge helper accepted as a static stage", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("stage validation executed a native callable")
 	}
 }

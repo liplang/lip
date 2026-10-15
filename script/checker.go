@@ -11,6 +11,7 @@ type bindingInfo struct {
 	info    analysis
 	fn      *expression
 	builtin string
+	static  bool
 }
 type scope struct {
 	parent   *scope
@@ -37,6 +38,7 @@ type checker struct {
 	err       error
 	top       int
 	local     int
+	voidOK    *expression
 }
 
 func pureInfo(typ string) analysis {
@@ -47,6 +49,7 @@ func mergeEffect(a, b analysis) analysis {
 		a.effect = b.effect
 	}
 	a.concurrent = a.concurrent && b.concurrent
+	a.hasFlow = a.hasFlow || b.hasFlow
 	return a
 }
 func unify(a, b string) string {
@@ -72,7 +75,7 @@ func (c *checker) error(t token, code, msg string) {
 }
 func reserved(name string) bool {
 	_, b := builtinArity[name]
-	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform true false null void ", " "+name+" ")
+	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null void ", " "+name+" ")
 }
 func (c *checker) declare(s *scope, name string, info bindingInfo, t token) {
 	if reserved(name) {
@@ -95,7 +98,36 @@ func (c *checker) require(t token, a analysis, typ string) {
 	}
 }
 func analyze(s *syntax, host Host) (*checker, error) {
-	return analyzeBindings(s, host, nil)
+	if len(s.flows) == 0 {
+		return analyzeBindings(s, host, nil)
+	}
+	for _, name := range sortedFlowNames(s.flows) {
+		if _, err := checkFlow(s, host, name); err != nil {
+			return nil, err
+		}
+	}
+	return s.flows[s.flowName].check, nil
+}
+func checkFlow(s *syntax, host Host, name string) (*checker, error) {
+	f := s.flows[name]
+	if f.checking {
+		return nil, at(diagnostic("E-FLOW-CYCLE", "recursive Flow call "+name), f.tok)
+	}
+	if f.check != nil {
+		return f.check, nil
+	}
+	f.checking = true
+	defer func() { f.checking = false }()
+	view := *s
+	view.flowName, view.result, view.params, view.body = f.name, f.result, f.params, f.body
+	c, err := analyzeBindings(&view, host, nil)
+	if err != nil {
+		return nil, err
+	}
+	summary := pureInfo(f.result)
+	walkBlockExpressions(f.body, func(e *expression) { summary = mergeEffect(summary, e.info) })
+	f.summary, f.check = summary, c
+	return c, nil
 }
 
 // Saved interactive values enter the same checker as ordinary source values.
@@ -121,6 +153,48 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 		}
 		c.aliases[d.alias] = d
 	}
+	env := &scope{bindings: map[string]bindingInfo{}}
+	for name := range builtinArity {
+		env.bindings[name] = bindingInfo{info: pureInfo("function"), builtin: name, static: true}
+	}
+	dataNames := make([]string, 0, len(s.data))
+	for name := range s.data {
+		dataNames = append(dataNames, name)
+	}
+	sort.Slice(dataNames, func(i, j int) bool { return s.data[dataNames[i]].tok.site < s.data[dataNames[j]].tok.site })
+	for _, name := range dataNames {
+		d := s.data[name]
+		if err := checkType(d.value, d.typ); err != nil {
+			c.error(d.tok, "E-TYPE", "static data "+name+": "+err.Error())
+		}
+		c.declare(env, name, bindingInfo{info: pureInfo(d.typ)}, d.tok)
+	}
+	for _, name := range sortedFlowNames(s.flows) {
+		f := s.flows[name]
+		if reserved(name) {
+			c.error(f.tok, "E-RESERVED", "reserved Flow name "+name)
+		}
+		if _, conflict := c.aliases[name]; conflict {
+			c.error(f.tok, "E-RESERVED", "Flow/import name conflict")
+		}
+	}
+	functions := make([]string, 0, len(s.functions))
+	for name := range s.functions {
+		functions = append(functions, name)
+	}
+	sort.Slice(functions, func(i, j int) bool { return s.functions[functions[i]].tok.site < s.functions[functions[j]].tok.site })
+	for _, name := range functions {
+		f := s.functions[name]
+		c.declare(env, name, bindingInfo{info: pureInfo("function"), fn: f, static: true}, f.tok)
+	}
+	for name, info := range initial {
+		c.declare(env, name, info, token{site: -1})
+	}
+	for _, name := range functions {
+		f := s.functions[name]
+		c.function(f, env)
+	}
+	// Module-level functions capture declarations, never a caller Flow's stores.
 	for i, stmt := range s.body.items {
 		if stmt.tag == "claim" {
 			if reserved(stmt.name) {
@@ -135,26 +209,6 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 			c.stores[stmt.name] = stmt
 		}
 		c.collectWriters(stmt, i)
-	}
-	env := &scope{bindings: map[string]bindingInfo{}}
-	for name := range builtinArity {
-		env.bindings[name] = bindingInfo{info: pureInfo("function"), builtin: name}
-	}
-	functions := make([]string, 0, len(s.functions))
-	for name := range s.functions {
-		functions = append(functions, name)
-	}
-	sort.Slice(functions, func(i, j int) bool { return s.functions[functions[i]].tok.site < s.functions[functions[j]].tok.site })
-	for _, name := range functions {
-		f := s.functions[name]
-		c.declare(env, name, bindingInfo{info: pureInfo("function"), fn: f}, f.tok)
-	}
-	for name, info := range initial {
-		c.declare(env, name, info, token{site: -1})
-	}
-	for _, name := range functions {
-		f := s.functions[name]
-		c.function(f, env)
 	}
 	flow := env.child()
 	for name, info := range initial {
@@ -260,7 +314,12 @@ func (c *checker) localBlock(b *block, env *scope, pure, parallel bool, loops in
 func (c *checker) statement(s *statement, env *scope, pure, parallel bool, loops int, top bool) analysis {
 	a := pureInfo("any")
 	if s.expr != nil {
+		saved := c.voidOK
+		if s.tag == "eval" {
+			c.voidOK = s.expr
+		}
 		a = c.expression(s.expr, env, pure, parallel)
+		c.voidOK = saved
 	}
 	switch s.tag {
 	case "claim":
@@ -288,7 +347,7 @@ func (c *checker) statement(s *statement, env *scope, pure, parallel bool, loops
 		if _, ok := c.stores[s.name]; !ok {
 			c.error(s.tok, "E-NAME", "join target is not a store")
 		}
-		if a.effect != PureEffect {
+		if a.effect != PureEffect || a.hasFlow {
 			c.error(s.tok, "E-PURITY", "join RHS must be pure")
 		}
 	case "return":
@@ -314,7 +373,7 @@ func (c *checker) statement(s *statement, env *scope, pure, parallel bool, loops
 			if arm.guard != nil {
 				g := c.expression(arm.guard, env, pure, parallel)
 				c.require(arm.guard.tok, g, "bool")
-				if g.effect != PureEffect {
+				if g.effect != PureEffect || g.hasFlow {
 					c.error(arm.guard.tok, "E-PURITY", "guard must be pure")
 				}
 			}
@@ -352,7 +411,7 @@ func (c *checker) patterns(a arm) {
 func (c *checker) carryExit(s *statement, env *scope, pure, parallel bool, loops int) analysis {
 	a := c.expression(s.expr, env, pure, parallel)
 	if s.tag == "next" || s.tag == "break" {
-		if a.effect != PureEffect {
+		if a.effect != PureEffect || a.hasFlow {
 			c.error(s.tok, "E-PURITY", "carry exit must be pure")
 		}
 		return a
@@ -373,7 +432,7 @@ func (c *checker) carryExit(s *statement, env *scope, pure, parallel bool, loops
 			if arm.guard != nil {
 				g := c.expression(arm.guard, env, pure, parallel)
 				c.require(arm.guard.tok, g, "bool")
-				if g.effect != PureEffect {
+				if g.effect != PureEffect || g.hasFlow {
 					c.error(arm.guard.tok, "E-PURITY", "guard must be pure")
 				}
 			}
@@ -426,7 +485,9 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			a.typ = "list"
 		} else if x, ok := env.find(e.name); ok {
 			a = x.info
-			a.effect, a.concurrent = PureEffect, true
+			a.effect, a.concurrent, a.hasFlow = PureEffect, true, false
+		} else if _, ok := c.syntax.flows[e.name]; ok {
+			c.error(e.tok, "E-TYPE", "Flow declarations are not values")
 		} else {
 			c.error(e.tok, "E-NAME", "unbound name "+e.name)
 		}
@@ -529,7 +590,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			if arm.guard != nil {
 				g := sub(arm.guard)
 				c.require(arm.guard.tok, g, "bool")
-				if g.effect != PureEffect {
+				if g.effect != PureEffect || g.hasFlow {
 					c.error(arm.guard.tok, "E-PURITY", "guard must be pure")
 				}
 			}
@@ -553,7 +614,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		}
 		for _, arg := range e.args {
 			x := sub(arg.expr)
-			if x.effect != PureEffect {
+			if x.effect != PureEffect || x.hasFlow {
 				c.error(e.tok, "E-PURITY", "proposal arguments must be pure")
 			}
 			if x.typ == "function" || x.typ == "effect" {
@@ -580,7 +641,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 	case "perform":
 		x := sub(e.x)
 		c.require(e.tok, x, "effect")
-		if x.effect != PureEffect {
+		if x.effect != PureEffect || x.hasFlow {
 			c.error(e.tok, "E-PURITY", "perform operand must be pure")
 		}
 		if pure {
@@ -606,7 +667,44 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				a = mergeEffect(a, analysis{effect: contract.Effect, concurrent: contract.Concurrent})
 			}
 		}
+	case "pipe":
+		first := sub(e.x)
+		local := env.child()
+		local.bindings["$pipe"] = bindingInfo{info: first}
+		if e.y.x.tag != "id" {
+			c.error(e.tok, "E-TYPE", "pipeline target must be a static declaration")
+		} else if binding, ok := env.find(e.y.x.name); ok && !binding.static {
+			c.error(e.tok, "E-TYPE", "pipeline target must be a static declaration")
+		}
+		saved := c.voidOK
+		if saved == e {
+			c.voidOK = e.y
+		}
+		stage := c.expression(e.y, local, pure, parallel)
+		c.voidOK = saved
+		a = mergeEffect(first, stage)
+		a.typ, a.ops, a.unknown = stage.typ, stage.ops, stage.unknown
+		for _, arg := range e.y.args[1:] {
+			if arg.expr.info.typ == "function" || arg.expr.info.typ == "effect" {
+				c.error(arg.expr.tok, "E-TYPE", "pipeline named arguments must be Data")
+			}
+			if arg.expr.info.effect != PureEffect || arg.expr.info.hasFlow {
+				c.error(arg.expr.tok, "E-PURITY", "pipeline named arguments must be Pure")
+			}
+		}
+	case "flow":
+		a = c.flowCall(e, env, pure, parallel)
 	case "call":
+		if e.x.tag == "id" {
+			if _, shadow := env.find(e.x.name); !shadow {
+				if _, ok := c.syntax.flows[e.x.name]; ok {
+					e.tag, e.name, e.tok = "flow", e.x.name, e.x.tok
+					e.x = nil
+					a = c.flowCall(e, env, pure, parallel)
+					break
+				}
+			}
+		}
 		callee := sub(e.x)
 		c.require(e.tok, callee, "function")
 		for _, arg := range e.args {
@@ -648,7 +746,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		if e.z != nil {
 			g := c.expression(e.z, local, pure, parallel)
 			c.require(e.z.tok, g, "bool")
-			if g.effect != PureEffect {
+			if g.effect != PureEffect || g.hasFlow {
 				c.error(e.z.tok, "E-PURITY", "comprehension guard must be pure")
 			}
 			a = mergeEffect(a, g)
@@ -813,4 +911,45 @@ func (c *checker) contractArguments(e *expression, contract Contract) {
 			c.error(e.tok, "E-ARITY", "missing operation argument "+p.Name)
 		}
 	}
+}
+
+func (c *checker) flowCall(e *expression, env *scope, pure, parallel bool) analysis {
+	f := c.syntax.flows[e.name]
+	if pure {
+		c.error(e.tok, "E-PURITY", "fn cannot invoke Flow")
+		return pureInfo(f.result)
+	}
+	// Check every explicit input even when the callee is Pure.
+	for _, arg := range e.args {
+		x := c.expression(arg.expr, env, false, parallel)
+		if x.effect != PureEffect || x.hasFlow {
+			c.error(arg.expr.tok, "E-PURITY", "Flow arguments must be Pure Data")
+		}
+		if x.typ == "function" || x.typ == "effect" {
+			c.error(arg.expr.tok, "E-TYPE", "Flow arguments must be Data")
+		}
+	}
+	c.checkArity(e, "", &expression{params: f.params}, env)
+	if f.result == "void" && c.voidOK != e {
+		c.error(e.tok, "E-TYPE", "void Flow cannot be used as a value")
+	}
+	_, err := checkFlow(c.syntax, Host{Contracts: contractValues(c.contracts)}, e.name)
+	if err != nil && c.err == nil {
+		if d, ok := err.(*Diagnostic); ok {
+			c.err = d
+		} else {
+			c.error(e.tok, "E-TYPE", err.Error())
+		}
+	}
+	a := f.summary
+	a.typ = f.result
+	a.hasFlow = true
+	return a
+}
+func contractValues(contracts map[string]Contract) []Contract {
+	out := make([]Contract, 0, len(contracts))
+	for _, contract := range contracts {
+		out = append(out, contract)
+	}
+	return out
 }

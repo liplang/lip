@@ -1,0 +1,14 @@
+# ASCII 三引号允许直接写多行文本，单双引号和 # 可以留在正文里。
+# 保留缩进、首尾换行；转义与普通字符串相同，不进行插值。
+flow MultilineStrings() -> object {
+    html = """
+<main>
+  <h1 title="欢迎">你好，LIP!</h1>
+</main>
+"""
+    prompt = """Read "carefully".
+# This is text, not a comment.
+"""
+    quotes = """Embedded triple quotes: \"\"\""""
+    return {html: html, prompt: prompt, quotes: quotes}
+}

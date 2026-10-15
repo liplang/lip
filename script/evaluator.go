@@ -13,6 +13,7 @@ type environment struct {
 	parent *environment
 	values map[string]Value
 	refs   map[string]*node
+	stores map[string]*claimStore
 }
 
 func newEnvironment(parent *environment) *environment {
@@ -92,7 +93,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 	defer func() {
 		if err != nil && err != errorCut {
 			err = at(err, e.tok)
-			if d, ok := err.(*Diagnostic); ok && len(d.EvalPath) == 0 {
+			if d, ok := err.(*Diagnostic); ok && len(d.Position) == 0 && len(d.EvalPath) == 0 {
 				d.EvalPath = v.path.Copy()
 			}
 		}
@@ -102,11 +103,9 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 	case "lit":
 		r.value = e.value
 	case "id":
-		if v.run != nil {
-			if store, ok := v.run.stores[e.name]; ok {
-				value, failure := store.read()
-				return evalResult{value: value}, failure
-			}
+		if store := findStore(env, e.name); store != nil {
+			value, failure := store.read()
+			return evalResult{value: value}, failure
 		}
 		r.value, err = env.lookup(e.name)
 	case "unary":
@@ -298,6 +297,17 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		} else {
 			return v.eval(a.result, env, tail)
 		}
+	case "pipe":
+		var value Value
+		value, err = get(e.x)
+		if err != nil {
+			break
+		}
+		local := newEnvironment(env)
+		local.values["$pipe"] = value
+		return v.eval(e.y, local, tail)
+	case "flow":
+		r.value, err = v.invokeFlow(e, env)
 	case "call":
 		var callable Value
 		callable, err = get(e.x)
@@ -325,6 +335,17 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		}
 		if err != nil {
 			break
+		}
+		if e.state == "stage" {
+			for i := 1; i < len(e.args); i++ {
+				if !args[order[i]].IsData() {
+					err = diagnostic("E-SCHEMA", "pipeline named arguments must be Data")
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
 		}
 		if fn.builtin != "" {
 			r.value, err = v.builtin(fn.builtin, args)
@@ -394,6 +415,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		if err = v.run.reserveElements(int64(len(source.l))); err != nil {
 			break
 		}
+		v.recordRange(e.tok.site, len(source.l))
 		xs := make([]Value, 0, len(source.l))
 		saved := v.path.Copy()
 		defer func() { v.path = saved }()
@@ -434,6 +456,9 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 				err = diagnostic("E-TYPE", "carry requires list")
 				break
 			}
+		}
+		if e.x != nil {
+			v.recordRange(e.tok.site, len(source.l))
 		}
 		acc, err = get(e.y)
 		if err != nil {
@@ -570,6 +595,9 @@ func (v *evaluator) localStatement(s *statement, env *environment) (string, erro
 			if source.k != List {
 				return "", diagnostic("E-TYPE", "for requires list")
 			}
+		}
+		if s.expr != nil {
+			v.recordRange(s.tok.site, len(source.l))
 		}
 		saved := v.path.Copy()
 		defer func() { v.path = saved }()

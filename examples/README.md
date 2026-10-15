@@ -1,14 +1,14 @@
-# 从 Hello World 到并行与外部调用
+# 从 Hello World 到 Flow 组合、并行与外部调用
 
-这些文件全部是 LIP 源码。`#` 开始一行注释；每个示例都在代码旁解释语法。先在项目根目录运行 `make build`，然后按下面的顺序学习。所有示例都同时验证解释器和 Go 后端。
+这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
 
-可以先运行 `./lipc learn`，边读讲解边填写和验证代码；也可以用 `./lipc repl` 随时试算表达式。REPL 的 `:run 文件路径` 用于执行完整的 Flow 示例。
+第一次接触可运行 `./lipc learn`，跟随 18 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；多入口示例带 `-entry`，输入用 `-input` 或 `-entry-input`。
 
 ## 先记住五条规则
 
-1. `flow Name(...) -> Type { ... }` 是程序入口，结果由末尾的 `return` 给出。
+1. `flow Name(...) -> Type { ... }` 声明可复用的图；只有一个根 Flow 时自动作为入口，多个时用 `-entry Name`。有值的 Flow 由末尾的 `return` 给出结果，void 没有返回值。
 2. `name = value` 创建不可变绑定。同一作用域不能给这个名字重复赋值。
-3. `fn` 是纯函数；函数体和值块的末尾表达式是结果。函数尾部可以加 `return`，这些示例通常省略它；Flow 则明确写末尾的 `return`。
+3. `fn` 是纯函数；函数体和值块的末尾表达式是结果。函数尾部可以加 `return`。Flow 不是函数值；子 Flow 与管道用于组合图，参数和成功结果必须是 Data。
 4. `effect op(args)` 只构造请求，`perform` 才执行已经注册的操作。
 5. `claim()` 创建事实汇聚点，`<+` 追加贡献；完整读取得到带身份的记录列表。
 
@@ -25,6 +25,7 @@
 | [03_arithmetic](basics/03_arithmetic.lip) | 优先级、幂、对数、除法、整商、取模、逻辑运算 | `2**3=8, 8*/2=3` |
 | [04_containers](basics/04_containers.lip) | list/object、索引、has/keys/put/concat | 原对象 role 仍为 `reader` |
 | [05_strings_numbers](basics/05_strings_numbers.lip) | Unicode、slice/split、数字解析、string 排序 | `score=0.8, middle="𐀀"` |
+| [22_multiline_strings](basics/22_multiline_strings.lip) | 三引号、缩进、转义与物理换行 | HTML 与 prompt 均为普通 string |
 
 `**` 是幂，右结合：`2 ** 3 ** 2 = 512`。一元负号在幂之后：`-3 ** 2 = -9`，对负数整体求平方写 `(-3) ** 2 = 9`；负指数写 `2 ** -3 = 0.125`。`*/` 以右边为底：`8 */ 2 = 3`，它与乘除同级、左结合。
 
@@ -69,6 +70,30 @@
 
 live snapshot 的观察差异是语义的一部分。需要最终完整结论时直接读取 Claim，不要用即时观察猜测所有任务已经完成。`fail(...)` 是不可捕获的程序错误；可恢复业务失败需要显式的 `{ok:false,...}` 数据。
 
+## 声明、入口与复用
+
+[26_flows](advanced/26_flows.lip) 将静态 Data、私有纯函数、导出的子 Flow、管道和并行 Claim 放在同一文件中：
+
+```sh
+./lipc run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+# {"count":3,"values":[5,3,4]}
+./lipc run -entry Adjust -entry-input '{"positional":[3],"named":{}}' -entry-output examples/advanced/26_flows.lip
+# {"kind":"value","value":5}
+```
+
+`x |> Adjust` 先固定 x，再完整完成子 Flow；具名纯函数和核心函数也能作为阶段。Flow 显式实参须为纯 Data，需要先执行子调用时用绑定或管道。原生库函数与普通函数值使用普通调用。`OFFSET:number=2` 是静态字面量，`export` 使其可被其他模块读取。入口 JSON 的重复键、非法 Unicode、格式或参数不符均在运行前以 E-SCHEMA 拒绝。
+
+将下面的 `reuse.lip` 放在项目根目录，便可复用同一示例，无需复制实现：
+
+```lip
+import lip "./examples/advanced/26_flows.lip" as adjust
+flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
+```
+
+`./lipc run -input '{"xs":[3,1,2]}' reuse.lip` 得到 `[5,3,4]`。模块只能访问 export；私有 `add` 不可访问。编译先冻结完整依赖和版本，运行与生成程序不会重新读取模块。`-project` 可显式指定项目根；所有声明都要合法，不能靠选择另一个入口绕过检查。
+
+`learn -lesson entries`、`flows`、`modules` 分别练习入口、组合和模块；课程依赖已内置。REPL 中可输入 `:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip`，文件运行独立于会话绑定。
+
 ## Go / Python 生态
 
 下面的例子使用 `-host demo`，显式启用项目的教学合约。Python 例子需要 Python 3，未涉及额外 package 安装。
@@ -88,6 +113,24 @@ live snapshot 的观察差异是语义的一部分。需要最终完整结论时
 
 这些教学示例的显式操作合约、schema 和 bytes 编码集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中。CLI 默认还提供通用 Go/Python 桥接，可以直接调用导入库的函数、读取模块属性和操作原生对象，例如 `import go "strings"; strings.ToUpper("hello")` 或 `import python "math"; math.sqrt(3)`。直接调用和属性访问会降为 `perform effect`；数组等原生对象以资源引用保留，使用 `native_data(value)` 显式取得普通数据快照。通用配置、转换规则和运行条件见 [README](../README.md#接入-go--python)。
 
+## 网站入口
+
+这些入口通过 HTTP Host 接收 request 并返回响应对象：
+
+| 文件 | 路由 | 能力 |
+| --- | --- | --- |
+| [23_home](web/23_home.lip) | GET /{$} | 三引号 HTML 页面 |
+| [24_echo](web/24_echo.lip) | POST /api/echo | 严格 JSON 输入与重复查询值 |
+| [25_greeting](web/25_greeting.lip) | GET /api/hello/{name} | 路径参数与 JSON 响应 |
+
+```sh
+./lipc serve examples/web/23_home.lip
+./lipc serve -route 'GET /api/hello/{name}' examples/web/25_greeting.lip
+```
+
+完整请求/响应约定、多路由清单、执行预算及当前范围见 [README](../README.md#网站与-http-接入)。
+HTTP 入口不能使用会话级通用 bridge；外部操作由显式 Host 合约提供。
+
 ## 同一个例子编译执行
 
 ```sh
@@ -95,8 +138,10 @@ make compile SOURCE=examples/advanced/13_tail_calls.lip OUTPUT=.build/tail
 ./.build/tail
 make compile SOURCE=examples/ecosystem/17_go_python.lip HOST=demo OUTPUT=.build/interop
 ./.build/interop
+make compile SOURCE=examples/advanced/26_flows.lip ENTRY=Main OUTPUT=.build/flows
+./.build/flows -input '{"xs":[3,1,2]}'
 ```
 
-生成程序不再接收 `.lip` 文件，它已经包含编译后的计算和调度信息，直接接受 `-input` / `-parallel` 等运行参数。
+生成程序固定入口和模块快照，不再接收 `.lip` 文件；直接接受 `-input` / `-entry-input` / `-entry-output` / `-parallel` 等运行参数。`make compile` 可传 ENTRY、PROJECT 和 HOST；输入与输出封装规则见 [README](../README.md#语言核心与程序结构)。
 
 `make examples` 会输出各个示例的验收结果；`make clean` 删除编译产物与缓存。
