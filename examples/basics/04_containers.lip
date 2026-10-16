@@ -3,7 +3,7 @@
 # [start:stop:step] allows omitted bounds; [::-1] reverses. Objects have string keys.
 # .name and ["name"] read object fields; missing keys are errors.
 # put / concat return new containers; the inputs retain their values.
-flow Containers() -> object {
+flow Main() -> object {
     names = ["Ada", "Lin"]
     person = {name: names[0], role: "reader"}
     updated = put(person, "role", "writer")

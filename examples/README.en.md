@@ -2,13 +2,15 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
+Every example uses `Main` as its default entry; helper Flows have names describing their roles.
+
 These executable examples develop one LIP 1.0 model: pure functions compute values, Flows organize dependencies, Claims collect facts, and effect/perform executes external actions. `#` starts a line comment; each file explains its syntax in English. Run `make build` at the project root first. Examples are checked through interpretation and actual generated Go programs.
 
-Start with `./lipc learn` for 19 interactive lessons or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select multiple entries with `-entry` and provide `-input` or `-entry-input`.
+Start with `./lipc learn` for 19 interactive lessons or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
 
 ## Five rules to remember
 
-1. `flow Name(...) -> Type { ... }` declares a reusable graph. A sole root Flow is the default entry; choose among multiple roots with `-entry Name`. A valued Flow ends in return; void has no value.
+1. `flow Name(...) -> Type { ... }` declares a reusable graph. Root `Main` is the default entry; otherwise use the sole root Flow or choose with `-entry Name`. Explicit selection overrides the default, and names are case-sensitive. A valued Flow ends in return; void has no value.
 2. `name = value` creates an immutable binding; no same-scope reassignment.
 3. fn is pure. Its final expression, optionally prefixed by return, is its result. Flows are not function values; child calls/pipelines compose graphs with Data inputs/results.
 4. `effect op(args)` only constructs a request. perform executes the registered operation.
@@ -62,7 +64,7 @@ Ordinary-loop bindings are independent each iteration. Use carry for previous re
 | [15_inputs](advanced/15_inputs.lip) | Typed parameters/JSON | -input below |
 | [16_snapshots](advanced/16_snapshots.lip) | Live versus complete observations | Complete count 3, live count 0–3 |
 | [21_business_failures](advanced/21_business_failures.lip) | Failures as Data, stop on third failure | failures=3, visited=4 |
-| [27_linear_model](advanced/27_linear_model.lip) | Centered least squares, training/prediction Flows, MSE, singular input | -entry Main; slope=2, intercept=1, predictions=[9,11] |
+| [27_linear_model](advanced/27_linear_model.lip) | Centered least squares, training/prediction Flows, MSE, singular input | default Main; slope=2, intercept=1, predictions=[9,11] |
 | [refine](refine.lip) | Source-free carry until threshold | rounds=4, score=0.8 |
 | [evidence](evidence.lip) | Parallel evidence/complete reports | missing=["b","c"] |
 
@@ -80,7 +82,7 @@ Live snapshot variation is intentional. Read a Claim completely for final conclu
 [26_flows](advanced/26_flows.lip) combines static Data, private fn, exported children, pipelines, and parallel Claims:
 
 ```sh
-./lipc run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+./lipc run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 # {"count":3,"values":[5,3,4]}
 ./lipc run -entry Adjust -entry-input '{"positional":[3],"named":{}}' -entry-output examples/advanced/26_flows.lip
 # {"kind":"value","value":5}
@@ -97,7 +99,7 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 `./lipc run -input '{"xs":[3,1,2]}' reuse.lip` yields [5,3,4]. Only exports are accessible; private add is not. Compilation freezes complete dependencies/versions; programs never reread modules. -project selects the project root. Every declaration must be valid, regardless of selected entry.
 
-Practice with entries/flows/modules lessons; dependencies are bundled. In REPL use `:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip`; file execution is independent of session bindings.
+Practice with entries/flows/modules lessons; dependencies are bundled. In REPL use `:run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip`; file execution is independent of session bindings.
 
 ## Go / Python ecosystems
 

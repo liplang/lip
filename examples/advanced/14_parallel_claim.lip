@@ -1,7 +1,7 @@
 # parallel allows independent iterations; do not depend on completion order.
 # Claims append identified facts; complete snapshots follow logical Position order.
 # Business projections such as count/latest are pure computations, not shared variable updates.
-flow ParallelFacts() -> object {
+flow Main() -> object {
     facts = claim()
     for x in [3, 1, 2] parallel {
         facts <+ {input: x, square: x * x}

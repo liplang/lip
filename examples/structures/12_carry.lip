@@ -1,7 +1,7 @@
 # carry is a sequential iteration expression; with supplies the initial carried value.
 # Each iteration binds s to the preceding next result; the binding remains immutable.
 # next supplies the next carried value; break e returns e immediately.
-flow Carry() -> object {
+flow Main() -> object {
     answer = for x in [1, 2, 3, 4, 5] with s = 0 {
         updated = s + x
         if updated >= 6 { break updated }

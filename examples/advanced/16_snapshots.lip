@@ -1,7 +1,7 @@
 # snapshot is the live observation channel; effect/perform records its result.
 # It does not wait for writers and may observe 0 through 3 records during concurrent work.
 # Live observations deliberately give up the schedule-independence guarantee for fixed-response programs.
-flow Snapshots() -> object {
+flow Main() -> object {
     facts = claim()
     for x in [1, 2, 3] parallel { facts <+ x }
     observed = perform effect claim.snapshot("facts")

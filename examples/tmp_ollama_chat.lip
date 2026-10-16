@@ -1,0 +1,102 @@
+# 临时示例：通过现有 Go/Python bridge 与本地 Ollama 多轮、流式聊天。
+# 在项目根目录运行：
+#   make build
+#   ./lipc run examples/tmp_ollama_chat.lip
+# 需要 Python 3（仅使用标准库），以及已启动并安装下方模型的 Ollama。
+# 每行输入一条消息；空行忽略，/exit 或 EOF 正常退出，Ctrl-C 终止。
+# 上下文仅保存在本次运行的内存中。CLI 正常结束时会输出 void 对应的 null。
+import go "bufio"
+import go "fmt"
+import go "os"
+import go "os/signal"
+import go "strings"
+import python "builtins" as py
+import python "json"
+import python "urllib.request" as http
+
+MODEL: string = "llama3.1:8b"
+CHAT_URL: string = "http://127.0.0.1:11434/api/chat"
+TIMEOUT_SECONDS: number = 300
+
+# 把终端输入归一为 message / empty / exit，让主循环只处理会话决策。
+flow ReadPrompt(input: object) -> object {
+    fmt.Print("\n你> ")
+    ready = perform effect input.Scan()
+    result = if ready {
+        raw = perform effect input.Text()
+        text = strings.TrimSpace(raw)
+        kind = if text == "/exit" { "exit" } else if text == "" { "empty" } else { "message" }
+        {kind: kind, text: text}
+    } else {
+        read_error = perform effect input.Err()
+        if read_error != null {
+            detail = str(read_error)
+            fail("读取输入失败：" + detail)
+        } else { {kind: "exit", text: ""} }
+    }
+    return result
+}
+
+# Ollama 每行发送一个 JSON 对象；将协议细节归一为文本片段和完成标记。
+flow ReadChunk(response: object) -> object {
+    raw = perform effect response.readline()
+    line = py.str(raw, "utf-8")
+    chunk = if line == "" {
+        perform effect response.close()
+        fail("Ollama 响应提前结束：尚未收到 done=true")
+    } else { json.loads(line) }
+    result = if has(chunk, "error") {
+        perform effect response.close()
+        detail = str(chunk.error)
+        fail("Ollama：" + detail)
+    } else {
+        content = if has(chunk, "message") { chunk.message.content } else { "" }
+        {content: content, done: has(chunk, "done") && chunk.done}
+    }
+    return result
+}
+
+# 发起一轮请求，边接收边显示，完成后返回拼接好的助手消息。
+# 连接失败、HTTP 错误和超时由 bridge 报错，不自动重试。
+flow StreamReply(messages: list) -> string {
+    payload = json.dumps({model: MODEL, messages: messages, stream: true})
+    request = http.Request(
+        CHAT_URL,
+        data=py.bytes(payload, "utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    response = http.urlopen(request, timeout=TIMEOUT_SECONDS)
+    fmt.Print("助手> ")
+    answer = for with text = "" {
+        chunk = ReadChunk(response)
+        fmt.Print(chunk.content)
+        updated = text + chunk.content
+        if chunk.done { break updated } else { next updated }
+    }
+    response.close()
+    fmt.Println()
+    return answer
+}
+
+# 主 Flow 只负责退出、忽略空行和推进对话历史。
+flow Main() -> void {
+    # 阻塞读取终端时，让 Ctrl-C 使用系统默认的终止行为。
+    signal.Reset()
+    # Python worker 的 stdin 用于 bridge 协议，终端输入交给 Go 读取。
+    input = bufio.NewScanner(os.Stdin)
+    fmt.Println("Ollama · " + MODEL + "（/exit 退出）")
+    history = for with messages = [] {
+        prompt = ReadPrompt(input)
+        match prompt.kind {
+            "exit" => { break messages }
+            "empty" => { next messages }
+            _ => {
+                pending = concat(messages, [{role: "user", content: prompt.text}])
+                answer = StreamReply(pending)
+                next concat(pending, [{role: "assistant", content: answer}])
+            }
+        }
+    }
+    fmt.Println("\n会话结束。")
+}

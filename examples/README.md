@@ -2,15 +2,17 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
+所有示例都使用 `Main` 作为默认入口，辅助 Flow 按职责命名。
+
 这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
 
-第一次接触可运行 `./lipc learn`，跟随 19 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；多入口示例带 `-entry`，输入用 `-input` 或 `-entry-input`。
+第一次接触可运行 `./lipc learn`，跟随 19 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
 
 REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
 ## 先记住五条规则
 
-1. `flow Name(...) -> Type { ... }` 声明可复用的图；只有一个根 Flow 时自动作为入口，多个时用 `-entry Name`。有值的 Flow 由末尾的 `return` 给出结果，void 没有返回值。
+1. `flow Name(...) -> Type { ... }` 声明可复用的图；默认选择根模块的 `Main`；没有 `Main` 时选择唯一根 Flow，多个时用 `-entry Name`。显式入口覆盖默认，名称区分大小写。有值的 Flow 由末尾的 `return` 给出结果，void 没有返回值。
 2. `name = value` 创建不可变绑定。同一作用域不能给这个名字重复赋值。
 3. `fn` 是纯函数；函数体和值块的末尾表达式是结果。函数尾部可以加 `return`。Flow 不是函数值；子 Flow 与管道用于组合图，参数和成功结果必须是 Data。
 4. `effect op(args)` 只构造请求，`perform` 才执行已经注册的操作。
@@ -64,7 +66,7 @@ REPL 也会显示库函数的返回值。`fmt.Print/Printf/Println` 的返回值
 | [15_inputs](advanced/15_inputs.lip) | 类型化 Flow 参数与 JSON 输入 | 使用下方带 `-input` 的命令 |
 | [16_snapshots](advanced/16_snapshots.lip) | 即时观察与完整读取的区别 | 完整数为 3，即时观察数允许 0–3 |
 | [21_business_failures](advanced/21_business_failures.lip) | 用 Data 表达失败、第三次失败停止 | `failures=3, visited=4` |
-| [27_linear_model](advanced/27_linear_model.lip) | 中心化最小二乘、训练/预测 Flow、MSE、奇异输入 | -entry Main; slope=2, intercept=1, predictions=[9,11] |
+| [27_linear_model](advanced/27_linear_model.lip) | 中心化最小二乘、训练/预测 Flow、MSE、奇异输入 | 默认 Main; slope=2, intercept=1, predictions=[9,11] |
 | [refine](refine.lip) | 无 source 的 carry，迭代改进直到阈值 | `rounds=4, score=0.8` |
 | [evidence](evidence.lip) | 并行证据汇聚、完整报告 | `missing=["b","c"]` |
 
@@ -82,7 +84,7 @@ live snapshot 的观察差异是语义的一部分。需要最终完整结论时
 [26_flows](advanced/26_flows.lip) 将静态 Data、私有纯函数、导出的子 Flow、管道和并行 Claim 放在同一文件中：
 
 ```sh
-./lipc run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+./lipc run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 # {"count":3,"values":[5,3,4]}
 ./lipc run -entry Adjust -entry-input '{"positional":[3],"named":{}}' -entry-output examples/advanced/26_flows.lip
 # {"kind":"value","value":5}
@@ -99,7 +101,7 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 `./lipc run -input '{"xs":[3,1,2]}' reuse.lip` 得到 `[5,3,4]`。模块只能访问 export；私有 `add` 不可访问。编译先冻结完整依赖和版本，运行与生成程序不会重新读取模块。`-project` 可显式指定项目根；所有声明都要合法，不能靠选择另一个入口绕过检查。
 
-`learn -lesson entries`、`flows`、`modules` 分别练习入口、组合和模块；课程依赖已内置。REPL 中可输入 `:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip`，文件运行独立于会话绑定。
+`learn -lesson entries`、`flows`、`modules` 分别练习入口、组合和模块；课程依赖已内置。REPL 中可输入 `:run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip`，文件运行独立于会话绑定。
 
 ## Go / Python 生态
 

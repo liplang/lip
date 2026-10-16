@@ -1,4 +1,4 @@
 # Use GET /api/hello/{name}; the Host decodes route parameters into params.
-flow Greeting(request: object) -> object {
+flow Main(request: object) -> object {
     return {status: 200, json: {message: "Hello, " + request.params.name}}
 }

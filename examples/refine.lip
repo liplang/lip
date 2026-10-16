@@ -1,6 +1,6 @@
 # A minimal iterative improvement example without external services.
 # Source-free for with keeps taking next steps until break returns a result.
-flow Refine() -> object {
+flow Main() -> object {
     result = for with s = {score: 0, rounds: 0} {
         improved = {score: s.score + 0.2, rounds: s.rounds + 1}
         if improved.score >= 0.8 { break improved }

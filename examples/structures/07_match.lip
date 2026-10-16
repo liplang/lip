@@ -9,6 +9,6 @@ fn describe(x: any) -> string {
         _ => "other"
     }
 }
-flow Matching() -> list {
+flow Main() -> list {
     return map([null, 3, -2, {kind: "note"}, {}], describe)
 }

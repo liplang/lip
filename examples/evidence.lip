@@ -1,6 +1,6 @@
 # Independent conclusions contribute evidence; a complete snapshot produces the missing-evidence report.
 # Without live snapshots, the collected result is independent of legal schedule order.
-flow Evidence() -> object {
+flow Main() -> object {
     facts = claim()
     for conclusion in ["a", "b", "c"] parallel {
         facts <+ {name: conclusion, evidence: if conclusion == "a" {["source"]} else {[]}}

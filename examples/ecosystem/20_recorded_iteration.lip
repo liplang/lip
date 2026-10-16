@@ -2,7 +2,7 @@
 # Each iteration uses the previous recorded result for its next request; EvalPath distinguishes CallIDs.
 # The Python standard library simulates improving scores; no model service is required.
 import python "statistics" as stats
-flow RecordedIteration() -> object {
+flow Main() -> object {
     answer = for with s = {score: 0, rounds: 0} {
         next_score = perform effect stats.mean([s.score + 0.2])
         updated = {score: next_score, rounds: s.rounds + 1}

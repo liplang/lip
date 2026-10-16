@@ -1,5 +1,5 @@
-# Run: lipc run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
-# Select an entry when multiple Flows exist; all declarations are checked.
+# Run: lipc run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+# Main is the default root entry; -entry selects another. All declarations are checked.
 # export enables reuse through import lip; declarations are private by default.
 export OFFSET:number = 2
 

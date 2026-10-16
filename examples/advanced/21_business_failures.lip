@@ -1,7 +1,7 @@
 # Represent recoverable business failures as Data to count, branch, or continue.
 # fail("...") terminates the node with a program error; it is not a catchable business value.
 # The carry stops on the third failure; later items are never processed.
-flow BusinessFailures() -> object {
+flow Main() -> object {
     stopped = for result in [
         {ok: false}, {ok: true}, {ok: false}, {ok: false}, {ok: true}
     ] with s = {failures: 0, visited: 0} {

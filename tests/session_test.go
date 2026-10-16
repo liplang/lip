@@ -905,12 +905,16 @@ flow Canceled()->number {return 0}
 				t.Fatal(err)
 			}
 		}
-		stdout, stderr := run("", "run", "-entry", "Main", "-project", project, "-input", `{"x":3}`, file)
+		stdout, stderr := run("", "run", "-project", project, "-input", `{"x":3}`, file)
 		if stdout != "6\n" || stderr != "" {
 			t.Fatal(stdout, stderr)
 		}
 		executable := filepath.Join(dir, "module-program")
-		run("", "build", "-entry", "Main", "-project", project, "-o", executable, file)
+		run("", "build", "-project", project, "-o", executable, file)
+		stdout, stderr = run(":run -project '"+project+"' -input '{\"x\":3}' '"+file+"'\n:quit\n", "repl")
+		if stdout != "6\n" || stderr != "" {
+			t.Fatal("REPL file default entry", stdout, stderr)
+		}
 		// Executables use the frozen closure, even after a dependency changes.
 		if err := os.WriteFile(dep, []byte("invalid source"), 0600); err != nil {
 			t.Fatal(err)

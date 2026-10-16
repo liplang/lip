@@ -1,7 +1,7 @@
 # String indices and slice boundaries count Unicode scalars, not UTF-8 bytes.
 # slice excludes its end boundary. split retains empty segments between adjacent separators.
 # str formats values; parse_number accepts only complete number text as specified.
-flow TextAndNumbers() -> object {
+flow Main() -> object {
     text = "a𐀀b"
     score = parse_number("8e-1")
     return {

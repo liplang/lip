@@ -2,7 +2,7 @@
 # A proposal is a value; constructing or binding it does not call the provider.
 # perform is the only execution boundary; ordinary fn cannot perform.
 import go "strings" as text
-flow Proposals() -> object {
+flow Main() -> object {
     request = effect text.ToUpper("hello")
     result = perform request
     # A recorded external result can become an argument to the next request.

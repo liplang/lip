@@ -1,6 +1,6 @@
 # ASCII triple quotes allow multiline text; quotes and # can appear in the body.
 # Indentation and leading/trailing newlines are preserved; escapes match ordinary strings, without interpolation.
-flow MultilineStrings() -> object {
+flow Main() -> object {
     html = """
 <main>
   <h1 title="Welcome">Hello, LIP!</h1>

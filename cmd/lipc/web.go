@@ -17,7 +17,7 @@ func serve(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := flags.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	pattern := flags.String("route", "GET /{$}", "Go ServeMux pattern for the single source file")
-	entry := flags.String("entry", "", "root Flow for a single source")
+	entry := flags.String("entry", "", "root Flow for a single source (default Main, otherwise the sole root Flow)")
 	project := flags.String("project", "", "project root for static LIP imports")
 	manifest := flags.String("routes", "", "JSON array of {pattern, source, entry?}; paths relative to the manifest")
 	hostName := flags.String("host", "", "explicit Host contracts: empty or demo; no automatic native bridge")

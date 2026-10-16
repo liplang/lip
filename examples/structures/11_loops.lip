@@ -1,7 +1,7 @@
 # An ordinary for executes statements per item; bindings do not carry between iterations.
 # continue skips the rest of an iteration; break ends the nearest ordinary loop.
 # Declare Claims only at Flow top level; <+ appends facts without overwriting records.
-flow Loops() -> list {
+flow Main() -> list {
     facts = claim()
     for x in [1, 2, 3, 4, 5] {
         if x == 2 { continue }

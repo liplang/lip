@@ -38,7 +38,7 @@ flow Main(xs:list)->object {
 
 ```sh
 make build
-./lipc run -entry Main -parallel 4 -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+./lipc run -parallel 4 -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 # {"count":3,"values":[5,3,4]}
 ```
 
@@ -49,11 +49,11 @@ This program adds 2 to each input, allows the iterations to run concurrently, an
 | `OFFSET` | Immutable module-level static data with value `2`; `number` is its type annotation | Yes, through `export` |
 | `add` | A pure function computing the sum of two numbers | No, private by default |
 | `Adjust` | A reusable Flow template using `add` and `OFFSET` | Yes, through `export` |
-| `Main` | A Flow template that creates a Claim, expands the loop, and collects results | No; `-entry Main` selects it as this run's root entry |
+| `Main` | A Flow template that creates a Claim, expands the loop, and collects results | No; root `Main` is the default entry |
 
 ### How `OFFSET` connects modules and computation
 
-Each `.lip` file is a module. Uppercase `OFFSET` is a naming convention; its value is fixed in the code and included in the build snapshot. `export` controls visibility outside the module; `-entry` selects the entry point.
+Each `.lip` file is a module. Uppercase `OFFSET` is a naming convention; its value is fixed in the code and included in the build snapshot. `export` controls visibility outside the module; root `Main` is the default entry, and `-entry` can select another Flow.
 
 Another file at the project root can use `import lip "./examples/advanced/26_flows.lip" as adjust`, then read `adjust.OFFSET` or call `x |> adjust.Adjust`. The importer chooses the namespace alias `adjust`. The imported `Adjust` always uses `OFFSET` and the private function `add` from its **defining module**. Local values with the same names in the caller do not change its computation. Removing `export` from `OFFSET` would still let `Adjust` use it within this module; external reads of `adjust.OFFSET` would be rejected. See [Child Flows, pipelines, and static modules](#child-flows-pipelines-and-static-modules) for the complete two-file example.
 
@@ -63,7 +63,7 @@ At build time, the tool freezes the source and imported dependencies, then colle
 
 This run establishes the following work and dependencies:
 
-1. `-entry Main` selects the entry point, and the JSON input binds `[3,1,2]` to `xs`. After input validation, a run is created. The `Main` instance creates **one `facts` Claim shared by all three iterations**.
+1. Root `Main` is selected by default, and the JSON input binds `[3,1,2]` to `xs`. After input validation, a run is created. The `Main` instance creates **one `facts` Claim shared by all three iterations**.
 2. The `for` source `xs` is evaluated once, and three iterations expand in original index order. Each `result = x |> Adjust` instantiates its own `Adjust` subgraph, with separate parameters and structural identity. In the first iteration, the pipeline fixes `3` and passes it to `Adjust(value=3)`. Inside that Flow, `value |> add(delta=OFFSET)` computes `add(value=3, delta=2)`, producing `5`. The pure function `add` computes a value within the current node.
 3. Each `facts <+ result` waits for its corresponding subgraph to succeed completely, then submits a record to the shared Claim. The three iterations contribute `5`, `3`, and `4`; their work can interleave.
 4. The final `return` reads `facts` completely, waiting for all contribution work. The snapshot orders records by logical position: iterations 0, 1, and 2 in this example. `row.value` extracts each record's value, and `len` counts the records. Once the entire entry graph succeeds, the Host receives `{"count":3,"values":[5,3,4]}`.
@@ -172,21 +172,21 @@ Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: 
 
 ### Entry points and successful results
 
-Files can declare static literal Data, pure functions, and multiple Flows. A sole root Flow is selected automatically; use `-entry` with multiple Flows. All declarations in the source closure are checked, including unselected ones.
+Files can declare static literal Data, pure functions, and multiple Flows. Without `-entry`, select root `Main` first; otherwise select the sole root Flow, or require an explicit choice. Names are case-sensitive, imported `Main` Flows do not participate, and explicit `-entry Name` overrides the default. All declarations in the source closure are checked, including unselected ones.
 
 ```lip
 BASE:number = 2
 fn add_base(x:number)->number { x + BASE }
-flow Add(x:number)->number { return add_base(x) }
+flow Main(x:number)->number { return add_base(x) }
 flow Empty()->void {}
 ```
 
 Save as `program.lip`, then run:
 
 ```sh
-./lipc run -entry Add -input '{"x":3}' program.lip
+./lipc run -input '{"x":3}' program.lip
 # 5
-./lipc run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output program.lip
+./lipc run -entry-input '{"positional":[3],"named":{}}' -entry-output program.lip
 # {"kind":"value","value":5}
 ./lipc run -entry Empty -entry-output program.lip
 # {"kind":"void"}
@@ -366,7 +366,7 @@ For a whole script, forward references between declarations, or a top-level Clai
 `import lip "./lib/pricing.lip" as pricing` resolves within `lipc repl -project DIR` (default: the current directory). Imports freeze the complete source closure before execution and keep it until `:reset`; existing closures keep their defining environment. Completion does not run imported code. To run an independent file with explicit entry/input options, use `:run`:
 
 ```text
-:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+:run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 :run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output "path with spaces/program.lip"
 ```
 
@@ -431,7 +431,7 @@ hello
 ## Generating Go programs
 
 ```sh
-./lipc build -entry Main -o .build/flows examples/advanced/26_flows.lip
+./lipc build -o .build/flows examples/advanced/26_flows.lip
 ./.build/flows -input '{"xs":[3,1,2]}'
 # {"count":3,"values":[5,3,4]}
 

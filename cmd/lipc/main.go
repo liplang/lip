@@ -47,7 +47,7 @@ func run(ctx context.Context, args []string) error {
 	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	output := flags.String("o", "", "generated Go or executable destination")
 	input := flags.String("input", "{}", "Flow inputs as a JSON object")
-	entry := flags.String("entry", "", "root Flow declaration to run or compile")
+	entry := flags.String("entry", "", "root Flow to run or compile (default Main, otherwise the sole root Flow)")
 	project := flags.String("project", "", "project root for static LIP imports; defaults to source directory")
 	entryInput := flags.String("entry-input", "", "EntryInput JSON with positional and named fields")
 	entryOutput := flags.Bool("entry-output", false, "print the value/void success envelope")

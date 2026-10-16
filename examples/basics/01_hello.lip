@@ -1,6 +1,6 @@
-# A LIP program has one Flow entry. Its name can be Hello; Main is not required.
+# Main is the default Flow entry; examples use this name consistently.
 # -> string declares the output type; return supplies the final Flow result.
 # lipc writes the result as JSON, so strings include double quotes.
-flow Hello() -> string {
+flow Main() -> string {
     return "Hello, LIP!"
 }

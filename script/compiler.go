@@ -468,11 +468,15 @@ func (s *syntax) selectEntry(name string) error {
 		return nil
 	}
 	if name == "" {
-		if len(s.flows) != 1 {
-			return diagnostic("E-ENTRY", "select an entry from the root Flow declarations")
-		}
-		for declared := range s.flows {
-			name = declared
+		if _, ok := s.flows["Main"]; ok {
+			name = "Main"
+		} else {
+			if len(s.flows) != 1 {
+				return diagnostic("E-ENTRY", "declare flow Main or select an entry from the root Flow declarations")
+			}
+			for declared := range s.flows {
+				name = declared
+			}
 		}
 	}
 	f, ok := s.flows[name]

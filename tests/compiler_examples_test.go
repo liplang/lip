@@ -43,8 +43,8 @@ var examples = []exampleCase{
 	{path: "ecosystem/19_parallel_read_write.lip", demo: true, want: `["ADA","LIN","SAM"]`},
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
-	{path: "advanced/26_flows.lip", entry: "Main", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
-	{path: "advanced/27_linear_model.lip", entry: "Main", want: `{"intercept":1,"mse":0,"predictions":[9,11],"singular_rejected":true,"slope":2}`},
+	{path: "advanced/26_flows.lip", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
+	{path: "advanced/27_linear_model.lip", want: `{"intercept":1,"mse":0,"predictions":[9,11],"singular_rejected":true,"slope":2}`},
 	{path: "refine.lip", want: `{"rounds":4,"score":0.8}`},
 	{path: "evidence.lip", want: `{"missing":["b","c"]}`},
 }
@@ -160,6 +160,35 @@ func runNative(t *testing.T, executable string, args ...string) (string, string,
 	command.Stderr = &stderr
 	err := command.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func TestMainDefaultEntryInterpreterAndGo(t *testing.T) {
+	source := `flow Other(x:number)->number{return x+10}
+flow main()->number{return fail("lowercase entry must not run")}
+flow Main(x:number)->number{return x+1}`
+	for _, test := range []struct{ entry, want string }{{"", "3"}, {"Other", "12"}} {
+		t.Run("entry="+test.entry, func(t *testing.T) {
+			p, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: test.entry})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.entry == "" {
+				explicit, err := CompileWithOptions(source, Host{}, CompileOptions{Entry: "Main"})
+				if err != nil || display(t, p.BuildInfo()) != display(t, explicit.BuildInfo()) {
+					t.Fatal("default Main changed build identity", err)
+				}
+			}
+			report, err := p.Run(context.Background(), map[string]Value{"x": number(2)}, Options{})
+			if err != nil || display(t, report.Output) != test.want {
+				t.Fatal(report, err)
+			}
+			executable, _ := buildNative(t, p, GoOptions{})
+			stdout, stderr, err := runNative(t, executable, "-input", `{"x":2}`)
+			if err != nil || strings.TrimSpace(stdout) != test.want || stderr != "" {
+				t.Fatal(stdout, stderr, err)
+			}
+		})
+	}
 }
 
 func TestGoBackendDeclarationsAndEntryProtocol(t *testing.T) {

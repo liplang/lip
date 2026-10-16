@@ -1,7 +1,7 @@
 # if has statement and expression forms.
 # Use an expression to bind a conditional result; each branch ends with its value.
 # Branch-local names do not escape their branch.
-flow Conditions() -> object {
+flow Main() -> object {
     score = 0.85
     grade = if score >= 0.8 {
         label = "ready"

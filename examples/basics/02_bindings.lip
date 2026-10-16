@@ -1,6 +1,6 @@
 # = creates an immutable binding; a name cannot be assigned again in the same scope.
 # Use a new name for a new result; = does not update a mutable variable.
-flow Bindings() -> object {
+flow Main() -> object {
     price = 12
     count = 3
     subtotal = price * count

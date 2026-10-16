@@ -155,7 +155,7 @@ The file mode is chosen uniquely from module-level declarations: any export, Flo
 
 Nested `pure_stmt` blocks are pure statements and cannot return. A function has exactly its final result expression, optionally preceded by return. It cannot declare/read/join stores, perform, or call child Flows, including Pure Flows; constructing an effect is allowed, including when returning function/effect values. Collect named fn/Flow signatures before body checking: named calls may refer forward. fn supports recursion/mutual recursion; §6.3 rejects Flow cycles. Ordinary values cannot refer forward; static data follows §2.2. Data/fn/Flow share a module declaration namespace; duplicates are E-DUPLICATE. Lexical shadowing never silently falls back to a Flow declaration. Parameters, local bindings, and loop variables are unique within their scopes. A shadowing RHS evaluates in the outer environment; the new binding is visible only afterward. Each loop iteration creates a fresh scope. fn loops are sequential, disallow parallel, and do not mutate or leak outer bindings.
 
-A valued Flow MUST have exactly one final top-level return. A void Flow may omit it or end with bare return. Return does not skip other nodes; branches/loops cannot return. Top-level statements form a zero-parameter void `main`, optionally preceded by ordinary fn. Imported modules cannot have top-level statements or implicit main. Explicit roots may declare several Flows; one run selects exactly one. A sole root Flow is the default; multiple root Flows require an explicit Host/tool declaration name, never guesses from Main/main or declaration order. Missing/unknown/non-Flow choices are E-ENTRY. Imported Flows do not count toward root entry selection. Declaration roots with data/export but no root Flow are E-ENTRY. All source-set declarations are checked, including unselected entries.
+A valued Flow MUST have exactly one final top-level return. A void Flow may omit it or end with bare return. Return does not skip other nodes; branches/loops cannot return. Top-level statements form a zero-parameter void `main`, optionally preceded by ordinary fn. Imported modules cannot have top-level statements or implicit main. Explicit roots may declare several Flows; one run selects exactly one. An explicit Host/tool root Flow declaration name takes precedence. Otherwise select the root Flow named exactly `Main`; if absent, select the sole root Flow, or reject with E-ENTRY when there is no unique default. Names are case-sensitive: `main` has no priority, and declaration order does not affect selection. An unknown/non-root-Flow explicit choice is E-ENTRY, without fallback to the default. Imported Flows do not count toward root entry selection. Declaration roots with data/export but no root Flow are E-ENTRY. All source-set declarations are checked, including unselected entries.
 
 Flow parameter/result annotations `function`/`effect`, including optional forms, are E-TYPE. list/object/any inputs/results require recursive Data validation; fn interfaces do not. fn has no void. Discarded pure calls may validate/propagate errors; result-free external actions use perform. `null` is a Data type with one value; `void` means absence of a return and is allowed only as a Flow return annotation. `any?` equals any and retains Data checks. Nullable parameters still must be supplied. `return F(x)` is legal as the final return of a valued Flow, waits for full F success, and then checks the enclosing return annotation.
 
@@ -875,7 +875,7 @@ Register version-1 Concurrent ReadOnly `worker.compute(item:Data)->Data` and Wri
 
 HTTP is a Host profile outside core, adding no syntax or Flow/Claim/identity/error semantics. Receive a request, convert it to entry input, and only after complete validated success commit status/headers/body. Receiving/sending are run lifecycle, not source operations; database/network/clock/log work inside a Flow still uses perform.
 
-Entries MUST be `flow Name(request:object)->object`. Startup binds explicit-method Go ServeMux patterns (possibly parameters) to precompiled, entry-checked, conflict-checked Programs before accepting requests. One read-only Program may serve many requests. Multi-Flow entries are selected in startup configuration; requests cannot select arbitrary entries/sources/operations/registries. Children remain within the request run and produce no separate HTTP responses.
+Entries MUST be `flow Name(request:object)->object`. Startup binds explicit-method Go ServeMux patterns (possibly parameters) to precompiled, entry-checked, conflict-checked Programs before accepting requests. One read-only Program may serve many requests. Entries are fixed at startup using the §2 defaults or an explicit configuration; requests cannot select arbitrary entries/sources/operations/registries. Children remain within the request run and produce no separate HTTP responses.
 
 Missing explicit methods are E-HTTP. Hosts may reuse ServeMux path/parameter matching but MUST implement exact configured method dispatch and 405/Allow themselves, not inherit ServeMux method matching/405 behavior. HEAD matches only explicitly configured HEAD and MUST NOT execute GET. Without a routing redirect, a host/path match ignoring methods but no matching method yields 405; no host/path match yields 404. Neither creates runs/Flows/providers. Allow contains all explicit host/path methods, deduplicated and UTF-8 sorted, joined by `, `; GET never implies HEAD. Explicit HEAD uses its own entry/effect contract.
 
@@ -1010,7 +1010,7 @@ Error objects differ from Skipped causes. Reject statically known invalid progra
 | E-NAME / E-DUPLICATE | Undeclared/forward value reference or duplicate declaration/field |
 | E-SHADOW-CLAIM / E-RESERVED | Store shadowing or reserved-name redefinition |
 | E-TYPE / E-ARITY | Statically known type/argument mismatch |
-| E-ENTRY | Missing multi-Flow entry, unknown/non-Flow choice; pre-run rejection |
+| E-ENTRY | No default or explicit entry, unknown/non-root-Flow choice; pre-run rejection |
 | E-MODULE / E-MODULE-CYCLE / E-EXPORT | Missing/invalid/lock-mismatched module, module cycle, private access |
 | E-FLOW-CYCLE | Direct/indirect Flow-call cycle, including constant-unselected paths |
 | E-PURITY | External execution/live stores/children in fn, or prohibited work in Pure contexts |
@@ -1211,7 +1211,9 @@ The next independent rows occur inside legal Flows, using Read/Adjust above; add
 
 | Input / environment | Required result | Profile |
 |---|---|---|
-| Multiple Flows without selected entry, or unknown entry | E-ENTRY, zero providers; no Main guessing | core entry |
+| Multiple root Flows including Main, no explicit entry | Select Main regardless of declaration order; default and explicit Main have identical build identity | core entry |
+| Multiple roots without Main, or unknown/non-Flow explicit choice | E-ENTRY, zero providers; no fallback for an invalid explicit choice | core entry |
+| Root has Main/main; explicit other root; only an imported module has Main | Only root Main has priority; explicit selection overrides it; imported Main never participates | core entry |
 | Main(x:number,y:string), `{positional:[2],named:{y:"a"}}` | x=2, y="a"; fix complete run input | core entry |
 | Missing y, duplicate x, unknown name, or string x | Host pre-run E-SCHEMA; no root/Claims/providers | core entry |
 | Invalid then valid durable EntryInput | Invalid rejects before begin/ID/journal; valid persists full input before work | durable entry |

@@ -38,7 +38,7 @@ flow Main(xs:list)->object {
 
 ```sh
 make build
-./lipc run -entry Main -parallel 4 -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+./lipc run -parallel 4 -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 # {"count":3,"values":[5,3,4]}
 ```
 
@@ -49,11 +49,11 @@ make build
 | `OFFSET` | 值为 `2` 的模块级不可变静态数据，`number` 是类型注解 | 能，声明带有 `export` |
 | `add` | 计算两数之和的纯函数 | 不能，默认私有 |
 | `Adjust` | 使用 `add` 和 `OFFSET` 的可复用 Flow 模板 | 能，声明带有 `export` |
-| `Main` | 创建 Claim、展开循环并汇总结果的 Flow 模板 | 不能；本次由 `-entry Main` 选为根入口 |
+| `Main` | 创建 Claim、展开循环并汇总结果的 Flow 模板 | 不能；根模块中的 `Main` 默认作为入口 |
 
 ### `OFFSET` 怎样连接模块与计算
 
-一个 `.lip` 文件就是一个模块。`OFFSET` 的大写只是命名习惯；它是代码中固定的数值，随源码进入构建快照。`export` 控制模块外的可见性，入口选择则由 `-entry` 控制。
+一个 `.lip` 文件就是一个模块。`OFFSET` 的大写只是命名习惯；它是代码中固定的数值，随源码进入构建快照。`export` 控制模块外的可见性，根模块的 `Main` 默认作为入口，`-entry` 可显式选择其他 Flow。
 
 项目根目录的另一个文件通过 `import lip "./examples/advanced/26_flows.lip" as adjust` 导入后，可以读取 `adjust.OFFSET`，也可以写 `x |> adjust.Adjust`。`adjust` 是导入者选的命名空间别名。被导入的 `Adjust` 始终使用**定义模块**里的 `OFFSET` 和私有函数 `add`，调用者的同名局部值不会改变它的计算。即使去掉 `OFFSET` 前的 `export`，本模块的 `Adjust` 仍可使用它，外部直接读取 `adjust.OFFSET` 才会被禁止。完整的双文件用法见[子 Flow、管道与静态模块](#子-flow管道与静态模块)。
 
@@ -63,7 +63,7 @@ make build
 
 本次运行依次建立这些工作与依赖：
 
-1. `-entry Main` 选择入口，JSON 输入把 `[3,1,2]` 绑定到 `xs`。输入验证通过后创建本次 run；`Main` 的实例创建**一个 `facts` Claim，供三轮共同追加**。
+1. 默认选择根模块的 `Main` 入口，JSON 输入把 `[3,1,2]` 绑定到 `xs`。输入验证通过后创建本次 run；`Main` 的实例创建**一个 `facts` Claim，供三轮共同追加**。
 2. `for` 的 source `xs` 求值一次，按原始索引展开三轮。每轮的 `result = x |> Adjust` 实例化自己的 `Adjust` 子图，各有独立的参数和结构身份。以第一轮为例，管道先固定 `3`，传给 `Adjust(value=3)`；其内部的 `value |> add(delta=OFFSET)` 再计算 `add(value=3, delta=2)`，得到 `5`。`add` 是当前节点内的纯值计算。
 3. 每轮的 `facts <+ result` 等待对应子图完整成功，再向共享 Claim 提交一条记录。三轮分别贡献 `5`、`3`、`4`，彼此可以交错执行。
 4. 最后的 `return` 完整读取 `facts`，等待所有贡献工作完成。快照按逻辑位置排列，本例就是第 0、1、2 轮的顺序；`row.value` 取出记录中的值，`len` 统计记录数。整个入口图成功后，Host 得到 `{"count":3,"values":[5,3,4]}`。
@@ -172,21 +172,21 @@ lipc learn -list
 
 ### 入口与成功结果
 
-文件可声明静态字面量 Data、纯 fn 和多个 Flow；根文件只有一个 Flow 时自动选为入口，多个时用 `-entry`。包括未选声明在内，整个源码闭包都须通过检查。
+文件可声明静态字面量 Data、纯 fn 和多个 Flow；未指定 `-entry` 时优先选择根模块的 `Main`；没有 `Main` 时，唯一的根 Flow 自动作为入口，否则必须显式指定。名称区分大小写，导入模块的 `Main` 不参与选择；显式 `-entry Name` 覆盖默认规则。包括未选声明在内，整个源码闭包都须通过检查。
 
 ```lip
 BASE:number = 2
 fn add_base(x:number)->number { x + BASE }
-flow Add(x:number)->number { return add_base(x) }
+flow Main(x:number)->number { return add_base(x) }
 flow Empty()->void {}
 ```
 
 保存为 `program.lip` 后：
 
 ```sh
-./lipc run -entry Add -input '{"x":3}' program.lip
+./lipc run -input '{"x":3}' program.lip
 # 5
-./lipc run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output program.lip
+./lipc run -entry-input '{"positional":[3],"named":{}}' -entry-output program.lip
 # {"kind":"value","value":5}
 ./lipc run -entry Empty -entry-output program.lip
 # {"kind":"void"}
@@ -366,7 +366,7 @@ fn twice(n:number)->number { n+n }
 `import lip "./lib/pricing.lip" as pricing` 在 `lipc repl -project DIR` 指定的项目内解析，默认使用当前目录。导入在执行前冻结完整来源闭包，直到 `:reset`；已有闭包保留其定义环境。补全不执行导入的代码。需要指定入口和输入并独立运行文件时，使用 `:run`：
 
 ```text
-:run -entry Main -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
+:run -input '{"xs":[3,1,2]}' examples/advanced/26_flows.lip
 :run -entry Add -entry-input '{"positional":[3],"named":{}}' -entry-output "path with spaces/program.lip"
 ```
 
@@ -431,7 +431,7 @@ hello
 ## 生成 Go 程序
 
 ```sh
-./lipc build -entry Main -o .build/flows examples/advanced/26_flows.lip
+./lipc build -o .build/flows examples/advanced/26_flows.lip
 ./.build/flows -input '{"xs":[3,1,2]}'
 # {"count":3,"values":[5,3,4]}
 

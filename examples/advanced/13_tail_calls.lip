@@ -8,6 +8,6 @@ fn odd(n: number) -> bool { if n == 0 { false } else { even(n - 1) } }
 fn indirect(n: number, callback: function) -> number {
     if n == 0 { 0 } else { callback(n - 1, callback) }
 }
-flow TailCalls() -> object {
+flow Main() -> object {
     return {sum: sum_to(100000, 0), even: even(100000), indirect: indirect(100000, indirect)}
 }

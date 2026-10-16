@@ -222,9 +222,11 @@ return。return 不提前跳过其他节点。分支/循环体不得 return。�
 void `main` Flow；根文件不能同时包含声明模式与顶层 statements，只有原有 fn 前缀可
 与 statements 共存；导入模块不得包含顶层 statements。仅有 import/普通 fn 且无
 statements 的根文件仍可产生旧式空 main，导入模块不产生隐式 main。显式声明可以有多个
-Flow，但一次 run 恰好选择一个入口：未指定入口且根模块只有一个 Flow 时使用它；有多个
-根模块 Flow 时必须由 Host/工具在运行前显式选择声明名，不按名字 Main/main 或声明顺序猜测。
-未选择、未知或非 Flow 的入口报 E-ENTRY。源码不增加入口关键字；未选为入口的 Flow
+Flow，但一次 run 恰好选择一个入口。Host/工具可在运行前显式选择根模块 Flow 声明名。
+未显式选择时，优先选择根模块中名称恰为 `Main` 的 Flow；不存在该 Flow 时，仅有一个
+根 Flow 则选择它，否则报 E-ENTRY。名称区分大小写，`main` 没有默认优先级；声明顺序
+不影响选择。显式选择覆盖默认规则，未知或非根 Flow 的入口报 E-ENTRY，不回退到默认入口。
+源码不增加入口关键字；未选为入口的 Flow
 仍是可复用定义，完整 source set 均须通过静态检查。导入模块的 Flow 不参与根入口
 数量判断，也不自动成为入口；含静态数据/export 而无根 Flow 的声明文件报 E-ENTRY。
 隐式 main 的入口规则不变。
@@ -1731,7 +1733,7 @@ operation；Flow 中访问数据库、其他网络服务、时钟或日志仍须
 同一 Program 可以供多个请求复用。路由采用带显式方法的 Go ServeMux pattern，可含路径参数；
 不存在的路由、方法不匹配和路由重定向由 Host 的路由器处理。所有路由先完成编译、
 入口检查和冲突检查，再开始接收请求。路由绑定一个按第 2 节选定入口的 Program；
-多 Flow 源码的入口由启动配置显式选择，请求不能临时改选入口或选择任意源码、operation
+多 Flow 源码的入口在启动时按第 2 节的默认规则或显式配置选定，请求不能临时改选入口或选择任意源码、operation
 或 Host registry。子 Flow 只属于本次请求的父 run，不再创建请求或 HTTP 响应。
 缺少显式方法的路由配置报 E-HTTP。Host 可以复用 ServeMux 的路径与参数匹配规则，
 但必须自行按显式配置完成方法分派，并生成 405 和 Allow；不得直接采用 ServeMux 的
@@ -1966,7 +1968,7 @@ Host 数据边界和持久 journal 的实现验收。
 | E-NAME / E-DUPLICATE | 未声明名、前向值引用、重复声明/对象字段 |
 | E-SHADOW-CLAIM / E-RESERVED | 遮蔽 Claim 身份或重定义保留名称 |
 | E-TYPE / E-ARITY | 可静态确定的类型/参数不符 |
-| E-ENTRY | 多 Flow 未指定入口，或入口未知/不是 Flow；运行前拒绝 |
+| E-ENTRY | 无默认入口且未显式选择，或入口未知/不是根 Flow；运行前拒绝 |
 | E-MODULE / E-MODULE-CYCLE / E-EXPORT | 缺失/非法/锁定不符的模块、模块依赖环或访问未导出成员 |
 | E-FLOW-CYCLE | 具名 Flow 的直接或间接调用环，不因常量未选分支豁免 |
 | E-PURITY | fn 中的外部执行/活动 store/子 Flow，或纯参数/guard/proposal/join 位置含不允许的执行 |
@@ -2239,7 +2241,9 @@ flow Adjust(value:number, delta:number) -> number {
 
 | 输入/固定环境 | 预期判定 | 层/模式 |
 |---|---|---|
-| 多 Flow 文件未选择入口，或选择未知名 | E-ENTRY，provider 调用零次；不猜测 Main | core 入口 |
+| 多 Flow 根文件包含 `flow Main`，未显式选择入口 | 选择 Main，与声明顺序无关；默认与显式选择 Main 的构建身份一致 | core 入口 |
+| 根文件无 Main 且有多个 Flow，或显式选择未知/非 Flow 名 | E-ENTRY，provider 调用零次；不回退到默认入口 | core 入口 |
+| 根文件同时有 Main/main；显式选择另一个根 Flow；仅依赖模块有 Main | 默认仅优先根 Main；显式选择覆盖默认；依赖 Main 不参与根入口选择 | core 入口 |
 | 入口 `flow Main(x:number,y:string)->object`，输入 `{positional:[2],named:{y:"a"}}` | x=2、y="a"；完整 EntryInput 固定为 run 输入 | core 入口 |
 | 同入口输入缺 y、重复绑定 x、未知名或将 x 传为 string | Host 运行前 E-SCHEMA；无节点根错误/Claim/provider 调用 | core 入口 |
 | durable 新 run 的 EntryInput 非法；另一次提交合法输入 | 前者在 begin 前拒绝，不分配 run_id、不建立持久 run/journal；后者验证通过后 begin，登记完整输入再执行 | durable 入口 |

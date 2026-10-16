@@ -396,11 +396,11 @@ var course = []lesson{
 		task:     "This lesson selects Add. Compute n + OFFSET using static data; inputs exercise positional and named arguments.",
 		template: "OFFSET:number=2\nflow Add(n:number)->number{return __ANSWER__}\nflow Empty()->void{}",
 		solution: "n + OFFSET",
-		hint:     "Multiple root Flows require an explicit entry: -entry Add. EntryInput is {positional:[],named:{}}; bind each parameter exactly once. Add returns EntryOutput {kind:\"value\",value:result}; Empty returns {kind:\"void\"}.",
+		hint:     "Main is the default root Flow. Without Main, a sole root is selected automatically; multiple roots need -entry Add here. EntryInput is {positional:[],named:{}}; bind each parameter exactly once. Add returns EntryOutput {kind:\"value\",value:result}; Empty returns {kind:\"void\"}.",
 		cases:    []lessonCase{{`{"positional":[3],"named":{}}`, "5"}, {`{"positional":[],"named":{"n":-2}}`, "0"}},
 	},
 	{
-		id: "flows", title: "Child Flows and pipelines", entry: "Main",
+		id: "flows", title: "Child Flows and pipelines",
 		task:     "Call Double, then use pure adjust to add 3. Combine both stages in one pipeline.",
 		template: "fn adjust(value:number,delta:number)->number{value+delta}\nflow Double(value:number)->number{return value*2}\nflow Main(n:number)->number{return __ANSWER__}",
 		solution: "n |> Double |> adjust(delta=3)",

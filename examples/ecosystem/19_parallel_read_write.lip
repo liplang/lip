@@ -3,7 +3,7 @@
 # Recommended structure: parallel computation -> complete read -> sequential writes.
 import go "strings" as text
 import host "console" as console
-flow ReadThenWrite() -> list {
+flow Main() -> list {
     facts = claim()
     for name in ["ada", "lin", "sam"] parallel {
         upper = perform effect text.ToUpper(name)

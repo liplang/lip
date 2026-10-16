@@ -5,7 +5,7 @@ fn make_adder(offset: number) -> function {
     fn(x: number) -> number { x + offset }
 }
 fn multiply(a: number, b: number) -> number { a * b }
-flow Closures() -> object {
+flow Main() -> object {
     add_ten = make_adder(10)
     # User functions accept named arguments after all positional arguments.
     return {mapped: map([1, 2, 3], add_ten), product: multiply(4, b=5)}

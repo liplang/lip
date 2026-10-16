@@ -149,6 +149,57 @@ func TestEntryOutputCompletion(t *testing.T) {
 	}
 }
 
+func TestMainDefaultEntrySelection(t *testing.T) {
+	for _, test := range []struct{ name, source, entry, want, code string }{
+		{"Main-after-helper", `flow Helper()->number{return 1} flow Main()->number{return 2}`, "", "2", ""},
+		{"Main-before-helper", `flow Main()->number{return 2} flow Helper()->number{return 1}`, "", "2", ""},
+		{"case-sensitive", `flow main()->number{return 1} flow Main()->number{return 2}`, "", "2", ""},
+		{"explicit-override", `flow Main()->number{return 2} flow Other()->number{return 3}`, "Other", "3", ""},
+		{"sole-root", `flow Only()->number{return 4}`, "", "4", ""},
+		{"Main-function-is-not-a-Flow", `fn Main()->number{1} flow Only()->number{return 4}`, "", "4", ""},
+		{"ambiguous-without-Main", `flow main()->number{return 1} flow Other()->number{return 2}`, "", "", "E-ENTRY"},
+		{"invalid-explicit-no-fallback", `flow Main()->number{return 2}`, "Missing", "", "E-ENTRY"},
+		{"non-Flow-explicit-no-fallback", `fn helper()->number{1} flow Main()->number{return 2}`, "helper", "", "E-ENTRY"},
+		{"unselected-Flow-still-checked", `flow Main()->number{return 2} flow Other()->number{return missing}`, "", "", "E-NAME"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, err := CompileWithOptions(test.source, Host{}, CompileOptions{Entry: test.entry})
+			if test.code != "" {
+				if d, ok := err.(*Diagnostic); !ok || d.Code != test.code {
+					t.Fatalf("got %v, want %s", err, test.code)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := p.Run(context.Background(), nil, Options{})
+			if err != nil || display(t, report.Output) != test.want {
+				t.Fatal(report, err)
+			}
+		})
+	}
+	// Imported Main never resolves an otherwise ambiguous root entry.
+	set := SourceSet{Root: "root.lip", Sources: map[string]Source{
+		"root.lip": {Version: "1", Text: "import lip \"./lib.lip\" as lib\nflow First()->number{return 1}\nflow Second()->number{return 2}"},
+		"lib.lip":  {Version: "1", Text: `export flow Main()->number{return 9}`},
+	}}
+	if _, err := CompileSourceSet(set, Host{}, CompileOptions{}); err == nil || err.(*Diagnostic).Code != "E-ENTRY" {
+		t.Fatal("imported Main selected as root", err)
+	}
+	root := set.Sources[set.Root]
+	root.Text = "import lip \"./lib.lip\" as lib\nflow Only()->number{return 4}"
+	set.Sources[set.Root] = root
+	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "4" {
+		t.Fatal("imported Main displaced sole root", report, err)
+	}
+}
+
 func TestDeclarationFilesAndEntrySelection(t *testing.T) {
 	source := `flow First(CONFIG:number)->object {return {local:CONFIG,static:read_config()}}
 export fn read_config()->object {CONFIG}

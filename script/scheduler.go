@@ -63,7 +63,7 @@ type Program struct {
 	build  Value
 }
 type CompileOptions struct {
-	Entry string // Empty selects the sole root Flow, or the implicit main.
+	Entry string // Empty selects root Main, otherwise the sole root Flow or implicit main.
 }
 type Report struct {
 	Output Value

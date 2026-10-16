@@ -1,6 +1,6 @@
 # Default route: GET /{$}. Triple quotes preserve HTML indentation and newlines.
 # This page is static; render dynamic user content through an automatically escaping template Host.
-flow Home(request: object) -> object {
+flow Main(request: object) -> object {
     return {
         status: 200,
         headers: {"Content-Type": "text/html; charset=utf-8"},

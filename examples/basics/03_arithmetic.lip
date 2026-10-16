@@ -6,7 +6,7 @@
 # Negative exponents are allowed: 2 ** -3 = 1 / 8.
 # */ is logarithm with the base on the right: 8 */ 2 = 3; 3 and 3.0 are the same number.
 # */ has multiplication precedence and associates left: 8 */ 2 * 4 = (8 */ 2) * 4 = 12.
-flow Arithmetic() -> object {
+flow Main() -> object {
     return {
         sum: 2 + 3 * 4,
         grouped: (2 + 3) * 4,

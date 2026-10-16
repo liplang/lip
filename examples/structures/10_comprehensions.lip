@@ -1,7 +1,7 @@
 # [result for name in list if condition] is a filtered comprehension.
 # The if clause is optional; a false guard skips evaluation of that result expression.
 # range(n) produces 0 through n-1 in a schedule-independent order.
-flow Comprehensions() -> object {
+flow Main() -> object {
     evens = [x for x in range(8) if x % 2 == 0]
     reciprocals = [1 / x for x in [0, 2, 4] if x != 0]
     return {evens: evens, reciprocals: reciprocals}

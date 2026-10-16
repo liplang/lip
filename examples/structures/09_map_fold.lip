@@ -1,7 +1,7 @@
 # map transforms a finite list in order; fold carries an accumulator through that order.
 # Callbacks must be pure LIP functions; use carry for external calls.
 fn add(a: number, b: number) -> number { a + b }
-flow ListCalculation() -> object {
+flow Main() -> object {
     squares = map([1, 2, 3, 4], fn(x: number) -> number { x * x })
     total = fold(squares, 0, add)
     return {squares: squares, total: total}

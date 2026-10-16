@@ -3,7 +3,7 @@
 # The Host registers both operations with parameter/result schemas and Concurrent ReadOnly contracts.
 import python "statistics" as stats
 import go "crypto/sha256" as sha
-flow GoAndPython() -> object {
+flow Main() -> object {
     xs = [1, 2, 3]
     # effect constructs a request; perform executes it and records the result by CallID.
     mean = perform effect stats.mean(xs)
