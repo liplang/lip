@@ -4,6 +4,8 @@
 
 The [LIP 1.1 draft specification](spec/LIP-1.1-SPEC.en.md) is the language authority. This repository implements entries, values/pure functions, control structures, structured Flows, static modules, Claims, graph scheduling, and a unified Host boundary through interpretation and actual Go generation. This guide maps specification sections to repeatable regression evidence. HTTP is optional; the optional durable profile is unimplemented.
 
+The 1.1 purity/NaN/infinity additions use the same interpreter, Go generation, and REPL paths. `Spec11PurityScopesAndCallIDs` checks nested marker scope, callbacks, recursion, unique calls and replay; `Spec11NonConcurrentAdmission` checks serialization across runs while waiters yield. `Spec11NonFiniteSemanticsInterpreterAndGo`, `Spec11InfinityErrorsInterpreterAndGo`, `Spec11CanonicalAndTransport`, `Spec11NativeAdaptersAndGeneratedEntry`, and `Spec11BoundariesReplayAndErrors` cover arithmetic, canonical identity, strict c-hex, Python/Go adapters, EntryInput/EntryOutput, HTTP rejection, and saved closures. Default JSON is unchanged for finite Data; CLI/generated programs opt into c-hex with `-data-encoding`. No native purity proof or durable recovery is claimed.
+
 ## Specification coverage
 
 Tests live in `tests/`. Names below omit the common `Test` prefix.

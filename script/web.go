@@ -433,7 +433,7 @@ func httpResponseData(v Value, limit int64) (httpResponse, error) {
 		var err error
 		response.body, err = EncodeJSON(json)
 		if err != nil {
-			return httpResponse{}, err
+			return failure("invalid HTTP JSON: " + err.Error())
 		}
 		if response.headers.Get("Content-Type") == "" {
 			response.headers.Set("Content-Type", "application/json")

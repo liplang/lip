@@ -55,11 +55,13 @@ Go/Python 使用同一调用协议。持久状态、事务、重试、业务汇�
 ### 0.1. 与 1.0 的关系
 
 本草案定义 1.1 的完整语言合约；[1.0 规范](LIP-1.0-SPEC.md)保留为历史版本。
-除新增核心函数名称的占用外，已有 1.0 合法程序的值与执行规则继续成立。新增以下能力：同一 run 内 Flow 接受和返回
+除新增名称的占用与明确的非有限数输入/解析扩展外，已有 1.0 合法程序的有限值与执行规则继续成立。新增以下能力：同一 run 内 Flow 接受和返回
 任意普通值；显式实参、perform 操作数和管道额外参数按调用方上下文求值，支持嵌套调用；静态子 Flow
-返回请求使用独立的返回 Ops 摘要；fn 允许第 3.2 节不反馈计算的诊断输出。Flow 本身仍不是值，调用图仍无环，fn 保持计算结果与业务效果的纯性。
-新增核心函数 print、log、telemetry 不可重定义；旧程序若将这些名字用于自定义绑定或声明，须改名。
-本草案不改变 Host/入口协议/Claim 的 Data 编码，不引入 effect<T>、动态 Flow 或共享 store。
+返回请求使用独立的返回 Ops 摘要；fn 允许第 3.2 节不反馈计算的诊断输出和第 10.3 节以 @{...} 显式承诺纯性的原生调用；第 3.3 节引入 number 值 nan、inf 与 -inf。
+Flow 本身仍不是值，调用图仍无环，fn 的计算结果与业务效果纯性以作者履行第 10.3 节承诺为前提。
+新增核心函数 print、log、telemetry 不可重定义，nan、inf 为保留字；旧程序若使用这些名字声明名称，须改名。
+有限 Data 的规范编码和原有 JSON 传输保持不变；NaN 与正负无穷增加规范数值编码及第 16.6 节显式无损传输。
+本草案不引入 effect<T>、动态 Flow 或共享 store。
 新增表达能力不保证重构前后源码身份相同，也不把动态 effect 参数强化为已知操作集合。
 原生适配的来源分析必须区分输入与实际返回值；未被返回的原生实参不得污染纯结果，
 同一静态返回结构的来源不得因声明次序或私有名称改变。来源信息不授予并行权限。
@@ -69,8 +71,8 @@ Go/Python 使用同一调用协议。持久状态、事务、重试、业务汇�
 
 | 对象 | 规则 |
 |---|---|
-| Data | null、bool、有限 binary64 number、UTF-8 string、list、string-keyed object |
-| fn | 捕获不可变值的纯闭包；允许第 3.2 节单向诊断；支持递归、互递归和函数值 |
+| Data | null、bool、number（有限 binary64、正负无穷或规范 NaN）、UTF-8 string、list、string-keyed object |
+| fn | 捕获不可变值的纯闭包；允许第 3.2 节单向诊断和第 10.3 节 @{...} 显式承诺纯性的原生调用；支持递归、互递归和函数值 |
 | effect | 已解析 operation 与已固定 Data 参数组成的不可变 proposal |
 | Flow | 具名图定义；不可变绑定、控制结构和子 Flow 调用降低得到依赖图；不是普通值 |
 | Claim store | 一次 Flow run 内只通过 join 增长的信息槽位 |
@@ -96,7 +98,7 @@ Flow 定义不属于 V 或 Data，也不是 function。不能把 Flow 放入容�
 语句。lexer 保留换行，parser 按上下文处理；不根据下一行运算符自动续行。
 
 标识符为 `[A-Za-z_][A-Za-z0-9_]*`。保留词为 `import as flow fn return if else match
-for in parallel break continue with next effect perform export true false null void`。`go/python/host/lip` 在
+for in parallel break continue with next effect perform export true false null nan inf void`。`go/python/host/lip` 在
 import 后为上下文关键字；类型名只在类型/pattern 位置有专用含义。`claim`、import alias
 与第 3 节核心函数名不得重定义。其他同一作用域的重复声明为静态错误。
 string 使用普通双引号 `"..."` 或 ASCII 三引号 `"""..."""`。普通字符串的裸换行与
@@ -130,10 +132,10 @@ fn_decl    ::= "fn" id params "->" type fn_body padding
 flow_decl  ::= "flow" id params "->" (type | "void") block padding
 data_decl  ::= id ":" type "=" static_data decl_end
 decl_end   ::= sep | EOF
-static_data ::= literal | ("+" | "-") number
+static_data ::= literal | ("+" | "-") (number | "inf")
               | "[" [static_data ("," static_data)* [","]] "]"
               | "{" [static_field ("," static_field)* [","]] "}"
-static_field ::= (id | string) ":" static_data
+static_field ::= (field_name | string) ":" static_data
 params     ::= "(" [parameter ("," parameter)* [","]] ")"
 parameter  ::= id ":" type
 type       ::= "null" | type_name ["?"]
@@ -159,7 +161,7 @@ concrete_type ::= "bool" | "number" | "string" | "list" | "object"
 expr       ::= pipeline
 pipeline   ::= or ("|>" stage)*
 stage      ::= static_target ["(" [named_args [","]] ")"]
-static_target ::= id | id "." id
+static_target ::= id | id "." field_name
 pipeline_stmt ::= or "|>" stage ("|>" stage)*
 or         ::= and ("||" and)*
 and        ::= equality ("&&" equality)*
@@ -171,7 +173,7 @@ unary      ::= ("!" | "-" | "+") unary | power
 power      ::= power_base ["**" unary]
 power_base ::= perform | proposal | postfix
 postfix    ::= primary suffix*
-suffix     ::= "(" [arguments [","]] ")" | "." id
+suffix     ::= "(" [arguments [","]] ")" | "." field_name
              | "[" (expr | slice_spec) "]"
 slice_spec ::= [expr] ":" [expr] [":" [expr]]
 arguments  ::= positional_args ["," named_args] | named_args
@@ -187,11 +189,12 @@ primary    ::= literal | id | "(" expr ")" | list | object | value_block
 if_expr    ::= "if" expr value_block "else" (value_block | if_expr)
 proposal   ::= "effect" operation "(" [arguments [","]] ")"
 perform    ::= "perform" (proposal | postfix)
-operation  ::= id ("." id)*
+operation  ::= id ("." field_name)*
+field_name ::= id | "nan" | "inf"
 call       ::= postfix                 # last suffix must be an argument list
-fn_body    ::= "{" padding (pure_stmt sep)* fn_tail padding "}"
+fn_body    ::= ["@"] "{" padding (pure_stmt sep)* fn_tail padding "}"
 fn_tail    ::= ["return"] expr
-pure_stmt  ::= id "=" expr | call | pipeline_stmt | if_stmt | match_stmt | for_stmt
+pure_stmt  ::= id "=" expr | call | perform | pipeline_stmt | if_stmt | match_stmt | for_stmt
              | "break" | "continue"
 local_stmt ::= id "=" expr | call | perform | pipeline_stmt | if_stmt | match_stmt | for_stmt
 value_block ::= "{" padding (local_stmt sep)* expr padding "}"
@@ -207,8 +210,8 @@ arm_expr   ::= patterns ["if" expr] "=>" expr
 list       ::= "[" [expr ("," expr)* [","]] "]"
              | "[" expr "for" id "in" expr ["if" expr] "]"
 object     ::= "{" [field ("," field)* [","]] "}"
-field      ::= (id | string) ":" expr
-literal    ::= number | string | "true" | "false" | "null"
+field      ::= (field_name | string) ":" expr
+literal    ::= number | string | "true" | "false" | "null" | "nan" | "inf"
 ```
 
 file 的分支按模块顶层的声明种类唯一选择：出现任一 export、flow 声明或 data_decl
@@ -220,7 +223,8 @@ file 的分支按模块顶层的声明种类唯一选择：出现任一 export�
 
 `pure_stmt` 中嵌套 block 的语句也必须属于 pure_stmt，不允许 return。fn 的末尾 return
 是唯一结果出口，expression 简写等价于末尾 return。fn 不允许 claim 声明/读取/join、
-perform 或子 Flow 调用，但允许纯粹构造 effect。即使被调用 Flow 的效果上界为 Pure，
+子 Flow 调用；允许构造 effect。普通 `{...}` 函数体不得 perform；只有 `@{...}` 函数体
+可按第 5、10.3 节显式承诺原生调用纯性后 perform。即使被调用 Flow 的效果上界为 Pure，
 fn 中调用它仍为 E-PURITY；结果类型为 function/effect 时也须满足纯性。
 fn_body 由局部纯语句加 fn_tail 组成；尾部 return 可省略。
 具名 fn/Flow 的签名先统一收集，声明顺序不限制具名调用；fn 的递归/互递归保持原规则，
@@ -292,7 +296,7 @@ break/continue 按最近普通循环解释，不属于 carry_exit。
 子 Flow 的显式实参可以是任意普通值表达式，包括函数、effect、包含它们的容器、
 perform 或其他子 Flow 调用。实参在调用方的局部游标内按源码顺序求值，各自完整成功
 后才求值下一项；全部实参完成且注解验证通过后才实例化子图。未选分支不求值实参。
-fn、guard、proposal/join RHS 等纯位置仍不得通过实参隐藏 perform 或子 Flow 调用。参数仍使用位置在前、命名在后的绑定规则，没有默认值、隐式展开
+fn、guard、proposal/join RHS 等纯位置仍不得通过实参隐藏非 Pure perform 或子 Flow 调用。参数仍使用位置在前、命名在后的绑定规则，没有默认值、隐式展开
 或可变参数。
 
 `|>` 的优先级低于 `||`，按从左到右的阶段顺序组合。右侧 stage 必须静态解析为具名
@@ -339,7 +343,7 @@ return 值。`|>` 不解释业务 Result，不自动解包 `{ok:false}`、截断
 
 管道在语法上可出现于任何 expr 位置，也可作为独立语句；纯性、类型和 Data 约束递归
 作用于整条管道。guard、proposal/join RHS、carry 出口及 fn body 中可使用纯 fn/核心阶段，
-不得借括号、容器或嵌套 block 引入 perform/Flow 调用。`ok && x |> F` 按
+不得借括号、容器或嵌套 block 引入非 Pure perform 或 Flow 调用。`ok && x |> F` 按
 `(ok && x) |> F` 分组；`x |> F == y` 为 E-PARSE，比较阶段结果须写 `(x |> F) == y`。
 建议对未加括号的布尔运算与管道混用给出第 15 节的 W-PIPE-PRECEDENCE。
 void Flow 只允许作为独立调用
@@ -368,8 +372,8 @@ SourceID。Host 可以从本地文件或预先提供的源码表解析，不得�
 同一 SourceID 只解析一次，不因多个 alias/导入者复制声明或执行代码。全部静态 import
 组成模块依赖图，直接/间接依赖环报 E-MODULE-CYCLE，即使引用仅出现在未选代码中。
 依赖模块可以只含 import 和声明，不要求 Flow；依赖模块顶层不得含 statements 或任何
-求值动作。其中的 perform 和 claim 声明只能出现在 Flow body 的合法位置，导出的 Flow 也
-遵守相同规则。顶层调用不因结果被丢弃而成为声明。根源码仍遵守第 2 节的显式/隐式
+求值动作。perform 可出现在 @{...} fn 或 Flow body 的合法位置，前者适用第 10.3 节的显式承诺；
+claim 声明只允许在 Flow body，导出的定义也遵守相同规则。顶层调用不因结果被丢弃而成为声明。根源码仍遵守第 2 节的显式/隐式
 入口规则。
 
 声明默认私有；`export` 只修饰模块顶层的 fn、Flow 或静态 Data 声明，不能修饰局部
@@ -379,7 +383,7 @@ binding、import 或 namespace。模块成员只通过显式 alias 访问，不�
 
 `export TAX_RATE:number = 0.1` 声明不可变静态 Data。初始化只接受第 2 节 static_data
 字面量树，不含名称引用、函数调用、proposal、Flow 或其他求值操作；依照普通值规则
-检查类型、有限数、Unicode、重复键和 Data 边界。静态数据在模块签名收集后可被本模块
+检查类型、number（含 nan、inf 与 -inf）、Unicode、重复键和 Data 边界。静态数据在模块签名收集后可被本模块
 定义前向引用，不能重新赋值。解析/验证与实际内存成本仍受构建预算约束，不表示免费
 加载；它不创建 run 或执行 Host。
 
@@ -492,8 +496,8 @@ bool 与 number 不相等。对象字段/索引不产生隐式绑定，重复 ob
 没有其他隐式类型转换。参数、字段、元素、算术子表达式从左到右求值；Error 后不继续
 求值右侧。`&&`、`||`、if/match 未选分支不求值。
 
-number 为有限 IEEE 754 binary64；`-0` 规范化为 `0`。基本四则按 binary64 的 round-to-
-nearest/ties-to-even 求值，禁止浮点重结合或影响结果的隐式 FMA。除零、非有限结果报
+number 为 IEEE 754 binary64，含第 3.3 节的正负无穷与规范 NaN；`-0` 规范化为 `0`。以下数值域规则适用于有限操作数；非有限操作数先按第 3.3 节处理。基本四则按 binary64 的 round-to-
+nearest/ties-to-even 求值，禁止浮点重结合或影响结果的隐式 FMA。有限操作数除零、产生非有限结果报
 `E-NUMBER`。`a // b` 为精确数学商向负无穷取整后的 binary64 值；`a % b` 是与该取整
 对应的数学余数，舍入后必须满足 b>0 时 `[0,b)`、b<0 时 `(b,0]`。若舍入等于排除的
 边界 b，取 `nextafter(b,0)`；零规范化为 0。这里 a、b 是两个 number 操作数，
@@ -503,7 +507,7 @@ nearest/ties-to-even 求值，禁止浮点重结合或影响结果的隐式 FMA�
 `a ** b` 为实数幂，`a */ b` 为以右操作数 b 为底的实数对数。两者只接受两个 number，
 类型不符报 E-TYPE。幂的约定为 `0 ** 0 = 1`；零底数的负指数、负底数的非整数指数报
 E-NUMBER。这里“整数指数”指存储的 binary64 值精确为整数，不受索引安全整数范围限制。
-对数要求 a>0、b>0 且 b!=1，否则报 E-NUMBER；合法输入中 `1 */ b = 0`、`a */ a = 1`。
+对数要求 a>0、b>0 且 b!=1，否则报 E-NUMBER；有限合法输入中 `1 */ b = 0`、`a */ a = 1`。
 超出有限 number 范围的结果报 E-NUMBER；允许次正规结果和下溢为零，并规范化负零。
 两者使用第 16.5 节固定的 binary64 参考算法，近似实数运算，不承诺正确舍入；
 不得直接替换为随平台或库版本变化的 pow/log。数学上相等的不同表达式未必逐位相等。
@@ -574,7 +578,7 @@ Host 资源按其注册的原生索引协议访问。
 | 签名 | arity | 参数/结果与规则 |
 |---|---|---|
 | len(value) | 1 | string/list/object → number 长度；string 按 Unicode 标量计数 |
-| str(value) | 1 | Data → string；string 原值，其余为无空白规范 JSON |
+| str(value) | 1 | Data → string；string 原值，其余为无空白规范显示；含非有限数时按第 3.3 节扩展 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | 安全整数、非零 step → 半开 number list；默认 start=0、step=1 |
 | map(xs,f) | 2 | list、纯一元 function → 按输入顺序的新 list |
 | fold(xs,seed,f) | 3 | list、V、纯二元 function → V；严格左折叠，空 list 返回 seed |
@@ -585,7 +589,7 @@ Host 资源按其注册的原生索引协议访问。
 | has(o,k) | 2 | object、string → bool；缺键返回 false |
 | put(o,k,v) | 3 | object、string、V → 增加/替换该键的新 object |
 | split(s,separator) | 2 | string、非空 string → string list；左到右非重叠，保留空段 |
-| parse_number(s) | 1 | string → 有限 number；完整文本转换，详见下文 |
+| parse_number(s) | 1 | string → number；有限数文本或恰为 "nan"、"inf"、"+inf"、"-inf"，完整文本转换，详见下文 |
 
 核心函数不接受命名参数；直接可知时静态 E-ARITY，动态核心函数值调用时同样验证。
 它们可以作为纯 function 值传递。map 的 f 接受一个元素，fold 的 f 接受
@@ -598,10 +602,10 @@ slice 与上述方括号切片完全同义，支持负边界、裁剪、null 省
 `slice(v,null,null,-1)` 等于 `v[::-1]`。has/put 不接受非 string 键；缺键 has 返回 false，put 添加字段。
 split 的 separator 为空时报 `E-VALUE`；`split("",",")` 为 `[""]`，
 `split("a,,b,",",")` 为 `["a","","b",""]`。这些操作按声明 arity 检查，没有隐藏参数。
-parse_number 接受整段 ASCII 文本：可选一个 `+`/`-`，随后必须恰为第 2 节 number 词法。
-不接受空白、前导零、hex、NaN/Infinity 或尾部字符；非法文本/溢出报 E-VALUE，类型不符
+parse_number 接受整段 ASCII 文本：恰为小写 `"nan"`、`"inf"`、`"+inf"`、`"-inf"`，或可选一个 `+`/`-` 后恰为第 2 节 number 词法。
+不接受空白、前导零、hex、`"NaN"`、`"+nan"`、`"-nan"`、Infinity 或尾部字符；非法文本/溢出报 E-VALUE，类型不符
 报 E-TYPE。nearest/ties-to-even、次正规数/下溢和零规范化与字面量一致，不使用 Host 的
-宽松数字 parser。`parse_number(str(n)) == n` 对所有核心 number 成立。
+宽松数字 parser。`parse_number(str(n)) == n` 对所有非 NaN number 成立；NaN 的往返用 is_nan 验证。
 
 列表过滤、缺键默认值、对象合并、字符串拼接及包含判断由纯函数组合这些操作实现。
 例如下列 filter/get/merge_objects 普通函数同时适用于 Flow 与其他 fn：
@@ -618,7 +622,7 @@ fn merge_objects(a: object, b: object) -> object {
 }
 ```
 
-规范 JSON number 按下述独立规则显示，而不使用 Host 的默认打印：零为 `0`。对非零
+有限 number 的规范 JSON 按下述独立规则显示，而不使用 Host 的默认打印：零为 `0`。对非零
 binary64 的精确数学值 v，在能 round-trip 为 v 的十进制数 `m×10^e` 中选最少有效数字
 的 m（m 不含前导/末尾零）；再选与 v 精确距离最小者；仍平局则选绝对值较小者。
 设该十进制数的科学指数为 k：`-6≤k<21` 时输出无指数的普通十进制，否则输出一位整数
@@ -633,8 +637,9 @@ fingerprint（参数摘要）与身份使用第 16.1 节定义的带类型编码
 JSON 输入若含重复 object 键（包括解码后相同键）必须拒绝，不能由 parser 静默覆盖。
 
 fn 的 environment 只捕获不可变快照；可以结构共享不可变值，不要求每次调用物理深拷贝。
-创建闭包不得捕获活动 Claim store，也不得把外部原生 callable 包装为可在 fn 中直接执行的
-纯函数。不可变资源引用和请求值可以捕获、返回或跨子 Flow 传递；捕获不执行操作，实际
+创建闭包不得捕获活动 Claim store，也不得通过包装外部原生 callable 绕过统一 perform 边界；
+闭包内的原生调用同样必须使用第 10.3 节 @{...} 函数体显式承诺纯性。
+不可变资源引用和请求值可以捕获、返回或跨子 Flow 传递；捕获不执行操作，实际
 使用仍须 perform，并遵守原引用的所有权、权限和寿命。Flow 可以把读出的 Data 快照
 传入 fn；fn 内不访问活跃 store。
 `g = fn() -> list { facts }` 若 facts 是 store 名，静态报 `E-PURITY`，不在闭包创建时
@@ -646,8 +651,8 @@ fn 的 environment 只捕获不可变快照；可以结构共享不可变值，�
 本版的 Pure 指计算结果与业务效果的纯性：固定实参及不可变捕获后，纯计算的值、错误和
 控制选择不依赖诊断接收端。fn 可以产生本节规定的诊断输出；这不赋予任意外部执行权限。
 诊断流不是程序可读取的值、Claim 或共享状态。将诊断流也作为观测对象时，不承诺完整的
-引用透明或跨调度相同的输出次序。此规则不允许修改输入、读取时钟/随机/外部状态，或在
-fn 中 perform、调用 Flow。
+引用透明或跨调度相同的输出次序。诊断规则本身不允许修改输入、读取时钟/随机/外部状态或调用 Flow。fn 内原生调用的
+显式 @{...} 纯性承诺另按第 10.3 节，不由本节的诊断规则证明。
 
 | 核心函数 | arity | 参数与结果 |
 |---|---|---|
@@ -660,7 +665,7 @@ fn 中 perform、调用 Flow。
 检查与普通核心调用相同。log 不校验级别枚举。项目可用纯 fn 封装格式与字段。
 它们自身的计算效果为 Pure，不降低 RetOps 精度，不引入 barrier、provider 准入、CallID、
 Claim 或 journal 记录。实参的效果仍须完整合并：Flow 内 print 的实参若含 perform，
-该执行仍计入节点效果；fn 内同样的 perform 仍为 E-PURITY。
+该执行仍计入节点效果；普通 fn 内 perform 仍为 E-PURITY，@{...} 内按第 10.3 节的显式承诺计为 Pure。
 
 每次实际求值到合法诊断调用时进行一次发送尝试；正常路径返回 null。未选分支不发送，
 声明、补全、静态检查与构建不执行诊断。即使关闭输出，实参仍按正常调用顺序求值并检查；
@@ -693,6 +698,68 @@ flow Main()->number { return doubled(3) }
 ```
 
 本例在诊断开启、关闭或缓冲已满时均返回 6；诊断输出不属于该数值结果。
+
+### 3.3. NaN 与无穷数值
+
+`nan` 是不可重定义的 number 字面量，不是 null、string 或外部属性；可用于静态 Data、
+number/number?/any 注解、容器、Claim 和入口/Host 值。所有原生 quiet/signaling NaN 的
+符号与 payload 在进入 LIP 前统一为 binary64 bits `0x7ff8000000000000`；不得保留可观察的
+payload。`inf` 同样是不可重定义的 number 字面量，表示 binary64 正无穷（bits 0x7ff0000000000000）；
+`-inf` 是其一元负号形式（bits 0xfff0000000000000）。原生 NaN 与正负无穷可进入
+相同 Data 位置。不会把有限操作数的领域错误、除零或溢出静默变为 nan/inf。
+
+NaN 检测可由现有比较组合，无需新增核心函数。以下 is_nan 指普通辅助 fn，使用时自行声明：
+
+```lip
+fn is_nan(x:number)->bool { x != x }
+```
+
+- number 间比较时，任一操作数为 NaN 则 `==` 为 false，`!=` 为 true，`< <= > >=` 均为 false；
+  包括 `nan == nan` 为 false。容器结构比较递归遵守该规则，不能用对象身份或 C 字节
+  相同替代语言比较；遇到不可比较的 function/effect 仍按原规则报错。
+- 一元 `+nan`、`-nan` 均为 nan。二元运算先检查操作数类型；任一为 NaN 时，
+  `+ - * / // % */` 返回 nan，再无有限数域检查，所以 `nan / 0` 为 nan。
+  `**` 先处理指数为有限零或底数为有限 1 的情形并返回 1；否则任一 NaN 返回 nan。
+  因此 `nan ** 0`、`1 ** nan` 为 1，`0 ** nan`、`(-2) ** nan` 为 nan。
+  实参仍严格从左到右求值，`nan + fail("stop")` 仍失败。
+- NaN 不满足安全整数要求：索引/切片用 E-INDEX，range 用 E-VALUE；不能转换为宿主
+  整数。match 的 number 类型 pattern 匹配 NaN，nan 字面量 pattern 按相等规则不匹配
+  任何值；检测应使用 `is_nan(x)`，或 `number if is_nan(x)` guard。
+- `str(nan)` 恰为 `"nan"`；容器显示在相应数值位置递归使用裸 `nan`，如 `[nan]`。
+  除原样返回的顶层 string 外，仅含有限数的显示仍为普通 JSON。print/REPL 可使用此显示；协议不得将其
+  误当 JSON，不得静默替换为 null 或 string。无损传输按第 16.6 节。
+
+语言相等与身份一致性不同：C(nan) 固定（第 16.1 节）。同 JoinID 的同一 NaN 贡献重投
+幂等，同 CallID 的规范 NaN 实参可重放；与 null、string "nan" 或其他值均不合并。
+
+`inf` 与 `-inf` 的规则如下。运算先检查类型，再处理上述幂恒等式与 NaN，
+再处理本表，最后才进入有限数算法。`/ // %` 的零除数在 NaN 传播后总是报 E-NUMBER，
+包括 `inf / 0`；实参仍按通常顺序严格求值。
+
+| 情形 | 结果 |
+|---|---|
+| 比较与 pattern | 对每个有限 x，负无穷小于 x，x 小于正无穷；同号无穷相等，异号不等；NaN 仍无序；inf/-inf literal pattern 匹配同号无穷 |
+| 一元 `+ -` | 正号不变，负号交换无穷的符号 |
+| `+ - * /` 至少一个无穷操作数 | IEEE binary64 规则；同号无穷相减、异号无穷相加、零乘无穷、无穷除无穷为 nan；有限数除无穷为规范零 |
+| `a // b` 或 `a % b`，a 为无穷、b 非零 | nan，包括 b 也为无穷 |
+| a 有限、b 为无穷，`a // b` | a 非零且与 b 异号时为 -1，其他情形为 0 |
+| a 有限、b 为无穷，`a % b` | a 非零且与 b 异号时为 b，其他情形为 a，零仍规范化 |
+| `a ** b`，b 为无穷 | abs(a)==1 时为 1；abs(a)>1 时正无穷指数得 inf、负无穷指数得 0；abs(a)<1 时反之，含零底数 |
+| `a ** b`，a 为无穷、b 为有限非零数 | b<0 时为 0；b>0 时为 inf，仅 a 为负无穷且 b 为奇整数时为 -inf；非整数 b 得正 inf |
+| `a */ b`，含无穷 | 先要求 a>0、b>0、b!=1；a=b=inf 得 nan；仅 a=inf 时 b>1 得 inf、b<1 得 -inf；仅 b=inf 得 0 |
+
+abs 是描述规则的数学记号，不增加核心函数。已有 `a ** 0 = 1`、`1 ** b = 1`
+优先于 NaN/无穷规则；例如 `inf ** 0 = 1`、`(-1) ** inf = 1`、`0 ** -inf = inf`。
+有限操作数的负底数非整数幂仍为 E-NUMBER；有限数算法的溢出结果不转为 inf。
+整除与余数使用有限除数趋向指定符号无穷的单侧极限规则，与 Python 相同；
+不对无穷使用精确有理数算法，也不要求无穷情形满足有限余数恒等式。
+
+`str(inf)`、`str(-inf)` 分别为 "inf"、"-inf"，容器递归显示这些裸文本。
+parse_number 接受精确小写 "inf"、"+inf"、"-inf"，拒绝 "Inf"、"Infinity"。
+无穷不满足安全整数要求：索引/切片为 E-INDEX，range 为 E-VALUE，宿主整数参数转换拒绝；
+Go float32/float64 与 Python float 可传递其符号。普通 JSON 拒绝非有限数；无损协议见第 16.6 节。
+可用普通 `fn is_inf(x:number)->bool { x == inf || x == -inf }` 检测，无需新增核心函数。
+C 对正负无穷分别保留其 bits，Claim/journal 身份不会混淆符号、NaN、null 或 string。
 
 ## 4. 函数的计算能力与执行机
 
@@ -736,7 +803,7 @@ S 保存当前 Flow 实例中已声明 store 的身份；`Γ(x)=τ` 表示普通
 
 | 效果 ε | 含义 |
 |---|---|
-| Pure | 纯核心计算及第 3.2 节单向诊断，不执行外部业务操作 |
+| Pure | 纯核心计算、第 3.2 节单向诊断及第 10.3 节作者承诺纯性的 fn 计算；其业务纯性依赖承诺成立 |
 | ReadOnly | 外部读取；注册合约保证没有外部写入 |
 | Write | 可能改变外部状态的操作 |
 | Unknown | 无法证明实际操作集合或效果；按写入限制准入 |
@@ -744,13 +811,14 @@ S 保存当前 Flow 实例中已声明 store 的身份；`Γ(x)=τ` 表示普通
 Recorded 是 perform 观察的 journal 元数据，不是独立类型维度或传播到普通引用的标签。
 Unknown 的启动/并发限制等同 Write；幂等性是 Host 合约，不是单独的语言效果等级。
 Concurrent 是注册合约的 bool 标记；true 表示该 operation 允许多个调用重叠执行，
-false 表示按第 7 节的 barrier 规则串行。ReadOnly 本身不隐含 Concurrent=true。
+false 表示不得重叠调用：fn 外按第 7 节 barrier 规则调度，@{...} 内按第 10.3 节由 Host 串行准入。
+ReadOnly 和 @{...} 的作者承诺均不隐含 Concurrent=true。
 判定隐含一个本 run 固定的 operation registry Σ；registry 的 name/version/schema/
 效果合约在 run 内不可变，执行时 capability 的撤销可导致明确拒绝，不改变既有 proposal。
 `any` 为 V 的顶类型；`τ?` 表示 τ 或 null，`any?` 等于 any。list/object 注解约束外形，
 不隐含所有内容均是 Data。源类型只有第 2 节列出的裸类型和可选类型；`list<object>` 等
 表示数学描述，不是源语法。闭包值携带实际参数名/类型/arity/返回注解，裸 function
-参数不静态声明这些信息；所有语言 fn 天生纯。无法静态检查的 arity/参数/结果必须在
+参数不静态声明这些信息；所有语言 fn 在类型/效果判断中均为 Pure，原生部分必须使用第 10.3 节 @{...} 显式承诺。无法静态检查的 arity/参数/结果必须在
 调用时检查，不要求编译器从任意高阶函数推导完整签名。
 普通函数参数按声明名称和源码参数顺序绑定，先位置后命名；重复、缺少、未知参数及 arity
 不符报错。没有默认参数、隐式展开或可变参数。核心 range 的 arity 为 1/2/3。
@@ -778,8 +846,9 @@ operation 当作普通 callable；构造请求和真正执行的阶段按第 10 
 可静态确定的注解不符为 E-TYPE，信息不足时的动态不符为 E-SCHEMA。Host EntryInput/
 EntryOutput 按第 2.3 节独立验证 Data；不能把运行前拒绝伪装成节点错误。
 
-`Summary(F)` 表示 F 的所有可能 perform 的保守效果与 Concurrent 上界：直接 perform
-使用本节 Ops 规则，调用的子 Flow 使用其 Summary，再对全部分支、循环和节点合并。
+`Summary(F)` 表示 F 的保守执行效果与 Concurrent 上界：fn body 外的 perform 使用本节
+Ops 规则，语言 fn 调用的函数体按第 10.3 节为 Pure，调用的子 Flow 使用其 Summary，
+再合并全部分支、循环和节点；调用 fn 的实参仍按调用方上下文计入。
 调用图无环，因此可按被调用者先于调用者的顺序计算；不按常量 guard 删去候选路径。
 没有 perform 时为 Pure；有 Unknown 则保留 Unknown。Flow 的实际执行效果纳入调用方
 表达式/节点的 ε，读取其已完成普通值结果本身为 Pure。完整 Claim 读取的 producer
@@ -787,7 +856,7 @@ EntryOutput 按第 2.3 节独立验证 Data；不能把运行前拒绝伪装成�
 RHS）都不得包含结构化子 Flow 调用；纯 Flow 的 Summary 不授予
 它在这些位置中执行的资格。
 
-parallel 的接受条件必须检查子 Flow 内全部传递 perform 的规范 Ops，而不是只看返回
+parallel 的接受条件必须检查子 Flow 内全部传递的、位于 fn body 外的 perform 的规范 Ops，而不是只看返回
 类型或 Flow 名。仅 Pure/join/已证明 Concurrent ReadOnly 的子图可以进入 parallel；
 Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使用下述规范 Ops 和函数返回摘要；容器投影、动态函数调用和 carry 结果仍为 Unknown。
 
@@ -796,7 +865,8 @@ Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使�
 结论。`ε ∨ ε′` 表示两种效果的上确界。`Ops(p)` 是 p 可能指向的非空有限 operation 集合或 Unknown，其推导规则见本节下表。
 `EffectOf(Ops(p))` 在已知集合上取注册效果的最大值，Unknown 时为 Unknown；
 `ResultType(Ops(p))` 合并这些合约的结果类型，Unknown 时为 any。效果次序和类型
-合并规则在本节后文定义。这些辅助函数不是源函数，也不是 Claim join。
+合并规则在本节后文定义。这些辅助函数不是源函数，也不是 Claim join。`CallEffect(Ops(p))` 只在词法上的最近 fn body 为 @{...} 时取 Pure（第 10.3 节显式承诺），
+其他位置等于 `EffectOf(Ops(p))`。普通 fn body 中 perform 仍静态 E-PURITY。
 
 ```text
 Γ(x) = τ
@@ -809,23 +879,28 @@ Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使�
 
 Γ ; S ⊢ p : effect ! ε
 ──────────────────────────────────────────────────────────
-Γ ; S ⊢ perform p : ResultType(Ops(p)) ! (ε ∨ EffectOf(Ops(p)))
+Γ ; S ⊢ perform p : ResultType(Ops(p)) ! (ε ∨ CallEffect(Ops(p)))
 ```
 
 perform 在调用方游标中先完整求值请求表达式 p，再执行得到的请求；p 可以含子 Flow 或
 其他允许的求值，其效果与实际操作效果取上确界（记为 ∨）。求值 p 失败时不执行请求。
-这不放宽 effect 构造参数必须 Pure Data 的要求，也不允许在 fn 内 perform。
+这不放宽 effect 构造参数必须 Pure Data 的要求。@{...} 函数体中的 perform 无须证明 Ops
+或原生实现的纯性；作者通过该标记对实际操作作第 10.3 节承诺。普通 fn body 仍不允许
+perform，但可调用满足该承诺的 fn。fn 外的 guard、proposal/join
+RHS 和 carry 出口等 Pure 位置仍不允许直接 perform，但可以调用这样的 fn。
+调用 fn 的 callee 和实参在调用方上下文求值，不能因目标是 fn 就隐去其中的非 Pure 执行。
 
 ε 在复合表达式中取上确界：Pure<ReadOnly<Write<Unknown。引用一个已完成 binding 是
 读固定值，不重新观察其来源。因此一次 perform 的结果可以进入下一次 proposal。
-proposal 内不能再次 perform、查询即时状态或执行随机；这些值须先单独绑定。
+proposal 参数可调用 fn（含第 10.3 节原生调用）；fn body 外的外部读取、写入、即时状态和
+随机仍必须先单独绑定。perform 返回的 Data 不建立新的返回 Ops 信息。
 普通引用读取的是已固定值；S 中 store 名不是此标识符规则的对象。完整读取在所有 producer
 成功终结后成为 Pure Data 节点，带第 9 节的隐式依赖；live snapshot 为
 Recorded perform。这不把活动 store 误当成随时固定的变量。
 
 Ops 是 compiler 的辅助信息，不是 effect[Ops] 源类型，取非空有限 operation 集合或 Unknown。
-为保持独立实现对 parallel 的接受条件一致，本版仅使用下表的规范分析，不以私有优化
-或更强高阶推导放行规范分析得到 Unknown 的 perform。
+为保持独立实现对 fn body 外 parallel 的接受条件一致，本版仅使用下表的规范分析；
+@{...} 内的显式承诺不依赖 Ops 证明。fn 外不以私有优化或更强高阶推导放行规范分析得到 Unknown 的 perform。
 
 | proposal 值的产生路径 | Ops |
 |---|---|
@@ -843,6 +918,9 @@ Ops 是 compiler 的辅助信息，不是 effect[Ops] 源类型，取非空有�
 本身的 Pure 效果分开。只分析函数体尾表达式的 Ops；前面构造但未返回的请求不进入
 摘要。返回注解不证明具体操作，`any` 注解也不抹去可证明的返回 Ops。普通参数不携带
 调用者实参的 Ops；如 `fn identity(p:effect)->effect {p}` 的摘要为 Unknown。
+运行时调用元数据必须保留被调用 fn、闭包及动态回调内实际执行的 perform；语言 fn 的
+Pure 效果不能用来省略其准入、身份或 journal。RetOps 仍只描述返回请求：仅在 fn 内
+构造并返回请求，不会把调用者后来执行该请求的效果改为 Pure。
 
 `RetOps(F)` 是 Flow F 的最后 return 表达式的 Ops，与执行 F 的 `Summary(F)` 分开。
 Flow 调用图无环，按被调用者先于调用者的次序计算。返回直接请求或静态请求构造函数的
@@ -910,13 +988,13 @@ operation 合约并固定参数；构造时的注册/schema 错误不表示已�
 注解静态能验证时提前检查，否则运行时验证；不引入可书写 union 类型。不同 operation
 的结果 schema 同样按此保守合并；Ops 为 Unknown 时静态结果为 any，执行仍验证实际
 operation 的结果 schema。parallel 中每个 perform 必须按以上 Ops 规则证明
-所有 operation 为 Concurrent ReadOnly，否则静态 E-PARALLEL；不以“也许运行时安全”
+所有 operation 为 Concurrent ReadOnly（fn body 内的调用另按第 10.3 节），否则静态 E-PARALLEL；不以“也许运行时安全”
 放行。普通顺序/图节点允许 Unknown，在运行时注册、授权、schema 检查。
 
 对封闭纯环境使用小步机 `⟨e,ρ,κ⟩ → ⟨e',ρ',κ'⟩`：e 为当前表达式，ρ 为运行时的
 不可变名称/值环境，κ 为 continuation，即当前结果之后还需进行的计算和返回检查。
 `→` 表示一步归约，带撇号的量表示归约后的状态。操作数顺序、匹配次序和基础操作
-都已固定，所以纯小步关系是确定的。
+都已固定；含第 10.3 节调用时再固定第 13 节的 Host 应答，所以纯小步关系是确定的。
 
 尾调用规则中的 f 是语言闭包，vs 是按声明参数顺序绑定完成的实参值序列；body(f)、
 captures(f)、params(f) 分别为函数体、捕获环境和参数名序列，`params(f)↦vs` 表示
@@ -964,7 +1042,7 @@ bool，false 表示未选，Error 使整个 match 出错。type pattern 只使�
 声明 Concurrent 的 ReadOnly perform；禁止 Write、Unknown、转移外层图循环的
 break/continue 和跨迭代普通 binding 引用。允许节点内 carry 及其 break e/next e，
 也允许以节点内普通顺序 for 为目标的 break/continue，它们不转移 parallel 图循环。
-其中所有 perform 仍须证明 Concurrent ReadOnly；不能嵌套局部 parallel。
+其中 fn body 外的 perform 仍须证明 Concurrent ReadOnly，fn 内适用第 10.3 节；不能嵌套局部 parallel。
 多个迭代以自己的局部快照工作，不共享可变原生对象。
 
 ### 6.1. 携带值的顺序迭代
@@ -989,9 +1067,9 @@ next/break 的 e 必须 Pure，可引用已完成 perform 值；未选出口不�
 该表达式在当前图节点内由顺序执行机求值，和列表推导式一样不创建新的 global 节点。
 body 可局部绑定/if/match/顺序循环/perform，但不得声明或 join store，不得包含局部
 parallel。carry 可以出现在外层 parallel body 的节点内，合法性按第 6 节检查。
-在纯 fn 内执行时 perform 非法；在 Flow 内允许。节点效果仍取全部可能 perform 的
+在 @{...} fn 内执行时适用第 10.3 节显式承诺，普通 fn 内仍禁止 perform；在 Flow 内按上下文允许。节点效果按第 5 节取全部执行的
 上界，内部循环索引加入第 6.2 节定义的 EvalPath。fn 和 fold 回调保持纯性，外部操作
-只在 Flow 的节点局部执行。跨迭代的证据可携带为 s 中的普通 Data，再由独立语句 join。
+仍由所属图节点的局部游标执行，fn 不创建独立节点。跨迭代的证据可携带为 s 中的普通 Data，再由独立语句 join。
 
 ```text
 import python "application.llm" as llm
@@ -1013,8 +1091,8 @@ Data object，version 固定为 "1"，descriptor 为 ReadOnly、Concurrent=true�
 ### 6.2. 位置与调用身份
 
 独立节点可以并行；同一节点内表达式、参数和多个 perform 从左到右执行。列表推导式的
-source 为 list，元素在当前节点中按顺序求值；fn/map/fold 回调必须纯，不出现 perform
-或子 Flow 调用。
+source 为 list，元素在当前节点中按顺序求值；fn/map/fold 回调必须纯，直接原生调用
+须使用第 10.3 节 @{...} 函数体；不允许子 Flow 调用。
 列表推导式在 Flow 中可以含 perform，但并发只由图和显式 parallel for 引入。
 推导式先在外层环境求值 source 一次，再以每个元素建立作用域。可选 `if p` 对每个
 原始元素恰求值一次，必须为 Pure bool；false 跳过 body，true 才求值 body 并追加结果，
@@ -1091,14 +1169,37 @@ Earlier(a,b) iff Position(a) < Position(b) and not Ancestor(a,b)
 该容器的整体完成为前置。第 7 节按此关系构造 OrderAllows、barrier 和错误前置闭包。
 
 重放执行相同静态 perform 及相同动态元素使用
-相同 CallID；同一节点的不同 perform_site 不会冲突。纯 fn 内不存在 perform site。
+相同 CallID；同一节点的不同 perform_site 不会冲突。fn 内的 perform 使用下述调用路径扩展。
 两个相同参数的调用不会因此成为同一个 CallID；值 fingerprint 从不属于身份。
 同一子 Flow 定义被两个调用点、两个图循环迭代或两个 carry/推导式元素调用时，其
 子节点、join 和 perform 的完整身份均不同。被调用定义写在调用者之前或之后都不改变
-实例在父图中的排序：先比较调用前缀，再比较定义内部位置。不含子 Flow 的入口仍使用
-原来的 Position/EvalPath/JoinID/CallID，wire 结构无需版本切换。
+实例在父图中的排序：先比较调用前缀，再比较定义内部位置。不含子 Flow 的入口在 fn 外仍使用
+原来的 Position/EvalPath/JoinID/CallID；fn 内路径按下文扩展，wire 结构无需版本切换。
 StaticSite/Position 是 revision 内的身份；空行/注释编辑可移动后续 ordinal，新 revision
 不能用旧 snapshot id 对齐业务实体。跨 run 的业务 key 须另用显式 Data 字段。
+为区分 fn 的重复调用、递归与高阶回调，每个图节点的局部求值游标保存一个从 0 开始的
+`next_fn_activation` 自然数。按第 5 节完成参数验证后、进入任一语言 fn body 前，取其
+当前值作为 activation，再加一；直接、间接、尾调用和 map/fold 的每次语言 fn 回调都计数，
+核心函数的调用（包括作为回调）不计数。计数按该节点的严格求值次序进行，不使用全 run 计数或完成次序。
+fn_site 为普通调用的实参列表左括号 token；管道 fn 阶段使用 stage 目标的首 token，
+隐式 map/fold 回调使用所属核心调用的实参列表左括号 token。这样 fn 调用锚点不会与
+callee 表达式内部的循环锚点重合。
+
+进入最外层 fn 时保存调用方当前 EvalPath 为 FunctionBase；嵌套/尾调用沿用此 base，
+不累积 fn 调用栈路径。fn body 内的路径为：
+
+```text
+EvalPath = FunctionBase ++ [(fn_site, activation)] ++ CurrentFunctionLocalLoops
+```
+
+CurrentFunctionLocalLoops 只含本次 fn body 内活动循环/推导式的原始索引。非尾返回时恢复
+调用方活动路径；尾调用只替换当前 activation 和局部循环路径，不保留尾调用链。
+调用方后续的 perform 恢复原路径，因此已有 fn 外 CallID 和 wire 结构保持不变。
+局部游标的挂起、checkpoint 和恢复必须保留计数与活动路径；计数不得 wrap，超预算明确
+失败。此路径同样用于 fn 内错误定位；它不创建图节点或子 Flow。
+同一节点在 fn_site=25 调用函数两次、函数内 perform_site=40 时，无外层局部循环的
+CallID EvalPath 分别为 `[(25,0)]`、`[(25,1)]`。尾递归、互递归及回调也不得复用 activation。
+
 程序 revision 对没有 import lip 的单源程序仍为 SourceHash(root)，保留原有完整源码
 摘要。多源程序为 `lowerhex(SHA256(C(["lip-source-set", "1.0", root_source_id,
 SourceTable, DependencyLock])))`；C、SHA256、lowerhex 按第 16.1 节定义。这里的 `"1.0"` 是保留的 source-set
@@ -1222,11 +1323,13 @@ permit 等待与调用准入必须协调，不能占用 worker 阻止释放 perm
 Ready 节点与可恢复游标中选择最小 Position。等待子图的 Running 祖先不参加这次选择，
 也不消耗额度；因此可同时存在多个 Running 容器及一个正在推进的后代。所有模式都
 保留 source order，其中“更早”统一指第 6.2 节 Earlier，而非仅比较 Position：
-节点的效果为其全部可能 perform 的上界；只有每个可能 operation 都声明
-ReadOnly + Concurrent 时，节点才是 Concurrent ReadOnly。Write、Unknown 和不可并发
-ReadOnly 节点形成 barrier。barrier 等待所有更早的含 perform 节点成功或正常控制
-Skipped；后续含 perform 节点不得越过仍未终结的更早 barrier。Concurrent ReadOnly
-节点可以相互重叠；Pure/join 节点不因外部 barrier 本身被阻塞。
+节点的效果按第 5 节合并；fn body 内的 perform 计为 Pure，其他 perform 按 registry/Ops
+取上界。只有 fn body 外的全部可能 operation 均为 ReadOnly + Concurrent，且至少含一个
+这样的 perform 时，节点才是 Concurrent ReadOnly。Write、Unknown 和不可并发
+ReadOnly 节点形成 barrier。barrier 等待所有更早的含 fn body 外 perform 的节点成功或正常控制
+Skipped；后续含 fn body 外 perform 的节点不得越过仍未终结的更早 barrier。Concurrent ReadOnly
+节点可以相互重叠；Pure/join 节点不因外部 barrier 本身被阻塞。fn 内的实际调用仍按
+第 10.3 节遵守 Host Concurrent 与资源许可，不因 Pure 而获得并发许可。
 
 OrderAllows 必须包含尚未实例化的更早循环/分支/子 Flow 可能产生的调用，不能只扫描当前 Ready
 或已经创建的节点。跨 producer 循环，barrier 等该循环完成、或被正常 gate 关闭；若循环
@@ -1471,8 +1574,8 @@ Response = Result(Data) | Rejected(ErrorData) | Uncertain(ErrorData)
 operation 合约至少声明 name/version、参数/结果 schema、ReadOnly/Write/Unknown、
 Concurrent、capabilities 和资源需求。调用前验证，不能从名称推断纯性、并发、幂等性或
 授权。命名参数在位置参数之后、每名一次，并按 schema 解析；固定 proposal 不保留原生
-对象本体；需要对象身份时只保留经声明的资源引用。构造 effect 不调用 provider、不写
-intent、不消耗调用预算。
+对象本体；需要对象身份时只保留经声明的资源引用。在实参求值完成后，构造 effect 本身
+不调用目标 provider、不写 intent、不消耗目标调用预算；实参求值时 fn 内的 perform 独立执行、计费和记录。
 
 项目可在已注册 schema 中声明普通 Data 参数（例如 `policy:object`），携带 token、
 金额、时限或业务标记；其字段、单位和检查规则由 Host/adapter 定义。这些参数遵守
@@ -1544,7 +1647,7 @@ Response 的三种结果中，known_fault 用 Rejected(ErrorData) 承载；上�
 指针/可变对象。known_fault 重放同一验证错误、零新增 provider 调用；不可对账为成功，
 也不可重做原写入来修复返回格式。业务补偿或修正必须是显式的新操作。
 
-Go adapter 处理 context、有限值、struct/string-keyed map/list、声明的多返回值和 error；
+Go adapter 处理 context、合法 number（包括规范 NaN 与正负无穷）、struct/string-keyed map/list、声明的多返回值和 error；
 Python worker 处理相同 Data、exception、call ID、deadline、取消和有限队列。
 协议的 number 始终是 binary64；传输即使用 JSON，也按第 3 节解码，不能依赖 Python
 默认 int/float 猜测。默认 native 参数映射为 Go float64/Python float；需要 Go int 或
@@ -1557,7 +1660,7 @@ adapter 给出显式 Data/资源引用转换，不能靠宿主默认 str 或不�
 只由认可该 schema 的 operation 解释，且绑定 Host/worker generation、类型、寿命和
 授权 scope。Host 必须按第 10.1 节声明应用、单次 run 或显式会话寿命；会话允许引用
 跨成功 cell 使用，
-不回放旧 cell 以重建对象。纯计算只能处理这个 object，不能访问原生对象。引用不等于
+不回放旧 cell 以重建对象。核心纯计算只能处理这个 object；访问原生对象必须经 perform，fn 内须用第 10.3 节 @{...} 显式承诺纯性。引用不等于
 权限，scope 不符、过期、worker 重启或未迁移时必须拒绝；Host 提供 release 和生命周期
 结束清理。Go 包初始化状态可具有进程寿命，不等于资源引用仍然有效。
 持久重放不得把已失效原生对象 token 当作可用结果，须重建、拒绝或显式 reconcile。
@@ -1582,7 +1685,11 @@ Go 函数，把 32-byte 返回数组编码为 64 位小写 hex string，并声�
 工具可提供通用库适配配置，例如 `NewNativeHost`。该配置通过 Go 导出类型信息生成
 adapter，或通过持久 Python worker 解析模块与对象，不限制包名单。它在核心检查前将
 直接调用、属性读取、方法、索引及资源转换降为注册的 proposal/perform，并声明 Unknown；
-不把 native callable 变成纯 fn，不绕过授权，也不推导 Concurrent。callee 解析和可获得的
+不把 native callable 本体变成语言 fn，不绕过授权，也不推导 Concurrent。降级到 fn body
+中的 perform 仅在该函数体有 @{...} 标记时按第 10.3 节接受作者纯性承诺，否则 E-PURITY。
+相同 operation 在 fn 外仍保留 Unknown
+或其显式登记效果，不为单个库函数另设纯性白名单。
+callee 解析和可获得的
 签名/arity 检查先于实参求值；无法获得原生签名时由实际调用检查，adapter 须说明这一
 限制。仅构造 effect 不执行这些原生检查或加载代码。
 
@@ -1680,6 +1787,84 @@ version/schema/效果/资源描述冲突在运行前拒绝为 E-OPERATION。生�
 共享 application 资源和只读 Program。具体 HTTP 启动命令、打包方式与部署平台由工具
 提供，不增加新的语言执行路径或核心语法。
 
+### 10.3. @{...} 函数体的显式纯性承诺
+
+保留字 nan、inf 仍可作字段名，例如 `np.nan`、`np.inf`、`{nan:nan,inf:inf}`；这不允许绑定名为 nan 或 inf 的变量。
+
+fn 始终要求纯性。普通 `{...}` 函数体继续禁止直接原生调用及显式 perform；它可以调用
+其他符合纯性契约的 fn。若函数体需要调用原生计算，作者必须在该函数体左花括号前写 `@`，
+即 `fn a(x:number)->number @{np.sqrt(x)}`。`@` 与 `{` 间可有空格/tab；标记仅允许出现在
+fn_body 的这个位置，具名/匿名 fn 均适用，不是装饰器、表达式运算符或额外类型。
+
+`@{...}` 表示作者显式担保其中原生调用的计算纯性，不表示允许该 fn 产生业务副作用。
+编译器和 Host 不必证明任意 Go/Python 实现的纯性，也不要求逐函数登记、白名单、试跑
+或专用 Pure 合约；np.sqrt 与其他原生函数适用同一规则。
+本节的原生调用统一指经外部边界执行的调用：既包括第 10 节直接语法降低后的 perform，
+也包括标记体内显式执行的任意外部 proposal，不按 operation 的 language 或桥接名称另设区别。
+
+作者承诺：固定实参、不可变捕获及约定的原生实现/配置后，计算值和计算错误不依赖时钟、
+随机、可变外部状态、调用次数或调度；不修改输入、共享对象或外部业务状态，不产生业务
+写入。只读并不等于纯：读取文件、数据库、当前时间或可变属性，同样可能违反承诺。
+使用资源引用时，引用固定不代表其对象固定；作者须保证所观察内容及本次使用满足上述
+承诺。第 3.2 节诊断是单独定义的例外；原生函数的普通输出不会自动成为核心诊断。
+违反承诺的程序仍可能通过静态检查，运行时不承诺检测这种违约；第 13 节依赖纯性的
+保证只对履行承诺的程序成立。名称、类型、不可变绑定及 Claim/Flow 结构限制仍须检查；
+`@` 不允许捕获或访问活动 store、join、子 Flow 调用或 fn 内的 parallel。
+
+标记只作用于它紧邻的 fn body，包括该体中的局部循环、carry 和推导式；不隐式传给
+其中定义的另一个具名/匿名 fn。嵌套 fn 若直接执行原生调用，也必须写自己的 `@{...}`。
+递归、闭包和 map/fold 回调依其实际定义的 fn body 判断。标记体中 perform 的静态执行
+效果为 Pure，无须 Ops 已知，也不因 registry 的 ReadOnly、Write 或 Unknown 标记而报
+E-PURITY；动态 effect 参数和容器中取出的请求同样适用作者承诺。fn 调用的 callee/实参
+在调用方上下文求值，只有函数体适用该函数的标记。所有合法 fn 在调用方仍为 Pure，
+所以普通 fn、guard、proposal 参数、join RHS 和 carry 出口均可调用有标记的 fn；这些
+位置自身不能借被调用函数的标记直接 perform 或调用子 Flow。
+
+外层函数仅定义或调用带标记的内层函数时，无须写 @：
+
+```lip
+fn outer(x:number)->number {
+    inner = fn(y:number)->number @{ np.sqrt(y) }
+    inner(x)
+}
+```
+
+构造、捕获或返回请求不执行它。请求后来在 fn 外 perform 时仍按原 registry/Ops 判断；
+`@` 不随请求值传播，不把整个库或 operation 的登记效果改为 Pure。会话中的闭包保留
+其定义体的标记，导入/导出、别名或间接调用不增加也不移除该标记。
+
+所有实际调用仍经过统一 perform：参数与结果 Data/schema 验证、授权、预算、取消、
+资源所有权/寿命、CallID 和 journal 全部保留。通用原生适配仍可登记为 Unknown。
+分别编译但共享 provider 的 Host 还须共享其 ResourcePool 准入池。
+计算纯性不等于线程安全；Concurrent=false 时，Host 必须通过共享互斥许可串行准入
+同一 operation 的调用（包括 fn 内外及共享该 provider 的 run），共享 worker/对象的
+额外冲突由资源合约约束。许可与其他资源须按第 10 节原子取得，等待不占工作额度；
+Concurrent=true 的调用仍须取得其资源许可。`@` 不授予任何额外权限。
+
+fn 调用可以在图中重叠；标记体内的 perform 不形成业务 barrier，节点的其他执行效果
+照常合并。每次实际 perform 有独立身份和记录；记录就绪后才发布结果，terminal replay
+不重调 provider。只有 intent 时仍按原 operation 恢复合约处理，不能凭 `@` 重试
+Unknown/Write。不得仅因 Pure 删除、合并、缓存或提前执行调用，改变调用记录、错误或
+同路径诊断。声明、静态检查、补全、构建与未选分支均不调用 provider。解释、生成和
+交互路径使用相同的标记、准入与第 6.2 节身份规则。
+
+例如，在第 10 节通用原生适配配置下，以下两种 fn 写法均合法，无须为 np.sqrt 注册纯性：
+
+```lip
+import python "numpy" as np
+fn a(x:number)->number @{
+    if x >= 0 { np.sqrt(x) } else { nan }
+}
+fn explicit(x:number)->number @{
+    if x >= 0 { perform effect np.sqrt(x) } else { nan }
+}
+flow Main()->list { return [a(122), a(-1), a(nan)] }
+```
+
+第一种写法降低为与第二种相同的 perform 边界。作者对这两个标记体承担同样的纯性承诺。
+去掉相应的 `@` 后，该函数的原生调用为 E-PURITY；构造 effect 本身仍可用于普通 fn。
+负数和 NaN 输入不调用 sqrt provider；返回列表后两项为 NaN。返回值无损传输按第 16.6 节。
+
 ## 11. 记录与可选持久恢复
 
 每个 run 至少在本次运行中记录所有 perform 的参数 fingerprint、result/rejection/
@@ -1724,7 +1909,7 @@ Journal[CallID] = {operation, version, argument_fingerprint,
 | 已有 terminal result | 复用已记录值，provider 不再调用 |
 | 已有 terminal rejection | 再次呈现同一节点 Error，provider 不再调用 |
 | 已有 terminal known_fault | 复用完成事实和同一 E-SCHEMA/E-VALUE，provider 不再调用 |
-| 只有 intent，ReadOnly 且 contract 允许 | 可重新读取，再记录；旧调用没有已发布的结果 |
+| 只有 intent，ReadOnly 且 contract 明确允许重执行 | 可重新计算/读取，再记录；旧调用没有已发布的结果，仍复用 CallID |
 | 只有 intent，Write 有 provider 支持的稳定 DedupKey | contract 明确证明安全时可恢复调用 |
 | 只有 intent，其余 Write/Unknown | fail closed，先查询外部事实 reconcile；不盲目重试 |
 
@@ -1732,6 +1917,8 @@ Journal[CallID] = {operation, version, argument_fingerprint,
 不可能合法地被下游已持久写入消费。Provider DedupKey 不替换 CallID，也不由参数相等
 自动推导。Exactly-once 的外部世界不是语言保证。
 Uncertain 保持非 terminal，ReadOnly 自动恢复同样须有明确的无外部写入和可重执行合约。
+fn 内的作者纯性承诺不改变恢复分类：只有 intent 的 Unknown/Write 仍按实际合约处理，
+不得仅因调用发生在 fn 内就自动重试。
 含失效资源引用的 terminal result 可以再次呈现记录，但不得通过验证为有效原生资源；
 需要资源时由 Host 显式恢复同一资源身份/修改 recovery 合约，或终止该 run。
 
@@ -1943,7 +2130,7 @@ object；未知字段拒绝，提交前须完成全部检查：
 |---|---|
 | status | 必填，200–599 的整数 number；不支持信息响应或协议升级 |
 | headers | 可省略；头名到 string 或 string list 的 object；大小写重复、非法头名及头值控制字符拒绝 |
-| json | 可省略；任意 Data，以规范 JSON 编码；与 body 互斥；缺省 Content-Type 为 application/json |
+| json | 可省略；仅含有限数的 Data，以规范 JSON 编码；与 body 互斥；缺省 Content-Type 为 application/json |
 | body | 可省略；string，缺省 encoding 为 utf-8；缺省 Content-Type 为 text/plain; charset=utf-8 |
 | encoding | 仅可与 body 同时出现，值为 utf-8 或 base64；base64 解码后缺省 Content-Type 为 application/octet-stream |
 
@@ -2022,7 +2209,7 @@ operation 承接，结果必须声明为合法 Data；一串子 Flow 或管道�
 
 ## 13. 确定性与保证边界
 
-在基础纯操作正确、adapter 合约诚实、值边界被执行的条件下：
+在基础纯操作正确、adapter 合约诚实、fn 作者履行第 10.3 节纯性承诺、值边界被执行的条件下：
 
 **固定外部应答下的逻辑结果确定性。** 固定 run_id、选定入口、输入、完整源码、registry/schema/
 授权、After 约束与初始 journal；不含 live claim.snapshot；无外部取消、时限/预算失败、
@@ -2034,6 +2221,7 @@ crash、失效资源或变值重复投递。每个实际选中节点/调用有�
 在这些前提下，所有合法调度得到相同成功 Data 输出，或相同 ErrorKey/类别/语义 details
 的主错误。成功执行时所求值的 CallID 集合相同；失败执行时**不保证**实际已发出调用
 集合相同，也不保证 partial store、错误之外的 trace 或动作时间相同。
+这里“相同 Data”指 C 字节相同，包括规范 NaN；不要求含 NaN 的值用语言 `==` 比较为 true。
 
 固定 R 是比较执行的数学前提，不声称远程服务实际永远返回同值。若不满足有限终结
 前提，较早发散节点可能使错误前缀无法确认。Host 引入的新 cancel/budget/版本变化是
@@ -2041,12 +2229,12 @@ crash、失效资源或变值重复投递。每个实际选中节点/调用有�
 未开 gate 的节点不求值，因此不产生动态 Error，不更新 F/K 或触发 error_cut；未选
 if/match 表达式分支同样不求值。编译期错误不属于本定理对合法程序的运行结论。
 
-1. 纯表达式的小步归约至多有一个下一状态；若终止，结果唯一。无限递归可能发散。
+1. 固定上述 Host 应答后，纯表达式的小步归约至多有一个下一状态；若终止，结果唯一。无限递归可能发散。
 2. 固定输入的有限无环纯图，在公平执行且无预算/取消干扰时，所有合法调度得到同一值。
 3. 对某个 store，令 B 为本次 run 中成功贡献组成的有限原子集合。B 固定时，重复投递
    和不同交付次序均得到最终 store 状态 B，因此最终 snapshot 和确定性纯投影相同。
    相同 identity 的变值呈现相同冲突，不选择抵达者。
-4. 无 perform 的源程序不能调用业务 provider；§3.2 的单向诊断接收端不属于 provider。
+4. 无 perform（包括原生语法降级得到的 perform）的源程序不能调用业务 provider；§3.2 的单向诊断接收端不属于 provider。
    没有完成准入的 perform 不能调用 provider。诊断接收端不参与固定应答映射 R。
 5. durable profile 在固定 journal 下复用原观察；未决 Write 不会因恢复自动再次执行。
 
@@ -2066,6 +2254,8 @@ early 错误时，两个调用都已发生。两种调度的主错误均为 earl
 第 16.4 节给出核心一致性用例。实现还须覆盖下列规则，并扰动合法调度次序：
 
 - immutable capture、参数/返回值复制、结构比较、严格求值/短路和数值边界；
+- 第 3.3 节 NaN/无穷的运算、比较、类型 pattern、静态 Data、容器、原生边界、规范编码、Claim 幂等和 journal 参数一致性；第 16.6 节两种传输配置不能混淆 null/string/NaN；
+- 第 10.3 节 @{...} 显式纯性承诺与 fn/别名/闭包/递归/map/fold/guard/carry/请求参数的组合；普通 fn 内 perform 拒绝，标记不隐式传入嵌套 fn；@{...} 不按 ReadOnly/Write/Unknown 或动态 Ops 拒绝，fn 外继续保守检查；Concurrent=false 串行准入；准入前、构建和未选路径零 provider；fn 重复/尾递归调用身份唯一且重放不重调，解释与生成路径同一计数；
 - 第 3.2 节诊断与闭包/模块/高阶调用/递归/carry/guard/管道/请求构造的组合；禁用、满队列、关闭及接收故障不影响结果、错误、预算、操作身份和并行；参数仍正常检查，未选路径与静态阶段零发送；诊断不延长原生资源生命周期；
 - 一万/十万次直接、互递归、function 值间接尾调用；非尾递归预算和发散取消；
 - for 顺序/并行、break/continue、match first-arm 和 guard Error；
@@ -2136,7 +2326,7 @@ Host 数据边界和持久 journal 的实现验收。
 | E-ENTRY | 无默认入口且未显式选择，或入口未知/不是根 Flow；运行前拒绝 |
 | E-MODULE / E-MODULE-CYCLE / E-EXPORT | 缺失/非法/锁定不符的模块、模块依赖环或访问未导出成员 |
 | E-FLOW-CYCLE | 具名 Flow 的直接或间接调用环，不因常量未选分支豁免 |
-| E-PURITY | fn 中的外部执行/活动 store/子 Flow，或纯参数/guard/proposal/join 位置含不允许的执行 |
+| E-PURITY | fn 中的活动 store/子 Flow、普通 fn 中的 perform，或 Pure 位置含未适用第 10.3 节 @{...} 承诺的外部执行 |
 | E-RETURN / E-CONTROL | 无效结果出口、return 位置、break/continue 位置 |
 | E-PARALLEL | parallel body 含写入、Unknown 或转移图循环的控制操作 |
 | E-CLAIM-ORDER | 完整读取与全部 producer 的源位置/循环范围不符 |
@@ -2146,7 +2336,7 @@ Host 数据边界和持久 journal 的实现验收。
 | 运行时 Error | 条件 |
 |---|---|
 | E-TYPE / E-ARITY / E-SCHEMA | 动态值/参数/输入/结果不符 |
-| E-VALUE / E-NUMBER / E-INDEX | 非法 native 数据、非有限数/除零、越界/缺键 |
+| E-VALUE / E-NUMBER / E-INDEX | 非法 native 数据/传输、数值域错误/除零或有限操作数溢出、越界/缺键；规范 NaN 与正负无穷本身合法 |
 | E-FAIL / E-MATCH-NO-ARM | fail 调用或表达式 match 无 arm |
 | E-BUDGET / E-CAPABILITY / E-OPERATION | 明确资源预算、授权或注册失败 |
 | E-CLAIM-CONFLICT / E-DEPENDENCY | 同 JoinID 变值或不可用数据依赖 |
@@ -2159,6 +2349,7 @@ Host 数据边界和持久 journal 的实现验收。
 |---|---|
 | E-ENTRY | 运行前入口选择失败，包括声明模式根模块没有 Flow |
 | E-SCHEMA | 第 2.3 节 EntryInput 的结构、绑定、Data 或注解验证失败 |
+| E-VALUE | 成功 EntryOutput 无法按选定 Data 传输配置编码，例如 json 下含非有限数 |
 | E-HTTP | HTTP 启动配置、请求转换或响应验证失败；HTTP 状态按第 12.1 节映射 |
 
 同一错误码可在不同阶段出现；诊断必须标明阶段。HTTP 响应验证失败发生在 Flow 结果
@@ -2185,7 +2376,7 @@ Go/Python transports、注册 contracts、资源预算和取消粒度。模型�
 
 ### 16.1. 规范数据与身份编码
 
-C(v)：null/false/true 为单字节 0x00/0x01/0x02；number 为 0x03 加 -0 归零后的八字节
+C(v)：null/false/true 为单字节 0x00/0x01/0x02；number 为 0x03 加 -0 归零、NaN 统一为 `0x7ff8000000000000` 后的八字节
 大端 binary64；string 为 0x04、八字节大端无符号 UTF-8 长度与内容；list 为 0x05、
 八字节大端无符号元素数与各 C(element)；object 为 0x06、八字节大端无符号字段数与
 按 UTF-8 bytes 键序的 C(key),C(value)。大小超过编码/Host 预算必须失败。
@@ -2247,6 +2438,9 @@ E-ID-COLLISION，保留原字节，不合并或任选；摘要不替代身份和
 |---|---|
 | null / false / true | 00 / 01 / 02 |
 | 1 | 033ff0000000000000 |
+| nan | 037ff8000000000000 |
+| inf | 037ff0000000000000 |
+| -inf | 03fff0000000000000 |
 | "a" | 04000000000000000161 |
 | [] / {} | 050000000000000000 / 060000000000000000 |
 
@@ -2261,8 +2455,9 @@ E-ID-COLLISION，保留原字节，不合并或任选；摘要不替代身份和
 | `["\n","\t"]` | `["\u000a","\u0009"]` |
 | object 键 U+E000、U+10000 | U+E000 在前；UTF-16/JCS 顺序相反 |
 | 顶层 string "1" 与 number 1 | str 均为 `1`；C 不同，不能由 str 推导身份相等 |
+| nan / `[nan]` / string "nan" | `nan` / `[nan]` / `nan`；最后一项为原字符串，C 各不相同 |
 
-普通 JSON decoder 可解码这些输出。规范显示使用 UTF-8 键序和无正号的指数，控制字符
+普通 JSON decoder 可解码仅含有限数且非原样 string 的输出；含非有限数的显示不作为 JSON 传输。规范显示使用 UTF-8 键序和无正号的指数，控制字符
 使用统一的长转义；JCS/JSON.stringify 默认输出不能作为规范字节结果的判定依据。
 
 ### 16.3. 数值向量
@@ -2288,7 +2483,7 @@ bits=1 表示八字节 binary64 编码的无符号整数值为 1，即最小正�
 | -5e-324 | 5e-324 | -1 | 0 |
 
 字面量 `2e-324` 舍入为 0，`3e-324` 舍入为最小正次正规值（bits=1）。四则运算不能
-flush subnormal；number 的四则/literal 转换结果均按第 3 节规范化零。除数为零和非有限
+flush subnormal；number 的四则/literal 转换结果均按第 3 节规范化零。有限操作数除数为零和非有限
 商报 E-NUMBER。以上向量必须在解释器、生成 Go 和边界编解码中一致。
 
 ### 16.4. 核心一致性用例
@@ -2535,9 +2730,41 @@ HTTP 接入还须满足以下用例；它们不要求未声明 HTTP 配置的 co
 | `print(1/0)`，输出关闭 | 仍为 E-NUMBER；不得省略实参求值 | core 求值 |
 | 未选分支中的诊断；只声明/编译带诊断的函数 | 零发送尝试 | core 路径 |
 | 带诊断的已知 ReadOnly 请求构造函数在 parallel 中执行 | RetOps 不丢失；真实读取可重叠；journal 只记录 perform | core 摘要 |
-| `print(perform write())` 在 parallel 中；同表达式在 fn 中 | 分别为 E-PARALLEL / E-PURITY，实参效果不被隐藏 | core 效果 |
+| `print(perform effect store.commit())` 位于 parallel body / 普通 fn / @{...} fn | E-PARALLEL / E-PURITY / 按显式承诺接受；实际写入违反承诺，Host 检查仍生效 | core 效果 |
 | fn/effect/native 引用作为诊断值 | 不透明显示；不执行请求、不调用属性/快照、不保留资源 | core 生命周期 |
 | 重放相同源码、run 与 journal | provider 不重调用；本次重新求值的诊断可再次发送 | core 重放 |
+
+NaN 与 @{...} 显式承诺纯性的原生调用还必须满足以下组合向量。以下使用通用原生适配配置，
+np.sqrt 无专用纯性合约；worker.read 为 Concurrent ReadOnly，store.commit 为 Write。
+is_nan 使用第 3.3 节的辅助 fn。实际不纯的调用属于作者违约，静态接受不保证它的业务纯性。
+
+| 输入/环境 | 必须结果 | 配置 |
+|---|---|---|
+| `nan`、`-nan`、原生不同 payload/sign 的 NaN | 同一规范 number，is_nan 为 true，C 为 037ff8000000000000 | core 数值 |
+| `inf`、`-inf`、Go/Python 原生无穷 | number；C 分别为 037ff0000000000000、03fff0000000000000 | core 数值 |
+| `inf-inf`、`0*inf`、`inf/inf`；`inf/0`；`1e308*2` | nan、nan、nan；E-NUMBER；E-NUMBER | core 数值 |
+| `(-inf)**3`、`(-inf)**0.5`、`0**-inf`、`inf*/inf` | -inf、inf、inf、nan | core 数值 |
+| `-1//inf`、`-1%inf`、`inf//2`、`inf%2` | -1、inf、nan、nan | core 数值 |
+| `parse_number(str(-inf))`；`xs[inf]`；`range(inf)` | -inf；E-INDEX；E-VALUE | core 边界 |
+| 正负无穷经原生参数/结果、入口与 c-hex 往返；JSON 编码 | 保留符号与 C；JSON 拒绝，完成事实保留 | core 传输 |
+| `nan == nan`、`nan != nan`、`[nan] == [nan]`、`nan < 0`、`nan >= 0` | false、true、false、false、false | core 比较 |
+| `nan / 0`、`nan % 0`、`nan */ 1`、`nan ** 0`、`1 ** nan` | nan、nan、nan、1、1；`0/0`、`0**-1` 仍为 E-NUMBER | core 数值 |
+| `is_nan(parse_number(str(nan)))`；`parse_number("NaN")`；`is_nan(null)` | true；E-VALUE；E-TYPE | core 函数 |
+| `xs[nan]`、`xs[:nan]`、`range(nan)`、`nan + "x"` | E-INDEX、E-INDEX、E-VALUE、E-TYPE | core 边界 |
+| match 的 nan literal、number 类型与 is_nan guard | literal 不匹配；类型与 guard 可选中；未选 arm 零调用 | core 控制 |
+| 同 JoinID 重投 NaN；同 CallID 重放规范 NaN 参数 | 幂等；复用结果零 provider；改成 null 或 "nan" 必须冲突/分歧 | core 身份 |
+| `fn a(x:number)->number @{np.sqrt(x)}`；`map([1,4],fn(x:number)->number @{np.sqrt(x)})` | 标记体合法，后者得到 [1,2]；去掉相应 @ 则 E-PURITY，无需为 sqrt 特判 | core 语法/纯性 |
+| fn 执行 np.sqrt、显式 perform、已知请求构造函数结果或捕获的请求 | 普通函数体 E-PURITY；@{...} 按作者承诺接受，无逐函数纯性登记 | core 纯性 |
+| flow 的 body 或普通表达式前使用 @；@{...} fn 访问活动 store/调用子 Flow | 前两者 E-PARSE；后者仍 E-PURITY，标记不豁免核心结构规则 | core 边界 |
+| @{...} fn 执行 effect 参数、容器投影或混合候选；同请求在 fn 外执行 | 标记体内接受且检查实际 proposal；fn 外仍保留 Unknown/原 Ops，不凭承诺增强 parallel | core Ops |
+| @{...} 内定义未标记的匿名/具名 fn，其中含原生调用 | 嵌套普通 fn 仍 E-PURITY；须在其自己的函数体写 @{...}；普通 fn 调用已标记 fn 则合法 | core 作用域 |
+| 含原生调用的 fn 用于 guard、proposal 参数、join RHS、carry next 或 map/fold 回调 | 合法；fn 外这些 Pure 位置直接 perform 仍 E-PURITY；严格顺序求值，未选路径零调用 | core 组合 |
+| fn 同一调用点循环/尾递归执行 perform；map 多次回调 | 每次 CallID 不同；尾调用不累积调用链；重放保留 activation | core 身份 |
+| parallel 混合含原生调用的 fn 与 Concurrent ReadOnly perform；与 fn 外 Write perform | 前者允许且保留读取效果；后者 E-PARALLEL；fn 承诺不改变 operation 的原登记效果 | core 效果 |
+| fn 内 Concurrent=false 的原生调用由多个图节点同时到达 | Host 串行准入，等待不占工作额度；承诺纯性不授予线程安全 | core 并发 |
+| 仅构造/返回 Write proposal 的 fn；fn 内 Unknown perform 留有未决 intent | 返回请求在 fn 外仍为 Write；未决调用按 Unknown 恢复，不因 fn 自动重试 | core 边界 |
+| NaN 入口、Host 参数/结果、Claim snapshot，经 c-hex 传输 | 原值与 C 往返一致；native 得到 NaN 数值，不是编码字符串 | core 传输 |
+| json 配置发送 NaN；json 接收裸 NaN；有限值使用原协议 | 编码拒绝/解码拒绝；已有字节不变；不自动切换配置 | core 传输 |
 
 ### 16.5. 幂与对数的固定数值算法
 
@@ -2552,11 +2779,12 @@ HTTP 接入还须满足以下用例；它们不要求未声明 HTTP 配置的 co
 `math.Frexp(x)` 返回精确的 `(m,k)`，满足 x=m·2^k、非零时 0.5≤|m|<1；
 `math.Sqrt(x)` 为非负 x 的平方根，按 nearest/ties-to-even 正确舍入；
 `math.Ldexp(m,k)` 返回 m·2^k 经 nearest/ties-to-even 舍入的 binary64，允许次正规数、
-零和溢出；`math.Inf(1)` 为内部正无穷哨兵，最终必须转为 E-NUMBER，不能成为 LIP 值。
+零和溢出；`math.Inf(1)` 为此有限操作数算法的内部正无穷溢出哨兵，最终必须转为 E-NUMBER。
+已有无穷操作数的规则由第 3.3 节先处理，不进入此算法。
 整数/浮点转换遵循代码，涉及的循环索引可精确表示。符合本节结果的等价优化可使用；
 不得借由误差容限接受不同的结果位模式。
 
-调用前先执行第 3 节定义域检查；corePower 接受检查通过的有限操作数，coreLog 只接受
+调用前先按第 3.3 节处理非有限操作数，再执行第 3 节有限数定义域检查；corePower 接受检查通过的有限操作数，coreLog 只接受
 正有限操作数，coreExp 只由 corePower 调用。`**` 取 corePower(a,b)；`*/` 先处理
 第 3 节的精确特例，再取 numericDiv(coreLog(a),coreLog(b))。最终拒绝非有限值并规范化零。
 自然对数使用固定 24 项级数及指数分解；指数使用固定 24 项级数和 2 的幂缩放；
@@ -2706,9 +2934,58 @@ parse_number 的显示往返另按第 3/3.1 节检查，
 | `2 */ 3` | `0x3fe430939835353d` |
 | `10 */ 2` | `0x400a934f0979a372` |
 
+### 16.6. Data 传输与普通 JSON
+
+Data 是逻辑值域，不等于普通 JSON 的值域。语言入口与 operation 协议的通用跨进程
+Data 通道必须提供以下显式配置；同进程 API 可采用等价的类型化传值。外部业务协议
+（如第 12.1 节 HTTP）可明确限定为普通 JSON。配置在通道建立时固定，并与对端约定，
+不得从收到的 string/object 形状猜测编码，也不得随某个值自动切换。
+
+| 配置 | Data payload 的 wire 表示 |
+|---|---|
+| json（缺省、兼容 1.0） | 仅含有限数的 Data 按第 3.1 节普通规范 JSON 编码；收到裸 NaN/Infinity 或待编码值含 NaN/正负无穷均拒绝 |
+| c-hex | 每个 Data payload 为 JSON string，内容恰为 `lowerhex(C(v))`；解码后再执行 schema/注解检查，支持完整 Data 域 |
+
+这里 payload 指协议中明示为 Data 的位置：EntryInput/Request 的 positional 各元素和
+named 各值、EntryOutput.value、Result 的值、ErrorData.details，以及 journal 中的
+Data receipt/raw_data 等。外层协议结构、字段名、operation/version、CallID_wire、
+kind/code/message 等协议元数据不转成 c-hex。嵌套 list/object 作为该 payload 的一棵
+完整树编码，不能只把其中非有限数替换为私有 tag。例如 c-hex EntryInput 的
+`{positional:["037ff8000000000000"],named:{}}` 表示一个 NaN 实参；同样字段在 json
+配置中表示 string 实参。两端必须使用同一配置，不允许形状探测或混合解释。
+
+c-hex 只接受小写、偶数位 hex 和第 16.1 节的完整规范 C：检查长度/预算、UTF-8、
+唯一且排序的 object 键、规范零与规范 NaN，允许正负无穷，拒绝其他 NaN bits、未知 tag 和尾随
+字节。不能先分配未验证长度的容器。原生 number 输入则按第 3.3 节归一化 NaN 后编码。
+schema 可明确要求有限 number，但裸 number 注解本身不能拒绝 NaN/正负无穷。原生 adapter
+取得解码后的数值，不把 c-hex 字符串直接交给库函数。
+
+| 逻辑 Data | c-hex payload 的 JSON |
+|---|---|
+| nan | `"037ff8000000000000"` |
+| inf | `"037ff0000000000000"` |
+| -inf | `"03fff0000000000000"` |
+| null | `"00"` |
+| string "nan" | `"0400000000000000036e616e"` |
+| 1 | `"033ff0000000000000"` |
+
+json 配置下非有限数请求实参须在 provider 准入、intent 或实际调用前拒绝；非有限数结果必须
+通过 c-hex/类型化通道交付，否则记录转换失败，不替换为 null/string。入口输入的
+解码/验证错误仍为运行前 E-SCHEMA；入口成功后的输出编码错误是 Host E-VALUE，
+不伪造节点根错误；Host 调用转换错误按第 10 节保留完成事实。
+第 12.1 节 HTTP 接入固定使用普通 JSON；其 json 字段含非有限数时在提交前报 E-HTTP。
+应用若需经 HTTP 交付非有限数，须通过 body 和明确 Content-Type 的自定义协议，不把裸
+NaN/Infinity 宣称为 application/json。journal 与 Claim 身份始终基于 C，不能基于传输字符串
+或语言 `==`；切换传输不会把非有限数与任何业务 object、null 或 string 混淆。
+
 ## 17. 非规范性附注：仓库实现状态
 
 本节只描述本仓库在文首日期的实现情况，不改变以上语言合约，也不构成 core 合规声明。
+第 3.3、10.3、16.6 节及 fn 调用身份扩展已接入解释器、生成 Go 和 REPL：
+@{...} 是作者对原生计算纯性的显式承诺，内层有标记时外层无须重复标记。number/Data
+支持规范 NaN 与正负无穷；CLI 和生成程序通过 -data-encoding c-hex 无损传输，默认 json 继续拒绝
+非有限数。Go/Python 原生通道使用相同规范编码，MemoryJournal/Claim 身份不使用语言相等。
+运行时不证明原生实现的纯性；持久恢复仍属未实现的可选配置。
 解释器、CLI 和生成 Go 已接入静态 Data、多 Flow 与显式入口选择、EntryInput/EntryOutput、
 结构化子 Flow、管道和静态 LIP 模块。未选声明也检查；输入验证先于 run_id 和内存
 journal 创建；CLI 的命名输入便捷格式先转换为同一 EntryInput 并统一诊断。成功结果

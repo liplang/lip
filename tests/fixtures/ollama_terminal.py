@@ -62,6 +62,9 @@ try:
     wait("助手> 提醒已设置")
     ready()
     send("echo: 保留")
+    wait("echo: 保留")
+    with open(os.environ["LIP_CHAT_EDIT_GATE"], "w"):
+        pass
     wait("编辑时主动提醒")
     value("草稿", "保留草稿")                    # notification preserves draft
 

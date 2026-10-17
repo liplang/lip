@@ -4,6 +4,8 @@
 
 唯一语言依据为 [LIP 1.1 规范草案](spec/LIP-1.1-SPEC.md)。本仓库已实现 core 的入口、值与纯函数、控制结构、结构化 Flow、静态模块、Claim、图调度和统一 Host 边界，并提供解释执行与真正生成 Go 两条执行路径。以下按规范章节列出实现与可重复的回归证据，供使用、复核与后续开发。HTTP 是可选接入；可选 durable profile 未实现。
 
+1.1 的纯性承诺与 NaN/无穷扩展复用解释器、Go 生成和 REPL 路径。`Spec11PurityScopesAndCallIDs` 检查嵌套标记、回调、递归、独立调用身份和重放；`Spec11NonConcurrentAdmission` 检查跨 run 串行许可及等待让出工作额度。`Spec11NonFiniteSemanticsInterpreterAndGo`、`Spec11InfinityErrorsInterpreterAndGo`、`Spec11CanonicalAndTransport`、`Spec11NativeAdaptersAndGeneratedEntry`、`Spec11BoundariesReplayAndErrors` 覆盖数值、规范身份、严格 c-hex、Python/Go 通道、入口协议、HTTP 拒绝和保存的闭包。默认 JSON 的有限 Data 字节不变，CLI/生成程序以 `-data-encoding c-hex` 显式选择无损通道；不声明原生纯性证明或持久恢复。
+
 ## 规范覆盖
 
 测试集中在现有 `tests/` 文件；表中省略共同的 `Test` 前缀。

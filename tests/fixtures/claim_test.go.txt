@@ -4,6 +4,7 @@ import (
     "context"
     "sync"
     "testing"
+    "time"
 )
 
 func TestCompiledProgramFactoriesDoNotRewriteRunningMetadata(t *testing.T) {
@@ -69,4 +70,47 @@ func TestClaimConflictRetainsVariantsAndHistoricalSnapshot(t *testing.T) {
 	if len(store.variants[identityKey(joinWire("run", position))]) != 2 || before.l[0].o["value"].n != 1 {
 		t.Fatal("conflict lost facts or changed a snapshot")
 	}
+}
+
+func TestClaimNaNRedeliveryUsesCanonicalIdentity(t *testing.T) {
+	store := newClaimStore("nan-run")
+	position := Position{{1,"0"}}
+	value := object(map[string]Value{"x":ListValue(nanValue())})
+	for i:=0;i<3;i++ { if err:=store.join(position,value);err!=nil {t.Fatal(err)} }
+	if snapshot,err:=store.read();err!=nil || len(snapshot.l)!=1 {t.Fatal(snapshot,err)}
+	if equal,_:=Equal(value,value);equal {t.Fatal("language equality must remain false")}
+	if err:=store.join(position,object(map[string]Value{"x":ListValue(textValue("nan"))}));err==nil {t.Fatal("NaN and string conflated")}
+}
+
+func TestClaimInfinitySignsRemainDistinct(t *testing.T) {
+    for _, value := range []Value{infValue(),number(-infValue().n)} {
+        store := newClaimStore("inf-run")
+        position := Position{{1,"0"}}
+        if err := store.join(position,value); err != nil {t.Fatal(err)}
+        if err := store.join(position,value); err != nil {t.Fatal(err)}
+        if snapshot,err := store.read(); err != nil || len(snapshot.l)!=1 {t.Fatal(snapshot,err)}
+        if err := store.join(position,number(-value.n)); err == nil {t.Fatal("infinity signs conflated")}
+    }
+}
+
+func TestIndependentOperationPermitsMakeProgress(t *testing.T) {
+	ctx,cancel:=context.WithTimeout(context.Background(),time.Second)
+	defer cancel()
+	pool:=NewResourcePool(nil)
+	release,err:=pool.acquire(ctx,nil,"busy")
+	if err!=nil {t.Fatal(err)}
+	defer release()
+	done:=make(chan struct{})
+	go func(){defer close(done);release,err:=pool.acquire(ctx,nil,"busy");if err==nil {release()}}()
+	for {
+		pool.mu.Lock(); waiting:=len(pool.queue)>0;pool.mu.Unlock()
+		if waiting {break}
+		if ctx.Err()!=nil {t.Fatal(ctx.Err())}
+		time.Sleep(time.Millisecond)
+	}
+	other,err:=pool.acquire(ctx,nil,"independent")
+	if err!=nil {t.Fatal("independent operation blocked behind busy operation",err)}
+	other()
+	cancel()
+	<-done
 }

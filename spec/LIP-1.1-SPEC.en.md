@@ -36,14 +36,14 @@ EBNF uses `::=` for productions, `|` for alternatives, `[...]` for optional part
 
 ### 0.1. Relationship to 1.0
 
-This draft defines the complete 1.1 contract; the [1.0 specification](LIP-1.0-SPEC.en.md) remains historical. Existing valid 1.0 value/execution rules continue to hold apart from the newly occupied core function names. Added capabilities are arbitrary ordinary values in same-run Flow interfaces, nested calls in explicit arguments, perform operands, and pipeline extra arguments evaluated in the caller context, independent return Ops summaries for static child Flows, and §3.2 one-way diagnostics in fn. Flows remain non-values, their call graph remains acyclic, and fn retains purity of computational results and business effects. The new core names print, log, and telemetry cannot be redefined; existing custom bindings or declarations using these names MUST be renamed. Host/entry/Claim Data encodings do not change; effect<T>, dynamic Flows, and shared stores are not introduced. Source identities need not survive refactoring, and dynamic effect parameters do not acquire known Ops. Native provenance MUST distinguish inputs from actual results: an unreturned native argument MUST NOT contaminate a pure result, and equivalent static return structures MUST NOT depend on declaration order or private names. Provenance grants no concurrency permission. The engineering release version is managed separately; §17 only records actually verified implementation status.
+This draft defines the complete 1.1 contract; the [1.0 specification](LIP-1.0-SPEC.en.md) remains historical. Existing valid 1.0 finite-value/execution rules continue to hold apart from newly occupied names and the explicit nonfinite input/parsing extensions. Added capabilities are arbitrary ordinary values in same-run Flow interfaces, nested calls in explicit arguments, perform operands, and pipeline extra arguments evaluated in the caller context, independent return Ops summaries for static child Flows, §3.2 one-way diagnostics in fn, §10.3 native calls explicitly promised pure through @{...} fn bodies, and the §3.3 number values nan, inf, and -inf. Flows remain non-values, their call graph remains acyclic, and fn retains purity of computational results and business effects provided authors fulfill §10.3. New core names print, log, and telemetry cannot be redefined; nan and inf are reserved. Existing declarations using these names MUST be renamed. Finite Data canonical encodings and existing JSON transport remain unchanged; NaN and signed infinities add canonical numeric encodings and explicit lossless transport (§16.6). effect<T>, dynamic Flows, and shared stores are not introduced. Source identities need not survive refactoring, and dynamic effect parameters do not acquire known Ops. Native provenance MUST distinguish inputs from actual results: an unreturned native argument MUST NOT contaminate a pure result, and equivalent static return structures MUST NOT depend on declaration order or private names. Provenance grants no concurrency permission. The engineering release version is managed separately; §17 only records actually verified implementation status.
 
 ## 1. Core objects
 
 | Object | Rule |
 |---|---|
-| Data | null, bool, finite binary64 number, UTF-8 string, list, string-keyed object |
-| fn | Pure closure over immutable values, allowing §3.2 one-way diagnostics; recursion, mutual recursion, and function values are supported |
+| Data | null, bool, number (finite binary64, signed infinities, or canonical NaN), UTF-8 string, list, string-keyed object |
+| fn | Pure closure over immutable values, allowing §3.2 diagnostics and §10.3 native calls explicitly promised pure through @{...}; recursion, mutual recursion, and function values are supported |
 | effect | Immutable proposal containing a resolved operation and fixed Data arguments |
 | Flow | Named graph definition lowered from bindings, control structures, and child calls; not an ordinary value |
 | Claim store | Information slot growing only through join during a run |
@@ -56,9 +56,11 @@ Ordinary values V recursively comprise null, bool, number, string, list<V>, obje
 
 Files MUST be valid UTF-8 without BOM. LF/CRLF, spaces/tabs, `#` line comments, semicolons, and physical newline separators are supported. Other bare control characters are invalid, apart from multiline-string rules below. A trailing backslash explicitly continues a line and MUST be its final character. Parentheses, argument lists, lists, and objects permit natural newlines; block newlines separate statements. The lexer preserves newlines and the parser handles context; a following operator does not implicitly continue a line.
 
-Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Reserved words are `import as flow fn return if else match for in parallel break continue with next effect perform export true false null void`. `go/python/host/lip` are contextual after import; type names have special meaning only in type/pattern positions. `claim`, import aliases, and §3 core function names cannot be redefined. Other duplicate same-scope declarations are static errors.
+Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Reserved words are `import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan inf void`. `go/python/host/lip` are contextual after import; type names have special meaning only in type/pattern positions. `claim`, import aliases, and §3 core function names cannot be redefined. Other duplicate same-scope declarations are static errors.
 
 Strings use `"..."` or ASCII `"""..."""`. Bare newline/tab are invalid in ordinary strings; triple-quoted strings allow them, normalize LF/CRLF to LF, and reject bare CR. Both forms support only `\"`, `\\`, `\n`, `\r`, `\t`, and `\u{HEX}` with 1–6 hexadecimal digits denoting a Unicode scalar, excluding surrogates and values above U+10FFFF. No Unicode normalization occurs. Triple quotes take lexical precedence and end at the first unescaped three consecutive ASCII double quotes; one/two internal quotes are text, and escaped quotes can represent three literal quotes. `#`, brackets, and operators inside strings are text. No trimming, automatic dedentation, interpolation, raw/f-string prefixes, or backslash-newline continuation inside strings is provided. An unclosed triple quote is E-LEX; interactive tools may collect more lines and MUST treat embedded `:help` and similar text as string content. Both forms produce the same UTF-8 string type, encoding, comparison, and Host boundary.
+
+The reserved literals nan and inf are also allowed as field names, including `np.nan`, `np.inf`, and `{nan:nan,inf:inf}`; this does not allow variables named nan or inf.
 
 Number tokens match `(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`, converted to finite binary64 with nearest/ties-to-even rounding. Overflow is invalid; underflow MUST round to a subnormal or zero, rather than optionally fail or flush to zero. Signs are unary operators; there is no implicit octal. Operators use longest match: `**`, `*/`, `//`, `|>` are single tokens without internal whitespace.
 
@@ -74,10 +76,10 @@ fn_decl    ::= "fn" id params "->" type fn_body padding
 flow_decl  ::= "flow" id params "->" (type | "void") block padding
 data_decl  ::= id ":" type "=" static_data decl_end
 decl_end   ::= sep | EOF
-static_data ::= literal | ("+" | "-") number
+static_data ::= literal | ("+" | "-") (number | "inf")
               | "[" [static_data ("," static_data)* [","]] "]"
               | "{" [static_field ("," static_field)* [","]] "}"
-static_field ::= (id | string) ":" static_data
+static_field ::= (field_name | string) ":" static_data
 params     ::= "(" [parameter ("," parameter)* [","]] ")"
 parameter  ::= id ":" type
 type       ::= "null" | type_name ["?"]
@@ -103,7 +105,7 @@ concrete_type ::= "bool" | "number" | "string" | "list" | "object"
 expr       ::= pipeline
 pipeline   ::= or ("|>" stage)*
 stage      ::= static_target ["(" [named_args [","]] ")"]
-static_target ::= id | id "." id
+static_target ::= id | id "." field_name
 pipeline_stmt ::= or "|>" stage ("|>" stage)*
 or         ::= and ("||" and)*
 and        ::= equality ("&&" equality)*
@@ -115,7 +117,7 @@ unary      ::= ("!" | "-" | "+") unary | power
 power      ::= power_base ["**" unary]
 power_base ::= perform | proposal | postfix
 postfix    ::= primary suffix*
-suffix     ::= "(" [arguments [","]] ")" | "." id
+suffix     ::= "(" [arguments [","]] ")" | "." field_name
              | "[" (expr | slice_spec) "]"
 slice_spec ::= [expr] ":" [expr] [":" [expr]]
 arguments  ::= positional_args ["," named_args] | named_args
@@ -131,11 +133,12 @@ primary    ::= literal | id | "(" expr ")" | list | object | value_block
 if_expr    ::= "if" expr value_block "else" (value_block | if_expr)
 proposal   ::= "effect" operation "(" [arguments [","]] ")"
 perform    ::= "perform" (proposal | postfix)
-operation  ::= id ("." id)*
+operation  ::= id ("." field_name)*
+field_name ::= id | "nan" | "inf"
 call       ::= postfix                 # last suffix must be an argument list
-fn_body    ::= "{" padding (pure_stmt sep)* fn_tail padding "}"
+fn_body    ::= ["@"] "{" padding (pure_stmt sep)* fn_tail padding "}"
 fn_tail    ::= ["return"] expr
-pure_stmt  ::= id "=" expr | call | pipeline_stmt | if_stmt | match_stmt | for_stmt
+pure_stmt  ::= id "=" expr | call | perform | pipeline_stmt | if_stmt | match_stmt | for_stmt
              | "break" | "continue"
 local_stmt ::= id "=" expr | call | perform | pipeline_stmt | if_stmt | match_stmt | for_stmt
 value_block ::= "{" padding (local_stmt sep)* expr padding "}"
@@ -151,13 +154,13 @@ arm_expr   ::= patterns ["if" expr] "=>" expr
 list       ::= "[" [expr ("," expr)* [","]] "]"
              | "[" expr "for" id "in" expr ["if" expr] "]"
 object     ::= "{" [field ("," field)* [","]] "}"
-field      ::= (id | string) ":" expr
-literal    ::= number | string | "true" | "false" | "null"
+field      ::= (field_name | string) ":" expr
+literal    ::= number | string | "true" | "false" | "null" | "nan" | "inf"
 ```
 
 The file mode is chosen uniquely from module-level declarations: any export, Flow, or data declaration selects `declarations`; otherwise use `fn_decl* statements`, whose statements may be empty. A root with only imports/ordinary fn therefore has an implicit empty main; a dependency merely supplies declarations. Tokens inside bodies do not choose the mode. Declaration mode cannot mix top-level statements, and legacy statement mode cannot declare static data. All imports precede every declaration/statement, including exported data.
 
-Nested `pure_stmt` blocks are pure statements and cannot return. A function has exactly its final result expression, optionally preceded by return. It cannot declare/read/join stores, perform, or call child Flows, including Pure Flows; constructing an effect is allowed, including when returning function/effect values. Collect named fn/Flow signatures before body checking: named calls may refer forward. fn supports recursion/mutual recursion; §6.3 rejects Flow cycles. Ordinary values cannot refer forward; static data follows §2.2. Data/fn/Flow share a module declaration namespace; duplicates are E-DUPLICATE. Lexical shadowing never silently falls back to a Flow declaration. Parameters, local bindings, and loop variables are unique within their scopes. A shadowing RHS evaluates in the outer environment; the new binding is visible only afterward. Each loop iteration creates a fresh scope. fn loops are sequential, disallow parallel, and do not mutate or leak outer bindings.
+Nested `pure_stmt` blocks are pure statements and cannot return. A function has exactly its final result expression, optionally preceded by return. It cannot declare/read/join stores or call child Flows, including Pure Flows; constructing effects is allowed, including when returning function/effect values. Ordinary {...} bodies reject perform; only @{...} bodies may perform under the §5/10.3 explicit author purity promise. Collect named fn/Flow signatures before body checking: named calls may refer forward. fn supports recursion/mutual recursion; §6.3 rejects Flow cycles. Ordinary values cannot refer forward; static data follows §2.2. Data/fn/Flow share a module declaration namespace; duplicates are E-DUPLICATE. Lexical shadowing never silently falls back to a Flow declaration. Parameters, local bindings, and loop variables are unique within their scopes. A shadowing RHS evaluates in the outer environment; the new binding is visible only afterward. Each loop iteration creates a fresh scope. fn loops are sequential, disallow parallel, and do not mutate or leak outer bindings.
 
 A valued Flow MUST have exactly one final top-level return. A void Flow may omit it or end with bare return. Return does not skip other nodes; branches/loops cannot return. Top-level statements form a zero-parameter void `main`, optionally preceded by ordinary fn. Imported modules cannot have top-level statements or implicit main. Explicit roots may declare several Flows; one run selects exactly one. An explicit Host/tool root Flow declaration name takes precedence. Otherwise select the root Flow named exactly `Main`; if absent, select the sole root Flow, or reject with E-ENTRY when there is no unique default. Names are case-sensitive: `main` has no priority, and declaration order does not affect selection. An unknown/non-root-Flow explicit choice is E-ENTRY, without fallback to the default. Imported Flows do not count toward root entry selection. Declaration roots with data/export but no root Flow are E-ENTRY. All source-set declarations are checked, including unselected entries.
 
@@ -177,7 +180,7 @@ All positional arguments precede named arguments; `f(x=1,2)` is E-PARSE. Duplica
 
 `F(args)` is a structured child invocation when its callee lexically resolves to a named Flow. Targets MUST be statically known local declarations or exported `alias.Name` members (§2.2), never Flow values, dynamic callees, ordinary object members, or runtime name lookup.
 
-Explicit Flow arguments MAY be any ordinary-value expressions, including functions, effects, nested containers, performs, and child calls. Evaluate them in source order in the caller cursor, waiting for each to complete before the next. Instantiate the child only after all arguments complete and annotations pass. Unselected calls do not evaluate arguments. Pure positions, including fn, guards, and proposal/join RHS, still forbid hidden performs or child calls. Parameters follow positional-then-named binding, without defaults, spreading, or variadics.
+Explicit Flow arguments MAY be any ordinary-value expressions, including functions, effects, nested containers, performs, and child calls. Evaluate them in source order in the caller cursor, waiting for each to complete before the next. Instantiate the child only after all arguments complete and annotations pass. Unselected calls do not evaluate arguments. Pure positions, including fn, guards, and proposal/join RHS, still forbid hidden non-Pure performs or child calls. Parameters follow positional-then-named binding, without defaults, spreading, or variadics.
 
 `|>` has lower precedence than `||` and runs stages left to right. A stage MUST resolve lexically to a named fn/Flow, an exported module fn/Flow, or a core pure function. It does not search past a shadowing local. Undeclared targets are E-NAME, private members E-EXPORT, and dynamic function values/object members/other nonstatic targets E-TYPE. Both `x |> F` and `x |> F()` bind x to the first declared parameter; `x |> F(limit=20)` also binds named arguments. Stages accept no extra positional arguments, placeholders, or implicit field spreading. Missing first parameter, duplicate first binding, missing/unknown arguments are E-ARITY. Core functions still reject names, receive exactly one positional argument, and MUST accept that arity: len/str/range work; map/fold need a named fn wrapper.
 
@@ -195,7 +198,7 @@ For a final void Flow in a standalone pipeline statement, wait for completion wi
 
 A whole pipeline belongs to one caller node, including inside value blocks/carry. Its temporaries/stages introduce no graph nodes or new source tokens/sites; child Flows instantiate their own regions. Lowered line numbers/temporary IDs MUST NOT replace §6.2 identities. Source rewrites change revision; semantic equivalence promises no cross-revision CallID equality. A Flow stage waits for the complete region, not an early return value. Pipelines neither inspect business Result values nor automatically unwrap `{ok:false}`, truncate, or retry.
 
-Pipelines are expressions or standalone statements; context purity/type/Data restrictions apply recursively. Guards, proposal/join RHS, carry exits, and fn bodies allow pure fn/core stages but no perform/Flow calls hidden by containers/parentheses/blocks. `ok && x |> F` groups as `(ok && x) |> F`; `x |> F == y` is E-PARSE; use `(x |> F) == y`. §15 recommends W-PIPE-PRECEDENCE for unparenthesized mixed boolean/pipeline expressions. Void Flows are permitted only as standalone calls or final standalone pipeline stages; other value uses are E-TYPE. Pipelines are single evaluations, not streaming, subscriptions, background tasks, or message delivery; use bindings/if/match/for for branching, joins, and iteration.
+Pipelines are expressions or standalone statements; context purity/type/Data restrictions apply recursively. Guards, proposal/join RHS, carry exits, and fn bodies allow pure fn/core stages but no non-Pure perform/Flow calls hidden by containers/parentheses/blocks. `ok && x |> F` groups as `(ok && x) |> F`; `x |> F == y` is E-PARSE; use `(x |> F) == y`. §15 recommends W-PIPE-PRECEDENCE for unparenthesized mixed boolean/pipeline expressions. Void Flows are permitted only as standalone calls or final standalone pipeline stages; other value uses are E-TYPE. Pipelines are single evaluations, not streaming, subscriptions, background tasks, or message delivery; use bindings/if/match/for for branching, joins, and iteration.
 
 ### 2.2. Static modules, exports, and build inputs
 
@@ -205,11 +208,11 @@ Local path components MUST byte-match directory-entry names, without case foldin
 
 `import lip "./lib/pricing.lip" as pricing` requires explicit as. Resolve relative to the importer into a `.lip` file within the project root and normalize to SourceID. Hosts may use local files or supplied tables, but MUST NOT download/load dependencies or initialize modules during run startup, requests, completion, or pure evaluation. Missing/escaping/ambiguous/lock-mismatched content is E-MODULE. This version defines no package manager, remote import, or runtime module loading.
 
-Resolve each SourceID once, without duplicating declarations/execution across aliases/importers. All static imports form the module graph; direct/indirect cycles are E-MODULE-CYCLE even in unused code. Dependencies may have imports/declarations without Flows, but no top-level statements/evaluation. perform/claim appear only in legal Flow bodies. Discarding a top-level call result does not make it a declaration. Roots retain §2 entry rules.
+Resolve each SourceID once, without duplicating declarations/execution across aliases/importers. All static imports form the module graph; direct/indirect cycles are E-MODULE-CYCLE even in unused code. Dependencies may have imports/declarations without Flows, but no top-level statements/evaluation. Performs are legal within @{...} fn or Flow bodies, with the §10.3 explicit author promise in the former; store declarations remain confined to Flow bodies, including exported definitions. Discarding a top-level call result does not make it a declaration. Roots retain §2 entry rules.
 
 Declarations default to private. export modifies only top-level fn/Flow/static Data, not locals/imports/namespaces. Access is by explicit aliases, without wildcard import, implicit namespace merging, namespace reexport, or textual concatenation. Private access is E-EXPORT. Aliases are not module values passable to functions. Private same-named declarations in different modules do not conflict.
 
-`export TAX_RATE:number = 0.1` is immutable static Data. Initializers are only §2 static_data literal trees, with no names/calls/proposals/Flows/evaluation. Validate types, finiteness, Unicode, duplicate fields, and Data normally. After signature collection, module definitions may forward-reference static data; it cannot be reassigned. Parsing/validation/memory count toward build budgets without starting runs or invoking Hosts.
+`export TAX_RATE:number = 0.1` is immutable static Data. Initializers are only §2 static_data literal trees, with no names/calls/proposals/Flows/evaluation. Validate types, numbers including nan, Unicode, duplicate fields, and Data normally. After signature collection, module definitions may forward-reference static data; it cannot be reassigned. Parsing/validation/memory count toward build budgets without starting runs or invoking Hosts.
 
 An exported `pricing.total` fn evaluates in its defining module environment and may be used as a function value; it captures only that module's immutable data/closures. Exported `pricing.Quote(args)` is a static child call, also expressible as `request |> pricing.Quote`. Exported data is a fixed reference. Distinguish module resolution from object projection during checking. Flow export never creates a dynamic function value. Cross-module fn proposal results use the same §5 return summaries, with operation identities resolved in the defining module; importing never strengthens contracts. Imported definitions use their own imports/data/private declarations. External aliases are not directly exported; use fn proposals or Flow wrappers. Canonical operation identity uses the defining module's original import, unaffected by caller aliases.
 
@@ -263,13 +266,13 @@ Valued entries use only value with their validated result; void entries, includi
 
 ## 3. Values and core operations
 
-All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers or two strings; other comparisons are E-TYPE. `+` accepts two numbers or two strings, never implicit conversion. Numeric unary `+/-`, arithmetic, and ordering use finite binary64; normalize negative zero to zero. Overflow/nonfinite results and division by zero are errors.
+All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers or two strings; other comparisons are E-TYPE. `+` accepts two numbers or two strings, never implicit conversion. Numbers are binary64, including §3.3 signed infinities and canonical NaN; normalize negative zero to zero. Handle nonfinite operands under §3.3 first; finite-operand overflow/nonfinite results and division by zero remain errors.
 
 Data is a finite acyclic value tree: lists preserve order, objects have unique keys and canonical UTF-8 key order. Native mutable objects must be copied to Data or represented by declared Host references, never directly shared. Equality is typed and structural: null equals only null, and bool never equals number; fn/effect are not comparable even inside containers. Field/index access creates no implicit binding. Stop operand evaluation after an error.
 
-Basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. Division by zero/nonfinite results are E-NUMBER. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`. Host integers outside this range require rejection or explicit string/bytes schema encoding.
+For finite operands, basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. Division by zero/nonfinite results are E-NUMBER. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`. Host integers outside this range require rejection or explicit string/bytes schema encoding.
 
-`a ** b` is real exponentiation; `a */ b` is real logarithm to base b. Both require numbers (E-TYPE otherwise). `0 ** 0 = 1`; zero to a negative power and negative bases to nonintegral powers are E-NUMBER. Integral exponent means the stored binary64 is exactly integral, without the safe-index limit. Log requires a>0, b>0, b!=1; `1 */ b = 0` and `a */ a = 1`. Overflow is E-NUMBER; subnormals/underflow to zero are allowed, with zero normalization. Both MUST use §16.5's fixed binary64 algorithm, not platform/version-dependent pow/log. They approximate real operations without correctly-rounded guarantees; mathematically equivalent expressions need not be bit-identical. Other numerical functions/complex values belong to libraries.
+For finite operands, `a ** b` is real exponentiation; `a */ b` is real logarithm to base b. Both require numbers (E-TYPE otherwise). `0 ** 0 = 1`; zero to a negative power and negative bases to nonintegral powers are E-NUMBER. Integral exponent means the stored binary64 is exactly integral, without the safe-index limit. Log requires a>0, b>0, b!=1; for valid finite inputs `1 */ b = 0` and `a */ a = 1`. Overflow is E-NUMBER; subnormals/underflow to zero are allowed, with zero normalization. Both MUST use §16.5's fixed binary64 algorithm, not platform/version-dependent pow/log. They approximate real operations without correctly-rounded guarantees; mathematically equivalent expressions need not be bit-identical. Other numerical functions/complex values belong to libraries.
 
 `**` associates right and binds tighter than its left unary sign, while allowing a signed exponent. `*/` shares `* / // %` precedence and associates left.
 
@@ -317,7 +320,7 @@ The table and §3.2 diagnostics form the complete non-overridable core functions
 | Signature | Arity | Contract |
 |---|---|---|
 | len(value) | 1 | string/list/object → number; strings count Unicode scalars |
-| str(value) | 1 | Data → string; strings unchanged, other Data as compact canonical JSON |
+| str(value) | 1 | Data → string; strings unchanged, other Data as compact canonical display, extended for nonfinite numbers under §3.3 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | Safe integers, nonzero step → half-open number list; defaults start=0, step=1 |
 | map(xs,f) | 2 | list, pure unary function → results in input order |
 | fold(xs,seed,f) | 3 | list, V, pure binary function → strict left fold; empty list returns seed |
@@ -328,13 +331,13 @@ The table and §3.2 diagnostics form the complete non-overridable core functions
 | has(o,k) | 2 | object, string → bool; missing key is false |
 | put(o,k,v) | 3 | object, string, V → object with the key added/replaced |
 | split(s,separator) | 2 | string, nonempty string → nonoverlapping left-to-right split retaining empty segments |
-| parse_number(s) | 1 | string → finite number from complete text |
+| parse_number(s) | 1 | string → number from finite numeric text or exactly "nan", "inf", "+inf", "-inf" |
 
 Core functions reject named arguments and check declared arity statically when known and dynamically through function values. They may be passed as pure function values. map calls f(element); fold calls f(accumulator,element), using §5's callable/arity/type checks even on empty inputs when statically known. Unguarded comprehensions are ordered map; guards follow §6.2. Flow comprehensions containing perform run sequentially like list literals. range checks size budget before allocation and computes length/elements with exact integers before converting to number, without floating-point loops. len MUST return a safe integer or explicitly fail, never round an incorrect length.
 
 slice uses exactly the bracket slicing rules above, including negative bounds, clipping, nullable components, and a nonzero optional step. `slice(v,null,null,-1)` equals `v[::-1]`. has/put require string keys. Empty split separator is E-VALUE; `split("",",")=[""]` and `split("a,,b,",",")=["a","","b",""]`. There are no hidden parameters.
 
-parse_number accepts an optional ASCII sign followed by exactly §2's number token. Reject whitespace, leading zeroes, hex, NaN/Infinity, and trailing text. Invalid text/overflow is E-VALUE; wrong type E-TYPE. Rounding, subnormals, underflow, and zero normalization match literals, not permissive Host parsers. `parse_number(str(n)) == n` holds for every core number.
+parse_number accepts exactly lowercase "nan", "inf", "+inf", "-inf", or an optional ASCII sign followed by exactly §2's number token. Reject whitespace, leading zeroes, hex, "NaN", "+nan", "-nan", Infinity, and trailing text. Invalid text/overflow is E-VALUE; wrong type E-TYPE. Rounding, subnormals, underflow, and zero normalization match literals, not permissive Host parsers. `parse_number(str(n)) == n` holds for every non-NaN number; test NaN round trips with is_nan.
 
 Filtering, defaults, object merging, concatenation, and membership can be composed in ordinary pure fn:
 
@@ -350,15 +353,15 @@ fn merge_objects(a: object, b: object) -> object {
 }
 ```
 
-Canonical JSON display is independent of Host printing. Zero is `0`. For the exact mathematical value v of a nonzero binary64, among round-tripping decimal values `m×10^e`, choose m with the fewest significant digits and no leading/trailing zeroes, then the smallest exact distance to v, then smaller absolute value on a tie. Let its scientific exponent be k: use plain decimal when `-6≤k<21`, otherwise one integer digit, optional fraction, lowercase e, and exponent without plus sign/leading zeroes. Plain fractions need an integer part and no meaningless trailing zeroes; prefix negatives with `-`. Thus `str(1e3)=1000`, `str(1e21)=1e21`. Escape only quote, backslash, and U+0000–001F; controls use lowercase `\u00xx`, all other UTF-8 is literal. Recurse into lists/objects and sort object fields by UTF-8 bytes. fn/effect and containers containing them cannot be str-encoded.
+Canonical JSON display for finite numbers is independent of Host printing. Zero is `0`. For the exact mathematical value v of a nonzero binary64, among round-tripping decimal values `m×10^e`, choose m with the fewest significant digits and no leading/trailing zeroes, then the smallest exact distance to v, then smaller absolute value on a tie. Let its scientific exponent be k: use plain decimal when `-6≤k<21`, otherwise one integer digit, optional fraction, lowercase e, and exponent without plus sign/leading zeroes. Plain fractions need an integer part and no meaningless trailing zeroes; prefix negatives with `-`. Thus `str(1e3)=1000`, `str(1e21)=1e21`. Escape only quote, backslash, and U+0000–001F; controls use lowercase `\u00xx`, all other UTF-8 is literal. Recurse into lists/objects and sort object fields by UTF-8 bytes. fn/effect and containers containing them cannot be str-encoded.
 
 This display is not RFC 8785/JCS and need not match JSON.stringify bytes. Display is not injective: `str("1")==str(1)` is valid. Fingerprints/identities use typed C (§16.1), never str. JSON inputs MUST reject duplicate keys, including equal decoded keys.
 
-Closures capture immutable snapshots, permitting structural sharing without physical copying per call. They MUST NOT capture live Claim stores or turn native callables into pure functions executable within fn. Immutable resource references and requests MAY be captured, returned, or passed across child Flows; capture performs no action, and actual use still requires perform with the original ownership, permissions, and lifetime. Read a store into Data first, then capture it. `g=fn()->list{facts}` for a live store is static E-PURITY, not an implicit read at closure construction; use `captured=facts` and capture captured, retaining complete-read dependencies/position rules.
+Closures capture immutable snapshots, permitting structural sharing without physical copying per call. They MUST NOT capture live Claim stores or wrap native callables to bypass the unified perform boundary; native calls within closures also require their own §10.3 @{...} body to explicitly promise purity. Immutable resource references and requests MAY be captured, returned, or passed across child Flows; capture performs no action, and actual use still requires perform with the original ownership, permissions, and lifetime. Read a store into Data first, then capture it. `g=fn()->list{facts}` for a live store is static E-PURITY, not an implicit read at closure construction; use `captured=facts` and capture captured, retaining complete-read dependencies/position rules.
 
 ### 3.2. Diagnostic output without computational feedback
 
-Pure in this version describes computational results and business effects: with fixed arguments and immutable captures, values, errors, and control choices of pure computation do not depend on the diagnostic receiver. fn may emit diagnostics defined here; this grants no arbitrary external execution. The diagnostic stream is not a program-readable value, Claim, or shared state. When the stream is included among observations, full referential transparency and identical ordering across schedules are not promised. Input mutation, clock/random/external-state reads, perform, and Flow calls remain forbidden in fn.
+Pure in this version describes computational results and business effects: with fixed arguments and immutable captures, values, errors, and control choices of pure computation do not depend on the diagnostic receiver. fn may emit diagnostics defined here; this grants no arbitrary external execution. The diagnostic stream is not a program-readable value, Claim, or shared state. When the stream is included among observations, full referential transparency and identical ordering across schedules are not promised. The diagnostic rule itself permits no input mutation, clock/random/external-state reads, or Flow calls. Native calls in fn require the §10.3 explicit @{...} promise, rather than a purity proof supplied by diagnostics.
 
 | Core function | arity | Arguments and result |
 |---|---|---|
@@ -366,7 +369,7 @@ Pure in this version describes computational results and business effects: with 
 | log(level,value) | 2 | A string level label and any V; returns fixed null |
 | telemetry(name,fields) | 2 | A string event name and object fields; returns fixed null |
 
-These names follow core resolution, non-overriding, and positional-argument rules; they are not new keywords. They are allowed in fn, closures, recursion, higher-order callbacks, pipelines, guards, proposal arguments, carry exits, and other Pure positions. Ordinary core runtime type checks apply. log does not validate a level enumeration. Projects may wrap formatting and fields in pure fn. Their computational effect is Pure; they do not weaken RetOps or introduce barriers, provider admission, CallID, Claims, or journal records. Argument effects MUST still be merged: a perform within a Flow print argument still contributes its execution effect; the same perform inside fn remains E-PURITY.
+These names follow core resolution, non-overriding, and positional-argument rules; they are not new keywords. They are allowed in fn, closures, recursion, higher-order callbacks, pipelines, guards, proposal arguments, carry exits, and other Pure positions. Ordinary core runtime type checks apply. log does not validate a level enumeration. Projects may wrap formatting and fields in pure fn. Their computational effect is Pure; they do not weaken RetOps or introduce barriers, provider admission, CallID, Claims, or journal records. Argument effects MUST still be merged: a perform within a Flow print argument still contributes its execution effect; performs in ordinary fn remain E-PURITY, while those in @{...} count as Pure under the §10.3 explicit promise.
 
 Each actually evaluated valid diagnostic call makes one emission attempt and normally returns null. Unselected branches do not emit. Declaration, completion, static checking, and builds do not execute diagnostics. Disabling output MUST retain ordinary argument evaluation order and checks; print(1/0) still raises its argument's E-NUMBER. Compilers MUST NOT use result purity alone to delete, merge, cache, or speculate diagnostic calls in ways that change emission attempts on the executed path. Pure-value optimization must preserve these attempts and argument errors.
 
@@ -386,6 +389,41 @@ flow Main()->number { return doubled(3) }
 ```
 
 This example returns 6 with diagnostics enabled, disabled, or full; diagnostic output is not part of that numeric result.
+
+### 3.3. NaN and infinite numbers
+
+`nan` is a non-overridable number literal, neither null, string, nor an external property. It is valid in static Data, number/number?/any annotations, containers, Claims, and entry/Host values. Normalize every native quiet/signaling NaN, regardless of sign/payload, to binary64 bits `0x7ff8000000000000` before it enters LIP; no payload remains observable. `inf` is also a non-overridable number literal: binary64 positive infinity (bits 0x7ff0000000000000). `-inf` is its unary-negative form (bits 0xfff0000000000000). Native NaN and signed infinities may enter the same Data positions. Finite-operand domain errors, division by zero, and overflow do not silently become nan/inf.
+
+NaN detection composes existing comparison without another core function. Below, is_nan denotes this ordinary helper fn, which programs declare before use:
+
+```lip
+fn is_nan(x:number)->bool { x != x }
+```
+
+- Between numbers, if either operand is NaN, `==` is false, `!=` true, and `< <= > >=` all false, including `nan == nan` being false. Container equality applies this recursively; neither object identity nor equal C bytes substitutes for language equality. Incomparable function/effect values still follow existing error rules.
+- Unary `+nan` and `-nan` both yield nan. Binary operations first validate operand types. With either operand NaN, `+ - * / // % */` yield nan before finite-domain checks, so `nan / 0` is nan. For `**`, a finite zero exponent or finite base 1 first yields 1; otherwise either NaN yields nan. Thus `nan ** 0` and `1 ** nan` are 1; `0 ** nan` and `(-2) ** nan` are nan. Arguments still evaluate strictly left to right: `nan + fail("stop")` fails.
+- NaN is not a safe integer: index/slice positions raise E-INDEX, range raises E-VALUE, and native integer conversion rejects it. A number type pattern matches NaN; a nan literal pattern uses equality and matches nothing. Use `is_nan(x)` or a `number if is_nan(x)` guard.
+- `str(nan)` is exactly "nan". Container displays recursively use bare nan at numeric positions, such as `[nan]`. Displays containing only finite numbers remain ordinary JSON, excluding unchanged top-level strings. print/REPL may use this display; protocols MUST NOT treat it as JSON or silently substitute null/string. Lossless transport follows §16.6.
+
+Language equality differs from identity consistency: C(nan) is fixed (§16.1). Redelivery of the same NaN contribution at one JoinID is idempotent; canonical NaN arguments at one CallID permit replay. Neither merges with null, string "nan", or another value.
+
+The following rules apply to `inf` and `-inf`. Check operand types first, then the power identities and NaN rules above, then this table, before entering finite algorithms. After NaN propagation, a zero divisor for `/ // %` always raises E-NUMBER, including `inf / 0`. Operands still evaluate in the usual strict order.
+
+| Case | Result |
+|---|---|
+| Comparison and patterns | Negative infinity is below every finite x, which is below positive infinity; same-sign infinities are equal, opposite signs differ; NaN remains unordered; inf/-inf literal patterns match same-sign infinities |
+| Unary `+ -` | Plus preserves the value; minus reverses the infinity's sign |
+| `+ - * /` with at least one infinite operand | IEEE binary64 rules; same-sign infinity subtraction, opposite-sign infinity addition, zero times infinity, and infinity divided by infinity yield nan; finite divided by infinity yields canonical zero |
+| `a // b` or `a % b`, a infinite and b nonzero | nan, including when b is also infinite |
+| a finite, b infinite, `a // b` | -1 when a is nonzero and has the opposite sign to b; otherwise 0 |
+| a finite, b infinite, `a % b` | b when a is nonzero and has the opposite sign to b; otherwise a, with zero normalization |
+| `a ** b`, b infinite | 1 if abs(a)==1; if abs(a)>1, positive infinite exponent yields inf and negative infinite exponent yields 0; reverse these results if abs(a)<1, including zero bases |
+| `a ** b`, a infinite and b finite/nonzero | 0 if b<0; if b>0, inf, except a negative infinite base with an odd integral exponent yields -inf; nonintegral b yields positive inf |
+| `a */ b` with infinity | First require a>0, b>0, b!=1; a=b=inf yields nan; only a=inf yields inf for b>1 or -inf for b<1; only b=inf yields 0 |
+
+Here abs is mathematical notation, not a new core function. Existing `a ** 0 = 1` and `1 ** b = 1` precede NaN/infinity rules: `inf ** 0 = 1`, `(-1) ** inf = 1`, and `0 ** -inf = inf`. Finite negative bases with finite nonintegral exponents still raise E-NUMBER; finite algorithms do not convert overflow to inf. Floor division/remainder use the one-sided limits as a finite divisor approaches the specified signed infinity, as in Python. Never apply exact finite rational algorithms to infinities or require finite remainder identities for infinite operands.
+
+`str(inf)` and `str(-inf)` are exactly "inf" and "-inf"; container display recursively uses these bare texts. parse_number accepts exactly lowercase "inf", "+inf", and "-inf", but rejects "Inf" and "Infinity". Infinity is not a safe integer: index/slice positions raise E-INDEX, range raises E-VALUE, and native integer parameters reject it. Go float32/float64 and Python float preserve its sign. Ordinary JSON rejects nonfinite numbers; lossless transport follows §16.6. Detection needs no new core function: an ordinary `fn is_inf(x:number)->bool { x == inf || x == -inf }` suffices. C preserves the distinct infinity bits, so Claim/journal identities distinguish signs, NaN, null, and strings.
 
 ## 4. Function computation and execution machine
 
@@ -411,14 +449,14 @@ Budget exhaustion is an execution failure, not a function result. Implementation
 
 | Effect ε | Meaning |
 |---|---|
-| Pure | Core computation and §3.2 one-way diagnostics without external business execution |
+| Pure | Core computation, §3.2 diagnostics, and fn computation under the §10.3 author purity promise; business purity depends on that promise being fulfilled |
 | ReadOnly | External reads; registered contract guarantees no external writes |
 | Write | May change external state |
 | Unknown | Operation set/effect cannot be proven; admitted under write restrictions |
 
-Recorded is journal metadata for perform observations, not a propagated value label/type dimension. Unknown has Write admission/concurrency restrictions. Idempotency is a Host contract, not another effect level. Concurrent is a descriptor bool: true permits overlapping calls; false uses §7 barriers. ReadOnly does not imply Concurrent. Each run fixes registry Σ, including names/versions/schemas/effects. Capability revocation may reject execution without changing existing proposals.
+Recorded is journal metadata for perform observations, not a propagated value label/type dimension. Unknown has Write admission/concurrency restrictions. Idempotency is a Host contract, not another effect level. Concurrent is a descriptor bool: true permits overlapping calls; false forbids overlap, using §7 barriers outside fn and serialized Host admission under §10.3 inside @{...}. Neither ReadOnly nor the @{...} author promise implies Concurrent=true. Each run fixes registry Σ, including names/versions/schemas/effects. Capability revocation may reject execution without changing existing proposals.
 
-any is the top V type; τ? means τ or null, and any? equals any. list/object annotations constrain outer shape, not recursive Data. Only §2's bare/nullable source types exist; list<object> is descriptive notation. Closures carry actual names/types/arity/result annotations, while bare function parameters need not reveal them statically. All language fn are pure; hidden signatures require dynamic checking, not arbitrary higher-order inference.
+any is the top V type; τ? means τ or null, and any? equals any. list/object annotations constrain outer shape, not recursive Data. Only §2's bare/nullable source types exist; list<object> is descriptive notation. Closures carry actual names/types/arity/result annotations, while bare function parameters need not reveal them statically. All language fn count as Pure in type/effect judgments, with native computation requiring the §10.3 explicit @{...} promise; hidden signatures require dynamic checking, not arbitrary higher-order inference.
 
 User calls bind positional then named arguments by declared names/order, without defaults/spread/variadics. Reject duplicate/missing/unknown/arity mismatches. range alone has 1/2/3 arities. Reject statically known type errors before execution; dynamic any mismatches are E-TYPE, while Flow/adapter schema failures are E-SCHEMA. No implicit string/number/bool conversion occurs.
 
@@ -431,11 +469,11 @@ Known callable/arity/name/type errors MUST be rejected statically; only informat
 
 map/fold use the same callback rules. Proposals bind against operation schemas rather than ordinary callable rules; §10 separates construction/execution. Child calls first statically validate target/arity/names/known annotations, evaluate arguments in source order, check all parameter annotations, then instantiate the graph. Dynamic annotation failures are E-SCHEMA without body execution; completed argument actions remain facts. Outputs validate return annotations, retaining completed effects/joins on failure. Functions, effects, and their containers MAY cross same-run Flow boundaries. Flow definitions and live stores remain non-values; completed Claim snapshots are Data and may be passed or captured. Statically known annotation mismatch is E-TYPE; dynamic mismatch is E-SCHEMA. Host EntryInput/EntryOutput separately require Data under §2.3; pre-run rejections are not node failures.
 
-Summary(F) conservatively combines all possible performs and child summaries across all paths/loops/nodes. The acyclic call graph permits callee-first computation; constant guards do not remove candidates. No performs means Pure; Unknown remains Unknown. Child execution contributes to its caller effect; reading an already completed ordinary result is Pure. Pure summaries never remove complete-read producer dependencies or permit child calls in Pure-only positions (fn, guards, proposal/join RHS).
+Summary(F) conservatively combines execution effects/Concurrent flags across every branch/loop/node: performs outside fn bodies use Ops, language fn bodies count as Pure under §10.3, and child calls use callee Summary. fn arguments still contribute their caller-context effects. The acyclic call graph permits callee-first computation; constant guards do not remove candidates. No performs means Pure; Unknown remains Unknown. Child execution contributes to its caller effect; reading an already completed ordinary result is Pure. Pure summaries never remove complete-read producer dependencies or permit child calls in Pure-only positions (fn, guards, proposal/join RHS).
 
-parallel checks all transitive normative Ops, not just result types/Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries consume the normative Ops and function return summaries below. Projections, dynamic function calls, and carry results remain Unknown.
+Parallel acceptance checks every transitive child perform outside fn bodies under normative Ops, not return types or Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries consume the normative Ops and function return summaries below. Projections, dynamic function calls, and carry results remain Unknown.
 
-In the rules below, op is a resolved operation, args are argument expressions, and p a proposal. ε ∨ ε′ denotes the supremum of two effects. `args : Data ! Pure` means every argument is pure and Data. Ops(p) is a nonempty finite set or Unknown; EffectOf takes the greatest registered effect, and ResultType conservatively merges schemas, yielding Unknown/any respectively for unknown Ops.
+In the rules below, op is a resolved operation, args are argument expressions, and p a proposal. ε ∨ ε′ denotes the supremum of two effects. `args : Data ! Pure` means every argument is pure and Data. Ops(p) is a nonempty finite operation set or Unknown; EffectOf takes the greatest registered effect, and ResultType conservatively merges schemas, yielding Unknown/any respectively for unknown Ops. These are analysis notation, not source functions or Claim join. CallEffect(Ops(p)) is Pure only when the nearest lexical fn body is @{...}, under the §10.3 explicit promise, and equals EffectOf(Ops(p)) elsewhere. Ordinary fn bodies still reject perform with static E-PURITY.
 
 ```text
 Γ(x) = τ
@@ -448,14 +486,14 @@ In the rules below, op is a resolved operation, args are argument expressions, a
 
 Γ ; S ⊢ p : effect ! ε
 ──────────────────────────────────────────────────────────
-Γ ; S ⊢ perform p : ResultType(Ops(p)) ! (ε ∨ EffectOf(Ops(p)))
+Γ ; S ⊢ perform p : ResultType(Ops(p)) ! (ε ∨ CallEffect(Ops(p)))
 ```
 
-perform first fully evaluates its request expression p in the caller cursor, then executes the resulting request. p may contain child calls or other permitted evaluation; combine its effect with the operation effect by supremum (∨). If p fails, do not execute the request. This does not relax Pure Data proposal arguments or permit perform in fn.
+perform first fully evaluates its request expression p in the caller cursor, then executes the resulting request. p may contain child calls or other permitted evaluation; combine its effect with the operation effect by supremum (∨). If p fails, do not execute the request. This does not relax Pure Data proposal arguments. Performs in @{...} fn bodies require no proof of Ops or native implementation purity: the author explicitly makes the §10.3 promise for the actual operation. Ordinary fn bodies still reject perform but may call fn fulfilling that promise. Outside fn, Pure positions such as guards, proposal/join RHS, and carry exits still reject direct perform but may call such fn. fn callees/arguments evaluate in the caller context; the target being fn cannot hide their non-Pure effects.
 
-Composite effects take the supremum `Pure<ReadOnly<Write<Unknown`. Reading a completed binding is Pure and does not re-observe its origin, so a recorded result can feed a new proposal. Proposals cannot internally perform, query live state, or draw randomness; bind those observations first. Store names use §9 rather than ordinary-name reference rules: complete reads become Pure Data with producer dependencies; live snapshots are Recorded performs.
+Composite effects take the supremum `Pure<ReadOnly<Write<Unknown`. Reading a completed binding is Pure and does not re-observe its origin, so a recorded result can feed a new proposal. Proposal arguments may call fn containing §10.3 native calls; external reads/writes, live state, and randomness outside fn bodies still require prior bindings. Data returned by perform establishes no new return Ops information. Store names use §9 rather than ordinary-name reference rules: complete reads become Pure Data with producer dependencies; live snapshots are Recorded performs.
 
-Ops is compiler information, not a writable effect[Ops] type. Implementations MUST use the following analysis for parallel acceptance; private optimizations/stronger higher-order reasoning cannot admit a normative Unknown perform.
+Ops is compiler information, not a writable effect[Ops] type. For portable parallel acceptance outside fn bodies, only the following normative analysis applies. Explicit promises inside @{...} require no Ops proof; outside fn, private optimizations/stronger higher-order reasoning cannot admit an otherwise Unknown perform.
 
 | Proposal origin | Ops |
 |---|---|
@@ -469,7 +507,7 @@ Ops is compiler information, not a writable effect[Ops] type. Implementations MU
 | Core/dynamic/higher-order call or carry result | Unknown; no actual-argument specialization or cross-iteration analysis |
 | Other parameter/input/any | Unknown; an any annotation alone does not erase existing binding information |
 
-RetOps(f) describes the operations possibly carried by pure language function f's return value, independently of the Pure effect of executing f. Analyze only the terminal expression's Ops; earlier constructed but unreturned requests do not enter the summary. A return annotation proves no operation identity, and any does not erase provable Ops. Ordinary formal parameters do not inherit caller-argument Ops: `fn identity(p:effect)->effect {p}` has Unknown RetOps.
+RetOps(f) describes the operations possibly carried by pure language function f's return value, independently of the Pure effect of executing f. Analyze only the terminal expression's Ops; earlier constructed but unreturned requests do not enter the summary. A return annotation proves no operation identity, and any does not erase provable Ops. Ordinary formal parameters do not inherit caller-argument Ops: `fn identity(p:effect)->effect {p}` has Unknown RetOps. Runtime call metadata MUST retain actual performs inside called fn, closures, and dynamic callbacks; the Pure effect of fn cannot justify omitting admission, identities, or journal records. RetOps still describes only returned requests: constructing and returning one in fn does not make its later execution by the caller Pure.
 
 RetOps(F) is the Ops of Flow F's final return expression, independent of its execution Summary(F). Compute it callee-first on the acyclic Flow call graph. Direct requests and known request builders may retain Ops; parameters, projections, and dynamic return origins remain Unknown without caller-argument specialization. Passing a request across Flows does not itself prove the receiver's dynamic perform eligible for parallel execution.
 
@@ -501,9 +539,9 @@ Both functions execute purely and have RetOps `{worker.read}`. Any Write, Unknow
 
 Storing proposals does not perform them. Given a number x and registered version-1 Concurrent ReadOnly `worker.read(number)->number`, `p=[effect worker.read(x)]; q=p[0]; r=perform q` is legal sequentially, but q has Unknown Ops and its node is a barrier; parallel placement is E-PARALLEL. Merge effects of argument evaluation and every perform site separately, rather than masking them with result Ops. Returned proposals still carry resolved operation/version/arguments and undergo runtime contract checks. Every operation is authorized at perform; any never exempts Data/purity. Pure function parameters never become native callables. perform requires a proposal. Construction only resolves contracts/fixes arguments; construction/schema errors do not imply provider invocation.
 
-Equal branch types stay equal; τ plus null becomes τ?; other different bare types become any. Check return annotations statically where possible, dynamically otherwise; no writable union type is introduced. Merge operation result schemas conservatively; Unknown Ops yields static any but still validates the actual schema. Every parallel perform MUST prove all possible operations Concurrent ReadOnly; potential runtime safety is insufficient. Sequential/graph nodes may use Unknown with runtime registration/authorization/schema checks.
+Equal branch types stay equal; τ plus null becomes τ?; other different bare types become any. Check return annotations statically where possible, dynamically otherwise; no writable union type is introduced. Merge operation result schemas conservatively; Unknown Ops yields static any but still validates the actual schema. Every parallel perform outside fn bodies MUST prove all possible operations Concurrent ReadOnly; fn-body calls follow §10.3. Potential runtime safety is insufficient. Sequential/graph nodes may use Unknown with runtime registration/authorization/schema checks.
 
-The closed pure small-step machine is `⟨e,ρ,κ⟩ → ⟨e',ρ',κ'⟩`: expression, immutable runtime name/value environment, and continuation including remaining work/return checks. Fixed operand/match/primitive order makes reduction deterministic. For closure f and values vs bound in declared parameter order, body(f), captures(f), params(f) denote its body, captures, and names:
+The closed pure small-step machine is `⟨e,ρ,κ⟩ → ⟨e',ρ',κ'⟩`: expression, immutable runtime name/value environment, and continuation including remaining work/return checks. Fixed operand/match/primitive order, together with fixed §13 Host responses for §10.3 calls, makes reduction deterministic. For closure f and values vs bound in declared parameter order, body(f), captures(f), params(f) denote its body, captures, and names:
 
 ```text
 ⟨call f(vs), ρ, κ⟩ → ⟨body(f), captures(f)[params(f)↦vs], κ⟩
@@ -521,7 +559,7 @@ match selects the first source-order arm whose pattern matches and Pure bool gua
 
 `for x in source` evaluates a list source once, then fresh iteration scopes sequentially. The next iteration waits for all current work to succeed/normally skip; Error/Cancelled/failure-skip stops the loop. continue closes remaining unstarted work; break also closes future entries. Started actions are not rolled back. `for { ... }` runs indefinitely until break/cancellation/budget/divergence.
 
-`for x in source parallel` expands within Host limits. Bodies allow Pure, joins, and proven Concurrent ReadOnly operations, never Write/Unknown, cross-iteration ordinary bindings, or break/continue targeting the parallel graph loop. Node-local carry exits and break/continue targeting local ordinary loops are permitted; all performs still require proof and local parallel remains forbidden. Iterations use separate immutable snapshots, without shared mutable native objects.
+`for x in source parallel` expands within Host limits. Bodies allow Pure, joins, and proven Concurrent ReadOnly operations, never Write/Unknown, cross-iteration ordinary bindings, or break/continue targeting the parallel graph loop. Node-local carry exits and break/continue targeting local ordinary loops are permitted; performs outside fn bodies still require proof of Concurrent ReadOnly, fn-body calls follow §10.3, and local parallel remains forbidden. Iterations use separate immutable snapshots, without shared mutable native objects.
 
 ### 6.1. Sequential iteration with a carried value
 
@@ -531,7 +569,7 @@ Exit e MUST be Pure but may reference completed observations; unselected exits d
 
 The carried value may contain both lists and objects. Append with `concat(s.items,[item])`, add or replace a field with `put(s.index,key,item)`, and pass the combined new state through next. These operations leave earlier states unchanged. A carry result may seed a later carry, so construction need not happen in a single pass. Duplicate keys follow put replacement rules while duplicate list entries remain; concat has no amortized constant-time append guarantee.
 
-carry runs sequentially within its owner node, like comprehensions, creating no global nodes. It allows local bindings/if/match/sequential loops/perform, but no store declaration/join/local parallel. Inside fn, perform is forbidden; inside Flow, allowed subject to enclosing parallel restrictions. The node effect includes all possible performs; indices enter EvalPath (§6.2). fn/fold callbacks remain pure. Carry ordinary Data evidence across iterations and join through a separate statement when needed.
+carry runs sequentially within its owner node, like comprehensions, creating no global nodes. It allows local bindings/if/match/sequential loops/perform, but no store declaration/join/local parallel. Inside @{...} fn, apply the §10.3 explicit promise; ordinary fn still rejects perform; inside Flow, apply the enclosing context and parallel restrictions. The node effect combines all execution under §5; indices enter EvalPath (§6.2). fn/fold callbacks remain pure. Carry ordinary Data evidence across iterations and join through a separate statement when needed.
 
 ```text
 import python "application.llm" as llm
@@ -550,7 +588,7 @@ This example registers version-1 `llm.refine(draft:string)` returning Data `{tex
 
 ### 6.2. Positions and call identities
 
-Independent nodes may overlap. Within a node, expressions/arguments/performs run left to right. fn/map/fold callbacks cannot perform or invoke Flows. Flow comprehensions may perform sequentially; concurrency comes only from graphs/explicit parallel loops. Evaluate comprehension source once first, then one scope per original item. Its optional guard evaluates exactly once per original item, MUST be Pure bool, and runs before the body. False skips the body, true appends its result, Error stops. Guard/body EvalPath appends the original zero-based source index, not a filtered-result index; source evaluation does not append its own index. Nested indices follow actual enclosing guard/body order. Result construction overhead MUST be O(n+k), excluding guard/body/value costs, with n source items and k retained. Private builders are allowed; final values remain immutable. concat has no amortized O(1) guarantee, so fold+concat can copy quadratically.
+Independent nodes may overlap. Within a node, expressions/arguments/performs run left to right. fn/map/fold callbacks MUST be pure, require their own §10.3 @{...} body for direct native calls, and allow no Flow calls. Flow comprehensions may perform sequentially; concurrency comes only from graphs/explicit parallel loops. Evaluate comprehension source once first, then one scope per original item. Its optional guard evaluates exactly once per original item, MUST be Pure bool, and runs before the body. False skips the body, true appends its result, Error stops. Guard/body EvalPath appends the original zero-based source index, not a filtered-result index; source evaluation does not append its own index. Nested indices follow actual enclosing guard/body order. Result construction overhead MUST be O(n+k), excluding guard/body/value costs, with n source items and k retained. Private builders are allowed; final values remain immutable. concat has no amortized O(1) guarantee, so fold+concat can copy quadratically.
 
 Each source has zero-based canonical token ordinals: remove comments/whitespace, preserve physical NEWLINE outside strings, and number from its first token. Source-set identity order is root first, then other SourceIDs sorted by UTF-8 bytes. StaticSite is local ordinal plus preceding sources' token_count. No AST-child/link/load numbering is permitted. Single-source offsets are zero. Longest matching applies; CRLF is one NEWLINE; multiline-string body newlines are inside one string token. Explicit continuation backslash/newline and EOF have no token. Parser-ignored NEWLINE still counts. node_site is a statement's first token; loop/comprehension anchors are for tokens. The Host fixes a nonempty UTF-8 run_id unique within its identity domain.
 
@@ -579,7 +617,17 @@ Earlier(a,b) iff Position(a) < Position(b) and not Ancestor(a,b)
 
 A child region orders at its InvocationPrefix; loop/branch regions at selector Position. Earlier defines implicit external order only, not data/After/error ordering. Descendants inherit the container's external prerequisites without waiting for that container's complete execution. §7 uses this for OrderAllows, barriers, and error closure.
 
-Replay of a static perform at the same dynamic path reuses CallID; distinct sites do not collide. Pure fn have no perform sites. Equal arguments never merge identities; fingerprints are not identity. Different call sites, graph-loop iterations, carry/comprehension elements give distinct child/join/perform identities. Definition order does not change instance order: compare invocation prefix first. Programs without children preserve existing identities/wire. Blank/comment edits may move ordinals; identities are revision-local, never business keys across revisions/runs.
+Replay of a static perform at the same dynamic path reuses CallID; distinct sites do not collide. Performs in fn use the invocation-path extension below. Equal arguments never merge identities; fingerprints are not identity. Different call sites, graph-loop iterations, carry/comprehension elements give distinct child/join/perform identities. Definition order does not change instance order: compare invocation prefix first. Programs without children preserve existing identities outside fn; fn paths use the extension below without changing wire structure. Blank/comment edits may move ordinals; identities are revision-local, never business keys across revisions/runs.
+
+Repeated fn invocations, recursion, and higher-order callbacks need distinct paths. Each graph node's local cursor maintains a natural-number next_fn_activation, initially 0. After §5 argument validation and before entering any language fn body, take its current value as activation and increment it. Count direct, indirect, and tail language fn calls and every language fn callback from map/fold; core function invocations, including callbacks, do not count. This follows the node's strict evaluation order, never a run-global counter or completion order. fn_site is the opening-parenthesis token of an ordinary call's argument list; a pipeline fn stage uses its target's first token, and implicit map/fold callbacks use the owning core call's argument-list opening parenthesis. Function invocation anchors therefore cannot coincide with loop anchors inside the callee expression.
+
+At the outermost fn entry, save the caller's current EvalPath as FunctionBase. Nested/tail calls inherit this base without accumulating function-stack paths. Inside a fn body:
+
+```text
+EvalPath = FunctionBase ++ [(fn_site, activation)] ++ CurrentFunctionLocalLoops
+```
+
+CurrentFunctionLocalLoops contains only active original loop/comprehension indices in this activation's body. Non-tail return restores the caller's active path; a tail call replaces activation/local loops without retaining a tail-call chain. Subsequent performs outside fn restore their original paths, preserving existing non-fn CallIDs and wire structures. Cursor suspension/checkpoint/recovery MUST retain counter and active paths. Counters cannot wrap; budget overflow fails explicitly. The path also locates errors within fn; it creates no graph nodes/child Flows. Two calls at fn_site=25 to a body with perform_site=40, with no surrounding local loops, use CallID EvalPaths `[(25,0)]` and `[(25,1)]`. Tail recursion, mutual recursion, and callbacks MUST NOT reuse activations.
 
 Single-source programs without import lip use SourceHash(root) as revision. Multi-source revision is `lowerhex(SHA256(C(["lip-source-set", "1.0", root_source_id, SourceTable, DependencyLock])))`. C/SHA256/lowerhex follow §16.1. The string "1.0" is the retained source-set encoding domain tag, not the language specification version; 1.1 does not change this encoding. Include all sources/versions/edges/content/comments, not only reachable declarations. Changed dependencies cannot reuse a revision. Language version, root SourceID, lock, and selected entry are also fixed run metadata; changes cannot masquerade as resume. Never use private JSON/absolute paths/directory iteration order for identity. Equal frozen inputs/locks MUST produce equal positions. Resume retains run_id; changed programs cannot resume old unfinished runs under new positions. Starting a new run is distinct from resuming.
 
@@ -637,7 +685,7 @@ Ready(n) = DataDepsCompleted(n) ∧ GatesOpen(n) ∧ ContextActive(n)
 
 WorkerAdmission counts active computation/provider calls, not all Running contexts. Waiting containers/permit waiters release allowance; resumable Running cursors compete for it once children/resources and gate/context/After/order conditions permit, without returning to Pending or repeating their prefix. Coordinate permits/admission so waiters cannot exhaust workers needed to release resources. With no errors/budgets/cancellation and eventual resource availability, scheduling and permits MUST be fair.
 
-Sequential mode advances one leaf evaluation/cursor at a time, selecting the smallest Position among ready/resumable work; waiting ancestors do not compete or occupy workers. Multiple containers may remain Running. Every mode preserves Earlier order. Node effects conservatively combine all possible performs; Concurrent ReadOnly requires every possible operation to declare both. Write/Unknown/nonconcurrent ReadOnly nodes are barriers: wait for every earlier perform-containing node to succeed/normally skip; later perform-containing nodes cannot cross unsettled earlier barriers. Concurrent ReadOnly may overlap. Pure/join nodes are not blocked solely by external barriers.
+Sequential mode advances one leaf evaluation/cursor at a time, selecting the smallest Position among ready/resumable work; waiting ancestors do not compete or occupy workers. Multiple containers may remain Running. Every mode preserves Earlier order. Node effects combine under §5: fn-body performs count as Pure; other performs use registry/Ops. Concurrent ReadOnly requires at least one perform outside fn bodies and every possible operation at those sites to be Concurrent ReadOnly. Write/Unknown/nonconcurrent ReadOnly nodes are barriers: wait for every earlier node containing performs outside fn bodies to succeed/normally skip; later nodes containing such performs cannot cross unsettled earlier barriers. Concurrent ReadOnly may overlap. Pure/join nodes are not blocked solely by external barriers. Actual fn calls still obey Host Concurrent/resource permits under §10.3; Pure grants no concurrency permission.
 
 OrderAllows MUST account for possible work in uninstantiated earlier loop/branch/child regions, not just created/Ready nodes. A barrier after a producer loop waits for completion/normal gate closure, including future iterations. Earlier barriers constrain later parallel regions. Structural prefixes/static regions establish this in all modes. Node-local performs admit left to right; conservative summaries may reduce overlap but never reorder. Child summaries constrain caller regions until complete; yielding workers does not release sibling barriers. Ancestor exclusion prevents self-completion waits while descendants inherit all outside prerequisites and local cursor order. Writes cannot pass earlier concurrent reads. Infinite earlier producers may permanently delay barriers; change graph structure rather than weaken order.
 
@@ -741,7 +789,7 @@ Request  = {CallID, operation, contract_version, positional: list<Data>, named: 
 Response = Result(Data) | Rejected(ErrorData) | Uncertain(ErrorData)
 ```
 
-Descriptors MUST declare name/version, parameter/result schemas, ReadOnly/Write/Unknown, Concurrent, capabilities, and resource requirements. Validate before invocation; never infer purity/concurrency/idempotence/authorization from names. Named arguments follow positional ones and bind once against schema. Proposals retain declared resource references rather than native objects. Construction invokes no provider, writes no intent, and consumes no call budget.
+Descriptors MUST declare name/version, parameter/result schemas, ReadOnly/Write/Unknown, Concurrent, capabilities, and resource requirements. Validate before invocation; never infer purity/concurrency/idempotence/authorization from names. Named arguments follow positional ones and bind once against schema. Proposals retain declared resource references rather than native objects. After argument evaluation, construction itself invokes no target provider, writes no intent, and consumes no target call budget; fn-body performs during argument evaluation execute, charge, and record independently.
 
 Projects may declare ordinary Data parameters in registered schemas, such as `policy:object`, to carry token, money, time limits, or business annotations. The Host/adapter defines their fields, units, and checks. These parameters follow the same argument freezing, identity, and replay rules; names such as policy or limits carry no built-in core semantics. Contracts still declare permission requirements and the Host grants access. Reusable resource permits in this section are not a cumulative spending ledger.
 
@@ -769,9 +817,9 @@ TerminalKind = result | rejected | known_fault
 
 known_fault travels as Rejected(ErrorData); trusted Host classification, not a provider's claimed error code, establishes it. Receipts describe completion evidence without requiring transaction IDs. Optional raw_data must already be legal Data, never pointers/mutable objects. Replay known_fault with the same error and zero provider calls; it cannot reconcile to success or redo a write to repair formatting. Compensation/correction is an explicit new operation.
 
-Go adapters handle context, finite values, structs/string-keyed maps/lists, declared multiple returns/errors. Python workers handle the same Data/exceptions/IDs/deadlines/cancellation and bounded queues. Wire numbers are binary64 even over JSON, not Python int/float guesses. Default mapping is Go float64/Python float; integer parameters need explicit validated safe-integer contracts. bytes require declared string encoding (base64/hex) or resource references, never platform charset assumptions. Tuples may map to lists by contract; sets/native callables/arrays/DataFrames need explicit Data/reference conversion, not default str/pickle.
+Go adapters handle context, valid numbers including canonical NaN and signed infinities, structs/string-keyed maps/lists, declared multiple returns/errors. Python workers handle the same Data/exceptions/IDs/deadlines/cancellation and bounded queues. Wire numbers are binary64 even over JSON, not Python int/float guesses. Default mapping is Go float64/Python float; integer parameters need explicit validated safe-integer contracts. bytes require declared string encoding (base64/hex) or resource references, never platform charset assumptions. Tuples may map to lists by contract; sets/native callables/arrays/DataFrames need explicit Data/reference conversion, not default str/pickle.
 
-Resource references are unguessable Data-object tokens interpreted only by accepting schemas and bound to Host/worker generation, type, lifetime, and authorization scope. Declare application/run/session ownership (§10.1). Sessions may retain objects across successful cells without replaying old cells. Pure code only sees the Data reference. References confer no permission; reject expired/wrong-scope/restarted/unmigrated objects and provide release/end-of-life cleanup. Process-lived package initialization does not keep references valid. Durable replay must reconstruct/reject/reconcile invalid native references, not accept them as live.
+Resource references are unguessable Data-object tokens interpreted only by accepting schemas and bound to Host/worker generation, type, lifetime, and authorization scope. Declare application/run/session ownership (§10.1). Sessions may retain objects across successful cells without replaying old cells. Pure core code only sees the Data reference; accessing native objects requires perform, with the §10.3 explicit @{...} promise required inside fn. References confer no permission; reject expired/wrong-scope/restarted/unmigrated objects and provide release/end-of-life cleanup. Process-lived package initialization does not keep references valid. Durable replay must reconstruct/reject/reconcile invalid native references, not accept them as live.
 
 ```text
 import go "crypto/sha256" as sha
@@ -786,7 +834,7 @@ flow Statistics(xs: list) -> object {
 
 This example explicitly registers version-1 Concurrent ReadOnly np.mean over finite number lists and sha.Sum256 over UTF-8 string bytes with a 32-byte result encoded as 64 lowercase hex characters. These are example-specific conversions, never generic defaults. Callback/stream/transaction/large-object contracts belong to adapters without another LIP computation model.
 
-A generic profile such as NewNativeHost may use Go export/type information or persistent Python workers without limiting package names. Before core checking it lowers direct calls/properties/methods/indexing/resource conversions into registered Unknown proposals/performs, without making native callables pure, bypassing authorization, or inferring Concurrent. Resolve callees and available signature/arity information before arguments; when signatures are unavailable, actual invocation checks them and the adapter declares that limitation. Merely constructing effect does not load code or run native checks.
+A generic profile such as NewNativeHost may use Go export/type information or persistent Python workers without limiting package names. Before core checking it lowers direct calls/properties/methods/indexing/resource conversions into registered Unknown proposals/performs, without turning native callable objects into language fn, bypassing authorization, or inferring Concurrent. Performs lowered within fn bodies use the §10.3 author purity promise only when that body is marked @{...}, otherwise E-PURITY; the same operations outside fn retain Unknown or their explicitly registered effect, without special purity whitelists for individual library functions. Resolve callees and available signature/arity information before arguments; when signatures are unavailable, actual invocation checks them and the adapter declares that limitation. Merely constructing effect does not load code or run native checks.
 
 In this profile, an explicit `effect receiver.member(args)` may use any lexically bound receiver, including parameters of functions/Flows in imported modules and saved session values. The profile lowers it to a native request carrying the selected receiver path; native provenance need not be statically known. At construction, ordinary object wrappers retain only the named field path needed for the receiver. Unrelated fn/effect fields stay local and are not required to be Data. This selection neither inspects native attributes nor invokes code. Native member lookup and missing-member failures remain deferred to perform; actual arguments still MUST be Data. A receiver containing ordinary wrappers therefore composes with the same Host boundary as a directly bound native reference. Saved requests keep their captured receiver when its public name is unbound or reused. Ordinary calls on objects retain core pure-call semantics unless lowered through known native provenance.
 Native provenance MUST keep inputs separate from return positions. Fixed fields and fixed indices in equal-length branch lists retain their own provenance without contamination from neighboring resources. Callback arguments in returned closures retain bound outer captures. Functions returned by different branches propagate provenance using their own parameter names and positions, without assuming the first branch's signature. Recursive parameter forwarding MUST NOT lose established provenance through declaration order or private renaming. Analysis MAY leave recursively growing containers or higher-order returns unknown when they have no finite representation. It MUST NOT unfold them indefinitely, evaluate functions, or call providers to guess provenance; use explicit receiver requests in these cases. This analysis is independent of §5 Ops and grants no additional concurrency permission.
@@ -823,6 +871,46 @@ Static Go adapters register at build/startup; calls do not load plugins/download
 
 Same canonical operations across modules MUST bind compatible identical contracts. Conflicting version/schema/effect/resource descriptors reject before runs as E-OPERATION. Services resolve all route entries/sources/contracts before requests; each request owns run/context/journal while sharing application resources/read-only Program. Packaging/deployment/CLI formats add no language execution path/syntax.
 
+### 10.3. Explicit purity promises with @{...} function bodies
+
+fn always requires purity. Ordinary {...} bodies continue to reject direct native calls and explicit perform, but may call other fn fulfilling the purity contract. For native computation, the author MUST place @ immediately before the function body's opening brace, as in `fn a(x:number)->number @{np.sqrt(x)}`. Spaces/tabs may separate @ and {. The marker is allowed only at this fn_body position, for named/anonymous fn; it is not a decorator, expression operator, or extra type.
+
+@{...} explicitly promises computational purity of the body's native calls; it does not permit business side effects. Neither compiler nor Host needs to prove arbitrary Go/Python implementation purity. No per-function purity registration, whitelist, trial execution, or special Pure contract is required; np.sqrt follows the same rule as other native functions. Native calls here mean calls executed through the external boundary: performs lowered from §10 direct syntax and any external proposal explicitly performed in the marked body, without distinctions based on operation language or bridge names.
+
+The author promises that fixed arguments, immutable captures, and the agreed native implementation/configuration determine computed values and computational errors independently of clocks, randomness, mutable external state, invocation counts, or scheduling; the call does not mutate inputs/shared objects/external business state or produce business writes. ReadOnly is insufficient: reading files, databases, current time, or mutable attributes may violate the promise. A fixed resource reference does not imply a fixed object; the author must ensure that observed contents and this use fulfill the promise. §3.2 diagnostics are a separately defined exception; ordinary native output does not automatically become core diagnostics. Violations may pass static checking, and runtime detection is not guaranteed. §13 guarantees that depend on purity apply only when authors fulfill the promise. Names, types, immutable bindings, and Claim/Flow structure remain checked: @ does not allow live-store capture/access, joins, child Flows, or parallel inside fn.
+
+The marker applies only to its own fn body, including local loops, carry, and comprehensions; it does not implicitly mark a named/anonymous fn defined inside. A nested fn making direct native calls needs its own @{...}. Recursion, closures, and map/fold callbacks follow their actually defined fn bodies. Performs in marked bodies have static execution effect Pure without known Ops; ReadOnly, Write, or Unknown registry descriptors do not cause E-PURITY. Dynamic effect parameters and projected requests follow the same author promise. fn callees/arguments evaluate in the caller context; only the body uses its marker. All valid fn still count as Pure at call sites, so ordinary fn, guards, proposal arguments, join RHS, and carry exits may call marked fn, but cannot use the callee's marker to directly perform or call child Flows themselves.
+
+An ordinary outer function needs no @ when it only defines/calls a marked inner function:
+
+```lip
+fn outer(x:number)->number {
+    inner = fn(y:number)->number @{ np.sqrt(y) }
+    inner(x)
+}
+```
+
+Constructing, capturing, or returning a request does not execute it. A later perform outside fn retains the original registry/Ops effect. @ does not propagate with request values or mark an entire library/operation Pure. Session closures retain their defining body's marker; imports/exports, aliases, and indirect calls neither add nor remove it.
+
+Every actual call still uses the unified perform boundary: Data/schema checks on arguments/results, authorization, budgets, cancellation, resource ownership/lifetime, CallID, and journal records remain enforced. Generic native adaptation may retain Unknown registration. Independently compiled Hosts sharing a provider must also share its ResourcePool admission pool. Computational purity does not imply thread safety. For Concurrent=false, the Host MUST serialize admission to the same operation through a shared exclusive permit, including calls inside/outside fn and runs sharing that provider; resource contracts cover additional worker/object conflicts. Acquire that permit atomically with other resources under §10; waiters occupy no worker allowance. Concurrent=true calls still acquire their resource permits. @ grants no additional permissions.
+
+fn calls may overlap in the graph; marked-body performs create no business barriers, while the node's other execution effects still combine normally. Each actual perform has its own identity/record, publishing only after recording. Terminal replay invokes no provider. Intent-only recovery retains the original operation contract; @ cannot justify retrying Unknown/Write. Purity alone MUST NOT delete, merge, cache, or speculate calls in ways that change records, errors, or same-path diagnostics. Declaration, static checking, completion, builds, and unselected paths invoke no providers. Interpreter/generated/interactive paths share markers, admission, and §6.2 identity rules.
+
+For example, both forms are legal under §10 generic native adaptation, without purity registration for np.sqrt:
+
+```lip
+import python "numpy" as np
+fn a(x:number)->number @{
+    if x >= 0 { np.sqrt(x) } else { nan }
+}
+fn explicit(x:number)->number @{
+    if x >= 0 { perform effect np.sqrt(x) } else { nan }
+}
+flow Main()->list { return [a(122), a(-1), a(nan)] }
+```
+
+The first form lowers to the same perform boundary as the second. The author makes the same purity promise for both marked bodies. Removing a function's @ makes its native call E-PURITY; constructing effect itself remains legal in ordinary fn. Negative/NaN inputs invoke no sqrt provider; the last two list items are NaN. Lossless return transport follows §16.6.
+
 ## 11. Journaling and optional durable recovery
 
 Every run MUST record all perform argument fingerprints and result/rejection/uncertainty during that run, especially snapshots/clocks/randomness. Recorded values publish only after recording. Core does not promise crash recovery. Claiming durable requires all persistence rules here, including upstream observations rather than only writes. §16 C/wire rules apply to core too.
@@ -845,11 +933,11 @@ Journal[CallID] = {operation, version, argument_fingerprint,
 | terminal result | Reuse value; zero provider calls |
 | terminal rejection | Replay the same node Error; zero provider calls |
 | terminal known_fault | Reuse completion evidence and same E-SCHEMA/E-VALUE; zero provider calls |
-| intent only, ReadOnly with explicit permission | May reread and record; no prior result was published |
+| intent only, ReadOnly with explicit reexecution permission | May recompute/reread and record using the same CallID; no prior result was published |
 | intent only, Write with stable provider DedupKey | Resume invocation only under a contract proving safety |
 | Other intent-only Write/Unknown | Fail closed; reconcile external facts before further action, never blindly retry |
 
-Recoverable invocations retain original CallID. Persist results before publishing, so downstream durable writes cannot legitimately consume an unrecorded read. DedupKey does not replace CallID. Exactly-once external behavior is not a language guarantee. Uncertain remains nonterminal; automatic ReadOnly recovery also requires explicit no-write/reexecution permission. Invalid native-token terminal results may be displayed historically but cannot validate as active resources; explicitly restore the same identity/change the recovery contract or terminate.
+Recoverable invocations retain original CallID. Persist results before publishing, so downstream durable writes cannot legitimately consume an unrecorded read. DedupKey does not replace CallID. Exactly-once external behavior is not a language guarantee. Uncertain remains nonterminal; automatic ReadOnly recovery also requires explicit no-write/reexecution permission. The fn author promise does not change recovery classification: intent-only Unknown/Write calls retain their actual contracts and MUST NOT be automatically retried just because they occurred inside fn. Invalid native-token terminal results may be displayed historically but cannot validate as active resources; explicitly restore the same identity/change the recovery contract or terminate.
 
 ### 11.1. Node states and journal states are separate machines
 
@@ -979,7 +1067,7 @@ Successful EntryOutput.value MUST contain only these response fields, all valida
 |---|---|
 | status | Required integer number 200–599; no informational/upgrade responses |
 | headers | Optional name→string/string-list object; reject case-insensitive duplicates, invalid names, control characters |
-| json | Optional Data, canonical JSON; exclusive with body; default application/json |
+| json | Optional Data with only finite numbers, canonical JSON; exclusive with body; default application/json |
 | body | Optional string; default utf-8 and text/plain; charset=utf-8 |
 | encoding | Only with body; utf-8/base64; decoded base64 defaults to application/octet-stream |
 
@@ -1015,14 +1103,14 @@ Pure fn can construct reusable single-step proposals; statically known calls pre
 
 ## 13. Determinism and guarantee boundaries
 
-Assume correct pure primitives, honest adapter contracts, and enforced value boundaries. Fix run_id, selected entry, input, complete sources, registry/schemas/authorization, After constraints, initial journal, and a response mapping R from complete CallID plus canonical request to Host response. Exclude live claim.snapshot, cancellation, deadline/budget failure, crashes, invalid resources, and changed-value duplicate deliveries. Every selected node/call terminates finitely, scheduling is fair, and equal deliveries carry equal values. Pseudorandom scheduling tests MUST derive responses from CallID/canonical request, not consume one global arrival-order random sequence.
+Assume correct pure primitives, honest adapter contracts, authors fulfilling §10.3 fn purity promises, and enforced value boundaries. Fix run_id, selected entry, input, complete sources, registry/schemas/authorization, After constraints, initial journal, and a response mapping R from complete CallID plus canonical request to Host response. Exclude live claim.snapshot, cancellation, deadline/budget failure, crashes, invalid resources, and changed-value duplicate deliveries. Every selected node/call terminates finitely, scheduling is fair, and equal deliveries carry equal values. Pseudorandom scheduling tests MUST derive responses from CallID/canonical request, not consume one global arrival-order random sequence.
 
-Under these premises, all legal schedules yield the same successful Data or primary ErrorKey/category/semantic details. Successful executions have the same evaluated CallID set. Failed executions need not have equal issued-call sets, partial stores, other traces, or timings. R is a comparison premise, not a promise that real remote services always agree. Earlier divergence may prevent primary-error confirmation. Changed cancellation/budgets/versions are changed conditions. Propagation adds no smaller wrapper roots. Closed gates and unselected expression branches evaluate nothing, create no dynamic errors/F/K/cuts, and are distinct from compile errors on invalid programs.
+Under these premises, all legal schedules yield the same successful Data or primary ErrorKey/category/semantic details. Here equal Data means equal C bytes, including canonical NaN; language `==` need not return true for values containing NaN. Successful executions have the same evaluated CallID set. Failed executions need not have equal issued-call sets, partial stores, other traces, or timings. R is a comparison premise, not a promise that real remote services always agree. Earlier divergence may prevent primary-error confirmation. Changed cancellation/budgets/versions are changed conditions. Propagation adds no smaller wrapper roots. Closed gates and unselected expression branches evaluate nothing, create no dynamic errors/F/K/cuts, and are distinct from compile errors on invalid programs.
 
-1. A pure small step has at most one successor; termination has a unique value, while infinite recursion may diverge.
+1. With the fixed Host responses above, pure small-step reduction has at most one next state; termination yields one result, while recursion may diverge.
 2. A finite acyclic pure graph with fixed inputs yields the same value under fair, uninterrupted schedules.
 3. For a fixed finite successful-contribution atom set B, delivery order/duplicates yield the same final store B and deterministic projection. Changed values at one identity conflict rather than selecting arrivals.
-4. Programs without perform cannot call business providers; §3.2 one-way diagnostic receivers are not providers. Performs without completed admission cannot call providers. Diagnostic receivers do not participate in the fixed response mapping R.
+4. Source without perform, including performs produced by native lowering, cannot call business providers; §3.2 one-way diagnostic receivers are not providers. Performs without completed admission cannot call providers. Diagnostic receivers do not participate in the fixed response mapping R.
 5. Durable recovery reuses journaled observations and never automatically repeats unresolved writes.
 
 Live observations can change control/contribution set B. Journaling preserves the actual observation but does not equate different live schedules. Store growth does not guarantee monotone business projections or whole-program transactions.
@@ -1034,6 +1122,8 @@ Failure counterexample: independent earlier early and later late are Concurrent 
 Every provided interpreter/generated path MUST validate these rules with shared cases when both exist (§16.4), including perturbed legal schedules:
 
 - Immutable captures, argument/result copies, typed structural equality, strict/short-circuit evaluation, numeric boundaries.
+- §3.3 NaN/infinity arithmetic/comparison/type patterns/static Data/containers/native boundaries/canonical encoding, Claim idempotence, and journal argument consistency; §16.6 codecs distinguish null/string/NaN.
+- §10.3 explicit @{...} promises with fn/aliases/closures/recursion/map/fold/guards/carry/request arguments. Ordinary fn rejects perform, and nested fn does not inherit the marker. In @{...}, ReadOnly/Write/Unknown or dynamic Ops do not trigger purity rejection; outside fn, conservative checks remain. Concurrent=false uses serialized admission. No provider before admission, during builds, or on unselected paths. Repeated/tail fn calls have distinct identities and zero new replay invocations, with identical activation counting in interpreter/generated paths.
 - §3.2 diagnostics with closures/modules/higher-order calls/recursion/carry/guards/pipelines/request construction; disabled/full/closed/faulting receivers preserve results, errors, budgets, operation identities, and concurrency. Arguments still check normally; unselected paths and static phases emit nothing. Diagnostics do not retain native resources.
 - 10,000/100,000 direct/mutual/indirect tail calls; non-tail budgets and cancellation of divergence.
 - Sequential/parallel for, break/continue, first-arm match, guard errors.
@@ -1092,7 +1182,7 @@ Error objects differ from Skipped causes. Reject statically known invalid progra
 | E-ENTRY | No default or explicit entry, unknown/non-root-Flow choice; pre-run rejection |
 | E-MODULE / E-MODULE-CYCLE / E-EXPORT | Missing/invalid/lock-mismatched module, module cycle, private access |
 | E-FLOW-CYCLE | Direct/indirect Flow-call cycle, including constant-unselected paths |
-| E-PURITY | External execution/live stores/children in fn, or prohibited work in Pure contexts |
+| E-PURITY | Live stores/children in fn, performs in ordinary fn, or external execution in Pure positions without the §10.3 @{...} promise |
 | E-RETURN / E-CONTROL | Invalid result/return/break/continue position |
 | E-PARALLEL | Write/Unknown/graph-loop control transfer in parallel |
 | E-CLAIM-ORDER | Complete-read source/loop relation violates producer order |
@@ -1102,7 +1192,7 @@ Error objects differ from Skipped causes. Reject statically known invalid progra
 | Runtime Error | Condition |
 |---|---|
 | E-TYPE / E-ARITY / E-SCHEMA | Dynamic value/argument/input/result mismatch |
-| E-VALUE / E-NUMBER / E-INDEX | Invalid native data/numeric domain/nonfinite/zero division/bounds/missing keys |
+| E-VALUE / E-NUMBER / E-INDEX | Invalid native data/transport, numeric domain/zero division or finite-operand overflow, bounds/missing keys; canonical NaN and signed infinities are themselves valid |
 | E-FAIL / E-MATCH-NO-ARM | fail or expression match without an arm |
 | E-BUDGET / E-CAPABILITY / E-OPERATION | Budget/permission/registration failure |
 | E-CLAIM-CONFLICT / E-DEPENDENCY | Changed same-JoinID value or unusable dependency |
@@ -1115,6 +1205,7 @@ Error objects differ from Skipped causes. Reject statically known invalid progra
 |---|---|
 | E-ENTRY | Pre-run selection failure, including declaration roots without Flows |
 | E-SCHEMA | §2.3 EntryInput structure/binding/Data/annotation failure |
+| E-VALUE | Successful EntryOutput cannot be encoded under its selected Data transport, such as nonfinite numbers under json |
 | E-HTTP | HTTP configuration/conversion/response failure; §12.1 status mapping |
 
 A code may occur at multiple phases; diagnostics MUST identify the phase. HTTP response validation follows Flow result publication and cannot invent ErrorKeys/rewrite completed calls/nodes. Skipped causes include unselected_gate, break, continue, dependency_failure, after_failure, order_failure, error_cut, cancelled, optionally linking original errors; they are not static diagnostic codes.
@@ -1129,7 +1220,7 @@ Implementations declare `LIP 1.1 core` or `LIP 1.1 core + durable profile` and p
 
 ### 16.1. Canonical data and identity encoding
 
-C(v): null/false/true are bytes 0x00/0x01/0x02. number is 0x03 plus eight big-endian binary64 bytes after zero normalization. string is 0x04, eight-byte unsigned big-endian UTF-8 length, then bytes. list is 0x05, eight-byte unsigned element count, then each C(element). object is 0x06, eight-byte unsigned field count, then C(key),C(value) sorted by UTF-8 key bytes. Exceeding encoding/Host budgets MUST fail. Tuples become Data lists, never private repr. Ordinals/indices use decimal strings.
+C(v): null/false/true are bytes 0x00/0x01/0x02. number is 0x03 plus eight big-endian binary64 bytes after zero normalization and NaN normalization to 0x7ff8000000000000. string is 0x04, eight-byte unsigned big-endian UTF-8 length, then bytes. list is 0x05, eight-byte unsigned element count, then each C(element). object is 0x06, eight-byte unsigned field count, then C(key),C(value) sorted by UTF-8 key bytes. Exceeding encoding/Host budgets MUST fail. Tuples become Data lists, never private repr. Ordinals/indices use decimal strings.
 
 PositionPairs/EvalPathPairs encode each integer pair as two decimal strings. decimal emits unsigned ASCII without leading zeroes, zero as `"0"`. SHA256 returns 32 digest bytes; lowerhex emits two lowercase hex characters per byte. positional/named are Request arguments:
 
@@ -1162,6 +1253,9 @@ snapshot.id is JoinDigest; argument_fingerprint is ArgFingerprint. CallID transp
 |---|---|
 | null / false / true | 00 / 01 / 02 |
 | 1 | 033ff0000000000000 |
+| nan | 037ff8000000000000 |
+| inf | 037ff0000000000000 |
+| -inf | 03fff0000000000000 |
 | "a" | 04000000000000000161 |
 | [] / {} | 050000000000000000 / 060000000000000000 |
 
@@ -1176,8 +1270,9 @@ snapshot.id is JoinDigest; argument_fingerprint is ArgFingerprint. CallID transp
 | `["\n","\t"]` | `["\u000a","\u0009"]` |
 | Object keys U+E000 / U+10000 | U+E000 first; opposite UTF-16/JCS order |
 | Top-level string "1" / number 1 | Both str=`1`, different C; display does not establish identity |
+| nan / `[nan]` / string "nan" | `nan` / `[nan]` / `nan`; the last is the unchanged string, and all have different C |
 
-Ordinary JSON decoders can read these outputs. Canonical display uses UTF-8 key order, no plus sign in exponents, and uniform long control escapes. JCS/JSON.stringify defaults are not canonical-byte oracles.
+Ordinary JSON decoders can read outputs containing only finite numbers, excluding unchanged top-level strings; nonfinite display is not JSON transport. Canonical display uses UTF-8 key order, no plus sign in exponents, and uniform long control escapes. JCS/JSON.stringify defaults are not canonical-byte oracles.
 
 ### 16.3. Numeric vectors
 
@@ -1193,7 +1288,7 @@ a/b below are stored binary64 operands from §2 literals. Floor division compute
 | 5e-324 | 1 | 0 | 5e-324 |
 | -5e-324 | 5e-324 | -1 | 0 |
 
-Literal 2e-324 rounds to zero, 3e-324 to bits=1. Basic arithmetic MUST NOT flush subnormals, and arithmetic/literals normalize zero. Zero divisors/nonfinite quotients are E-NUMBER. Interpreter/generated Go/boundary codecs MUST agree.
+Literal 2e-324 rounds to zero, 3e-324 to bits=1. Basic arithmetic MUST NOT flush subnormals, and arithmetic/literals normalize zero. For finite operands, zero divisors/nonfinite quotients are E-NUMBER. Interpreter/generated Go/boundary codecs MUST agree.
 
 ### 16.4. Core conformance cases
 
@@ -1332,7 +1427,7 @@ The next independent rows occur inside legal Flows, using Read/Adjust above; add
 | Child return ready but selected audit pending | No success publication/later stage arguments | core completion |
 | Child returns valid ok:false followed by next stage / guarded next stage | Continues normally / executes only selected branch | core business |
 | Child faulty commit after completed write | Preserve known_fault/receipt/internal perform error; skip downstream, no rerun | core / durable |
-| Child performs a known fn-returned proposal inside parallel | Use RetOps; accept only all-Concurrent-ReadOnly candidates, otherwise E-PARALLEL | core summary |
+| Child performs a known fn-returned proposal inside parallel | Use RetOps; accept only Concurrent ReadOnly candidates, otherwise E-PARALLEL | core summary |
 | Same Claim child at two sites, graph iterations, carry iterations | Isolated stores/IDs, full producer checks | core identity |
 | Earlier child failure, unnecessary later unstarted node | F/K cuts later work; no wrapper root/forced descendants | core error |
 | Worker allowance 1, child in local value block | Progress without deadlock; later local statement waits | core scheduling |
@@ -1397,17 +1492,47 @@ The §3.2 diagnostics also MUST satisfy these composition vectors. Bounded diagn
 | `print(1/0)`, output disabled | Still E-NUMBER; argument evaluation cannot be removed | core evaluation |
 | Diagnostics in unselected branches; declaration/compilation only | Zero emission attempts | core paths |
 | Known ReadOnly request builder containing diagnostics, executed in parallel | Preserve RetOps; actual reads may overlap; journal records only perform | core summaries |
-| `print(perform write())` in parallel; same expression in fn | E-PARALLEL / E-PURITY respectively; argument effects remain visible | core effects |
+| `print(perform effect store.commit())` in parallel body / ordinary fn / @{...} fn | E-PARALLEL / E-PURITY / accepted under the explicit promise; actual writes violate it and Host checks remain enforced | core effects |
 | fn/effect/native reference as diagnostic value | Opaque display; no requests/attributes/snapshots executed and no resources retained | core lifetime |
 | Same-source/run/journal replay | No repeated providers; diagnostics reevaluated in this attempt may emit again | core replay |
+
+NaN and native calls explicitly promised pure through @{...} additionally MUST satisfy these composition vectors. Use generic native adaptation without a special purity contract for np.sqrt; worker.read is Concurrent ReadOnly and store.commit is Write. is_nan uses the §3.3 helper fn. Actually impure calls violate the author promise; static acceptance does not guarantee their business purity.
+
+| Input / environment | Required result | Profile |
+|---|---|---|
+| `nan`, `-nan`, native NaNs with different signs/payloads | One canonical number, is_nan true, C=037ff8000000000000 | core numbers |
+| `inf`, `-inf`, native Go/Python infinities | number; C=037ff0000000000000 and 03fff0000000000000 | core numbers |
+| `inf-inf`, `0*inf`, `inf/inf`; `inf/0`; `1e308*2` | nan, nan, nan; E-NUMBER; E-NUMBER | core numbers |
+| `(-inf)**3`, `(-inf)**0.5`, `0**-inf`, `inf*/inf` | -inf, inf, inf, nan | core numbers |
+| `-1//inf`, `-1%inf`, `inf//2`, `inf%2` | -1, inf, nan, nan | core numbers |
+| `parse_number(str(-inf))`; `xs[inf]`; `range(inf)` | -inf; E-INDEX; E-VALUE | core boundaries |
+| Signed infinities through native arguments/results, entry, and c-hex; JSON encoding | Preserve signs/C; JSON rejects, completion facts retained | core transport |
+| `nan == nan`, `nan != nan`, `[nan] == [nan]`, `nan < 0`, `nan >= 0` | false, true, false, false, false | core comparison |
+| `nan / 0`, `nan % 0`, `nan */ 1`, `nan ** 0`, `1 ** nan` | nan, nan, nan, 1, 1; `0/0` and `0**-1` remain E-NUMBER | core numbers |
+| `is_nan(parse_number(str(nan)))`; `parse_number("NaN")`; `is_nan(null)` | true; E-VALUE; E-TYPE | core functions |
+| `xs[nan]`, `xs[:nan]`, `range(nan)`, `nan + "x"` | E-INDEX, E-INDEX, E-VALUE, E-TYPE | core boundaries |
+| match nan literal, number type, and is_nan guard | Literal never matches; type/guard can select; unselected arm invokes nothing | core control |
+| Redeliver NaN at one JoinID; replay canonical NaN arguments at one CallID | Idempotent; reuse outcome with zero providers; null/"nan" changes conflict/diverge | core identity |
+| `fn a(x:number)->number @{np.sqrt(x)}`; `map([1,4],fn(x:number)->number @{np.sqrt(x)})` | Marked bodies are legal; the latter yields [1,2]; removing the relevant @ gives E-PURITY without special treatment of sqrt | core syntax/purity |
+| fn executes np.sqrt, explicit perform, a known builder result, or a captured request | Ordinary bodies yield E-PURITY; @{...} accepts the author promise without per-function purity registration | core purity |
+| @ before a Flow body or ordinary expression; @{...} fn reads a live store/calls a child Flow | The first two yield E-PARSE; the latter remains E-PURITY, with core structural restrictions enforced | core boundaries |
+| @{...} fn executes an effect parameter, projection, or mixed candidates; the same request executes outside fn | Accepted in marked bodies with actual proposal checks; outside fn preserve Unknown/original Ops without strengthening parallel acceptance | core Ops |
+| An unmarked anonymous/named fn defined within @{...} contains native calls | Nested ordinary fn still yields E-PURITY and needs its own @{...}; ordinary fn may call an already marked fn | core scope |
+| fn with native calls in guard, proposal argument, join RHS, carry next, or map/fold callback | Legal; direct perform in those Pure positions outside fn remains E-PURITY; strict order and zero calls on unselected paths | core composition |
+| perform in repeated/recursive/tail fn calls at one site; repeated map callbacks | Distinct CallIDs; tail calls retain no call chain; replay preserves activation | core identity |
+| parallel mixes native-calling fn with Concurrent ReadOnly perform / with Write perform outside fn | First accepted, retaining read effect; second E-PARALLEL; fn promises do not change registered operation effects | core effects |
+| Concurrent=false native calls inside fn arrive from multiple graph nodes | Serialized Host admission; permit waits occupy no worker allowance; purity promises do not grant thread safety | core concurrency |
+| fn only constructs/returns a Write proposal; an Unknown fn-body perform leaves an unsettled intent | Returned request remains Write outside fn; recovery retains Unknown and cannot retry merely because of fn | core boundaries |
+| NaN entry, Host arguments/results, Claim snapshot over c-hex | Same values/C after round trip; native receives a NaN number, not encoded text | core transport |
+| Send NaN over json; receive bare NaN over json; finite values over original protocol | Reject encoding/decoding; old bytes unchanged; no automatic profile switch | core transport |
 
 ### 16.5. Fixed numerical algorithms for power and logarithms
 
 This normative reference is shared by interpreter/codegen/independent implementations and is not a dependency on a Go release. Go-style pseudocode is not LIP source. float64 means binary64; every numericAdd/Sub/Mul/Div independently rounds nearest/ties-to-even without reassociation/FMA. Hex constants specify exact values. Assignments/comparisons/booleans/loops run in code order. int is a signed integer sufficient for the exponents, uint64 is unsigned 64-bit, and >>/& are descriptive integer operations, not new LIP operators.
 
-math.Abs is absolute value; Floor is mathematical floor; Frexp gives exact `(m,k)` with x=m·2^k and 0.5≤|m|<1 for nonzero x. Sqrt is correctly rounded nearest/ties-to-even square root. Ldexp rounds m·2^k to binary64, including subnormals/zero/overflow. Inf(1) is an internal sentinel rejected as E-NUMBER before becoming a LIP value. Conversions follow code; loop indices are exactly representable. Proven bit-equivalent optimizations are permitted, never tolerance-based acceptance of different bits.
+math.Abs is absolute value; Floor is mathematical floor; Frexp gives exact `(m,k)` with x=m·2^k and 0.5≤|m|<1 for nonzero x. Sqrt is correctly rounded nearest/ties-to-even square root. Ldexp rounds m·2^k to binary64, including subnormals/zero/overflow. Inf(1) is an internal overflow sentinel for this finite-operand algorithm, rejected as E-NUMBER. Existing infinite operands follow §3.3 before entering this algorithm. Conversions follow code; loop indices are exactly representable. Proven bit-equivalent optimizations are permitted, never tolerance-based acceptance of different bits.
 
-Apply §3 domain checks first. corePower accepts validated finite operands, coreLog positive finite operands, and coreExp is internal to corePower. `**` uses corePower; `*/` handles §3 exact cases then numericDiv(coreLog(a),coreLog(b)). Reject final nonfinite values and normalize zero. Log uses fixed 24-term series/exponent decomposition; exp uses a fixed 24-term series/power-of-two scale; power uses scaled exponentiation by squaring and square root/reciprocal for ±0.5. None become source builtins.
+Handle nonfinite operands under §3.3 first, then apply §3 finite-domain checks. corePower accepts validated finite operands, coreLog positive finite operands, and coreExp is internal to corePower. `**` uses corePower; `*/` handles §3 exact cases then numericDiv(coreLog(a),coreLog(b)). Reject final nonfinite values and normalize zero. Log uses fixed 24-term series/exponent decomposition; exp uses a fixed 24-term series/power-of-two scale; power uses scaled exponentiation by squaring and square root/reciprocal for ±0.5. None become source builtins.
 
 ```go
 func numericAdd(a, b float64) float64 { return float64(a + b) }
@@ -1550,7 +1675,33 @@ These exact algorithm bits cannot be replaced by platform pow/log or approximate
 | `2 */ 3` | `0x3fe430939835353d` |
 | `10 */ 2` | `0x400a934f0979a372` |
 
+### 16.6. Data transport and ordinary JSON
+
+Data is a logical domain, distinct from ordinary JSON. Generic cross-process Data channels for language entry and operation protocols MUST provide the following explicit profiles; in-process APIs MAY use equivalent typed value passing. External business protocols such as §12.1 HTTP MAY explicitly restrict themselves to ordinary JSON. Agree the profile with the peer and fix it when opening the channel. Never infer it from incoming string/object shapes or automatically switch based on a value.
+
+| Profile | Wire representation of each Data payload |
+|---|---|
+| json (default, 1.0 compatible) | Data containing only finite numbers encoded as §3.1 canonical ordinary JSON; reject received bare NaN/Infinity or outgoing NaN/signed infinities anywhere in the value |
+| c-hex | A JSON string containing exactly `lowerhex(C(v))`; decode before schema/annotation checks, supporting the complete Data domain |
+
+A payload is a position explicitly typed Data: each positional item and each named value in EntryInput/Request, EntryOutput.value, the value of Result, ErrorData.details, and journal Data receipt/raw_data fields. Outer protocol structures/field names/operation/version/CallID_wire/kind/code/message and other protocol metadata are not converted to c-hex. A nested list/object is encoded as one complete payload tree; do not replace just its nonfinite numbers with private tags. For example, c-hex EntryInput `{positional:["037ff8000000000000"],named:{}}` contains one NaN argument; the same field under json is a string argument. Both peers MUST agree, without shape detection or mixed interpretation.
+
+c-hex accepts only lowercase even-length hex containing a complete canonical §16.1 C value. Check lengths/budgets, UTF-8, unique/sorted object keys, canonical zero/NaN; allow signed infinities but reject other NaN bits, unknown tags, and trailing bytes. Never allocate containers using unvalidated lengths. Native numbers normalize NaN under §3.3 before encoding. Schemas MAY explicitly require finite numbers; a bare number annotation cannot itself reject NaN/signed infinities. Native adapters receive decoded numbers, never c-hex strings as library arguments.
+
+| Logical Data | JSON of c-hex payload |
+|---|---|
+| nan | `"037ff8000000000000"` |
+| inf | `"037ff0000000000000"` |
+| -inf | `"03fff0000000000000"` |
+| null | `"00"` |
+| string "nan" | `"0400000000000000036e616e"` |
+| 1 | `"033ff0000000000000"` |
+
+Under json, reject nonfinite request arguments before provider admission/intent/invocation. Deliver nonfinite results through c-hex/typed channels or record conversion failure, never substitute null/string. Entry-input decoding/validation failure remains pre-run E-SCHEMA. Encoding failure after successful entry output is Host E-VALUE, without a fabricated node root error. Host-call conversion failure retains completion facts under §10. The §12.1 HTTP profile fixes ordinary JSON: nonfinite numbers in its json field raise precommit E-HTTP. Applications delivering nonfinite numbers over HTTP need body plus an explicit custom-protocol Content-Type, without calling bare NaN/Infinity application/json. Journal/Claim identities always use C, never transport strings or language `==`; changing transport cannot confuse nonfinite numbers with business objects, null, or strings.
+
 ## 17. Non-normative notes: repository implementation status
+
+Sections 3.3/10.3/16.6 and the fn invocation-identity extension are implemented in the interpreter, generated Go, and REPL. @{...} explicitly promises native computational purity; an ordinary outer fn may call a marked inner fn. Numbers/Data support canonical NaN and signed infinities; CLI/generated executables select lossless transport with -data-encoding c-hex, while default json rejects nonfinite numbers. Go/Python native channels use canonical encoding; MemoryJournal/Claim identities do not use language equality. Runtime does not prove native implementation purity; durable recovery remains an unimplemented optional profile.
 
 This section records repository status as of the date above, without changing contracts or itself declaring core conformance. Interpreter/CLI/generated Go support static Data, multiple Flows/explicit selection, EntryInput/EntryOutput, children, pipelines, and static modules. Unselected declarations are checked. Input validation precedes run_id/MemoryJournal; CLI conveniences convert to the same EntryInput/diagnostics. Outputs await whole-graph success and distinguish null/void. Parent/child scheduling shares workers, yielding while waiting for children/resources, with instance-isolated Claims. Build snapshots expose SourceTable/SourceHash/DependencyLock/multi-source revision; sites use root-first order while SourceTable uses SourceID order. After wire covers dynamic nodes, Flow/loop/branch regions, and static completion sets. Expansion/prerequisite closure/codegen share one runtime. See [implementation coverage](../IMPLEMENTATION.en.md).
 

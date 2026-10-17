@@ -49,18 +49,21 @@ func (e *environment) frozen(names map[string]bool) (*environment, error) {
 type tailCall struct {
 	fn   *function
 	args []Value
+	site token
 }
 type evalResult struct {
 	value Value
 	tail  *tailCall
 }
 type evaluator struct {
-	run         *runState
-	node        *node
-	ctx         context.Context
-	path        Position
-	depth       int
-	closedCalls map[int]bool
+	nextFnActivation big.Int
+	functionBase     Position
+	run              *runState
+	node             *node
+	ctx              context.Context
+	path             Position
+	depth            int
+	closedCalls      map[int]bool
 }
 
 func (v *evaluator) step(t token) error {
@@ -178,6 +181,10 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		case "<", "<=", ">", ">=":
 			var less, equal bool
 			if a.k == Number && b.k == Number {
+				if math.IsNaN(a.n) || math.IsNaN(b.n) {
+					r.value = BoolValue(false)
+					break
+				}
 				less, equal = a.n < b.n, a.n == b.n
 			} else if a.k == String && b.k == String {
 				less, equal = a.s < b.s, a.s == b.s
@@ -258,7 +265,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		var captures *environment
 		captures, err = env.frozen(freeNames(e))
 		if err == nil {
-			r.value = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: captures, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
+			r.value = Value{k: Function, f: &function{trustedNative: e.trustedNative, params: e.params, typ: e.typ, body: e.body, captures: captures, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
 		}
 	case "block":
 		return v.block(e.body, newEnvironment(env), tail)
@@ -351,9 +358,9 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 			break
 		}
 		if tail {
-			r.tail = &tailCall{fn, args}
+			r.tail = &tailCall{fn, args, e.tok}
 		} else {
-			r.value, err = v.invoke(fn, args)
+			r.value, err = v.invoke(fn, args, e.tok)
 		}
 	case "proposal":
 		contract, _ := v.run.program.check.resolve(e)
@@ -481,17 +488,33 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 	}
 	return r, err
 }
-func (v *evaluator) invoke(fn *function, args []Value) (Value, error) {
+func (v *evaluator) invoke(fn *function, args []Value, site token) (value Value, err error) {
 	if v.depth >= v.run.opts.MaxFrames {
 		return Value{}, diagnostic("E-BUDGET", "non-tail call frame budget exhausted (limit: "+strconv.Itoa(v.run.opts.MaxFrames)+")")
 	}
+	callerPath, callerBase := v.path, v.functionBase
+	if v.depth == 0 {
+		v.functionBase = v.path.Copy()
+	}
 	v.depth++
-	defer func() { v.depth-- }()
+	defer func() {
+		if err != nil && err != errorCut {
+			err = at(err, site)
+			if d, ok := err.(*Diagnostic); ok && len(d.EvalPath) == 0 {
+				d.EvalPath = v.path.Copy()
+			}
+		}
+		v.depth--
+		v.path, v.functionBase = callerPath, callerBase
+	}()
 	// A tail chain must validate the innermost return before its callers.
 	// Keep each type only at its last occurrence: passed duplicate checks are
 	// redundant, and the finite type set keeps proper tail calls bounded.
 	checks := []string{}
 	for {
+		activation := v.nextFnActivation.String()
+		v.nextFnActivation.Add(&v.nextFnActivation, big.NewInt(1))
+		v.path = append(v.functionBase.Copy(), Pair{site.site, activation})
 		typ := normalizeType(fn.typ)
 		for i, previous := range checks {
 			if previous == typ {
@@ -509,7 +532,7 @@ func (v *evaluator) invoke(fn *function, args []Value) (Value, error) {
 			return Value{}, err
 		}
 		if r.tail != nil {
-			fn, args = r.tail.fn, r.tail.args
+			fn, args, site = r.tail.fn, r.tail.args, r.tail.site
 			continue
 		}
 		for i := len(checks) - 1; i >= 0; i-- {
@@ -861,8 +884,11 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 		start, end, step := int64(0), int64(0), int64(1)
 		numbers := make([]int64, len(xs))
 		for i, x := range xs {
-			if x.k != Number || math.Trunc(x.n) != x.n || math.Abs(x.n) > 9007199254740991 {
+			if x.k != Number {
 				return wrong()
+			}
+			if math.IsNaN(x.n) || math.IsInf(x.n, 0) || math.Trunc(x.n) != x.n || math.Abs(x.n) > 9007199254740991 {
+				return Value{}, diagnostic("E-VALUE", "range requires safe integers")
 			}
 			numbers[i] = int64(x.n)
 		}
@@ -939,9 +965,13 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 			var value Value
 			var err error
 			if f.f.builtin != "" {
-				value, err = v.builtin(f.f.builtin, args)
+				value, err = v.builtin(f.f.builtin, args, locations...)
 			} else {
-				value, err = v.invoke(f.f, args)
+				site := v.node.stmt.tok
+				if len(locations) != 0 {
+					site = locations[0]
+				}
+				value, err = v.invoke(f.f, args, site)
 			}
 			if err != nil {
 				return Value{}, err

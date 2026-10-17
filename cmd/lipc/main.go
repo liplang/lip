@@ -36,7 +36,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("LIP 1.0 · pure values, structured Flows, Claim facts, effect/perform")
 		fmt.Println("run/repl/serve and generated executables accept -frames N (default 10000; 0 selects default). Tail calls reuse frames; exhaustion reports E-BUDGET.")
 		fmt.Println("-parallel N accepts any positive integer and limits active leaf evaluations; workers start on demand. REPL :run inherits the selected limit.")
-		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
+		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-data-encoding json|c-hex] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
 		fmt.Printf("learn: %d short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.\n", len(course))
 		fmt.Println("print/log/telemetry are one-way diagnostics, allowed in fn. Output goes to stderr; run/repl accept -trace=false to disable delivery.")
 		return nil
@@ -53,6 +53,7 @@ func run(ctx context.Context, args []string) error {
 	project := flags.String("project", "", "project root for static LIP imports; defaults to source directory")
 	entryInput := flags.String("entry-input", "", "EntryInput JSON with positional and named fields")
 	entryOutput := flags.Bool("entry-output", false, "print the value/void success envelope")
+	dataEncoding := flags.String("data-encoding", "json", "Data transport: json or c-hex (supports nan and inf)")
 	parallel := flags.Int("parallel", 1, "maximum active leaf evaluations (waiting containers yield)")
 	steps := flags.Int64("steps", 10000000, "step budget (0 unlimited)")
 	elements := flags.Int64("elements", 1000000, "list allocation budget (0 unlimited)")
@@ -112,7 +113,7 @@ func run(ctx context.Context, args []string) error {
 		if !hasEntryInput {
 			inputJSON = "{\"positional\":[],\"named\":" + *input + "}"
 		}
-		data, err := script.DecodeEntryInput([]byte(inputJSON))
+		data, err := script.DecodeEntryInputWithEncoding([]byte(inputJSON), *dataEncoding)
 		if err != nil {
 			return err
 		}
@@ -126,11 +127,10 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		outputValue := report.Output
+		dataJSON, err := script.EncodeData(report.Output, *dataEncoding)
 		if *entryOutput {
-			outputValue = *report.EntryOutput
+			dataJSON, err = script.EncodeEntryOutput(*report.EntryOutput, *dataEncoding)
 		}
-		dataJSON, err := script.EncodeJSON(outputValue)
 		if err != nil {
 			return err
 		}

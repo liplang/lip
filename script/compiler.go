@@ -67,7 +67,7 @@ func lex(src string) ([]token, error) {
 			}
 			// Retained tokens must not pin an entire cell through a substring.
 			t.text, t.kind = strings.Clone(src[start:l.i]), "id"
-			if strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null void ", " "+t.text+" ") {
+			if strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan inf void ", " "+t.text+" ") {
 				t.kind = t.text
 			}
 		} else if asciiDigit(c) {
@@ -214,7 +214,7 @@ func lex(src string) ([]token, error) {
 				}
 			}
 			if !matched {
-				if !strings.ContainsRune("()[]{}.,:;?=+-*/%!<>", rune(c)) {
+				if !strings.ContainsRune("()[]{}.,:;?=+-*/%!<>@", rune(c)) {
 					return nil, at(diagnostic("E-LEX", "unexpected character"), t)
 				}
 				t.kind, t.text = string(c), string(c)
@@ -266,6 +266,7 @@ type arm struct {
 	tok           token
 }
 type expression struct {
+	trustedNative         bool
 	native                func(*evaluator, *environment, bool) (evalResult, error)
 	tag, name, typ, state string
 	tok                   token
@@ -353,13 +354,14 @@ type operationSummary struct {
 }
 
 type function struct {
-	nativeResult *nativeShape
-	nativeParams []nativeParameter
-	params       []parameter
-	typ          string
-	body         *block
-	captures     *environment
-	builtin      string
+	trustedNative bool
+	nativeResult  *nativeShape
+	nativeParams  []nativeParameter
+	params        []parameter
+	typ           string
+	body          *block
+	captures      *environment
+	builtin       string
 }
 type proposal struct {
 	nativeResult *nativeShape
@@ -518,6 +520,12 @@ func (p *parser) declarationEnd() {
 func (p *parser) staticData() Value {
 	t := p.peek()
 	switch t.kind {
+	case "nan":
+		p.take()
+		return nanValue()
+	case "inf":
+		p.take()
+		return infValue()
 	case "number", "string", "true", "false", "null":
 		p.take()
 		if t.kind == "true" || t.kind == "false" {
@@ -526,7 +534,7 @@ func (p *parser) staticData() Value {
 		return t.value
 	case "+", "-":
 		p.take()
-		x := p.need("number").value
+		x := p.signedNumber()
 		if t.kind == "-" {
 			return number(-x.n)
 		}
@@ -549,7 +557,7 @@ func (p *parser) staticData() Value {
 		fields := map[string]Value{}
 		for p.peek().kind != "}" && p.err == nil {
 			key := p.take()
-			if key.kind != "id" && key.kind != "string" {
+			if key.kind != "id" && key.kind != "nan" && key.kind != "inf" && key.kind != "string" {
 				p.fail(key, "static object key must be an identifier or string")
 			}
 			name := key.text
@@ -629,6 +637,18 @@ func (p *parser) accept(k string) bool {
 	}
 	return false
 }
+func (p *parser) fieldName() token {
+	if p.peek().kind == "nan" || p.peek().kind == "inf" {
+		return p.take()
+	}
+	return p.need("id")
+}
+func (p *parser) signedNumber() Value {
+	if p.accept("inf") {
+		return infValue()
+	}
+	return p.need("number").value
+}
 func (p *parser) need(k string) token {
 	t := p.peek()
 	if t.kind != k {
@@ -695,7 +715,14 @@ func (p *parser) function(t token) *expression {
 	ps := p.params()
 	p.need("->")
 	typ := p.typeName(false)
-	return &expression{tag: "fn", tok: t, params: ps, typ: typ, body: p.block("fn")}
+	trusted := p.accept("@")
+	if trusted {
+		marker := p.ts[p.i-1]
+		if p.peek().line != marker.line {
+			p.fail(marker, "@ must be followed by { on the same line")
+		}
+	}
+	return &expression{tag: "fn", tok: t, params: ps, typ: typ, trustedNative: trusted, body: p.block("fn")}
 }
 
 // Inspect only delimiter nesting; this makes tail classification independent of
@@ -868,6 +895,10 @@ func (p *parser) matchArms(mode string) []arm {
 			t := p.take()
 			pat := pattern{tok: t}
 			switch t.kind {
+			case "nan":
+				pat.value = nanValue()
+			case "inf":
+				pat.value = infValue()
 			case "number", "string":
 				pat.value = t.value
 			case "true", "false":
@@ -875,7 +906,7 @@ func (p *parser) matchArms(mode string) []arm {
 			case "null":
 				pat.value = Value{}
 			case "+", "-":
-				n := p.need("number").value.n
+				n := p.signedNumber().n
 				if t.kind == "-" {
 					n = -n
 				}
@@ -958,7 +989,7 @@ func (p *parser) expr(min int) *expression {
 			t := p.need("id")
 			target := &expression{tag: "id", name: t.text, tok: t}
 			if p.accept(".") {
-				target = &expression{tag: "field", name: p.need("id").text, tok: t, x: target}
+				target = &expression{tag: "field", name: p.fieldName().text, tok: t, x: target}
 			}
 			stage := &expression{tag: "call", state: "stage", tok: t, x: target, args: []argument{{expr: &expression{tag: "id", name: "$pipe", tok: t}}}}
 			if p.peek().kind == "(" {
@@ -1009,7 +1040,7 @@ func (p *parser) proposal() *expression {
 	t := p.need("effect")
 	name := p.need("id").text
 	for p.accept(".") {
-		name += "." + p.need("id").text
+		name += "." + p.fieldName().text
 	}
 	args := p.arguments()
 	return &expression{tag: "proposal", tok: t, name: name, args: args}
@@ -1053,7 +1084,7 @@ func (p *parser) postfix() *expression {
 			e = &expression{tag: "call", tok: t, x: e, args: p.arguments()}
 		case ".":
 			p.take()
-			e = &expression{tag: "field", tok: t, x: e, name: p.need("id").text}
+			e = &expression{tag: "field", tok: t, x: e, name: p.fieldName().text}
 		case "[":
 			p.take()
 			p.soft++
@@ -1085,6 +1116,10 @@ func (p *parser) primary() *expression {
 	t := p.take()
 	e := &expression{tok: t}
 	switch t.kind {
+	case "nan":
+		e.tag, e.value = "lit", nanValue()
+	case "inf":
+		e.tag, e.value = "lit", infValue()
 	case "number", "string":
 		e.tag = "lit"
 		e.value = t.value
@@ -1165,7 +1200,7 @@ func (p *parser) primary() *expression {
 				name := key.text
 				if key.kind == "string" {
 					name = key.value.s
-				} else if key.kind != "id" {
+				} else if key.kind != "id" && key.kind != "nan" && key.kind != "inf" {
 					p.fail(key, "invalid object key")
 				}
 				p.need(":")
@@ -1193,7 +1228,7 @@ func (p *parser) objectAhead() bool {
 	if j < len(p.ts) && p.ts[j].kind == "}" {
 		return true
 	}
-	if j >= len(p.ts) || (p.ts[j].kind != "id" && p.ts[j].kind != "string") {
+	if j >= len(p.ts) || (p.ts[j].kind != "id" && p.ts[j].kind != "nan" && p.ts[j].kind != "inf" && p.ts[j].kind != "string") {
 		return false
 	}
 	j++

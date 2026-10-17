@@ -16,9 +16,9 @@ import (
 )
 
 type exampleCase struct {
-	path, input, want string
-	entry             string
-	demo, snapshot    bool
+	path, input, want      string
+	entry                  string
+	demo, snapshot, native bool
 }
 
 var examples = []exampleCase{
@@ -43,6 +43,7 @@ var examples = []exampleCase{
 	{path: "ecosystem/18_proposals.lip", demo: true, want: `{"average":2,"first":"HELLO","second":"HELLO, LIP"}`},
 	{path: "ecosystem/19_parallel_read_write.lip", demo: true, want: `["ADA","LIN","SAM"]`},
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
+	{path: "ecosystem/30_native_purity.lip", native: true, want: `{"display":"[3,nan,4,inf]","missing":true}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
 	{path: "advanced/26_flows.lip", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
 	{path: "advanced/28_flow_values.lip", want: `{"direct":5,"pipeline":7}`},
@@ -72,6 +73,13 @@ func TestExamples(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+			}
+			if example.native {
+				if _, err := exec.LookPath("python3"); err != nil {
+					t.Skip("Python 3 unavailable")
+				}
+				host = NewNativeHost(host)
+				defer host.Close()
 			}
 			source, err := os.ReadFile(filepath.Join("..", "examples", example.path))
 			if err != nil {

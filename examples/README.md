@@ -10,6 +10,8 @@
 
 REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
+[30_native_purity](ecosystem/30_native_purity.lip) 展示普通外层 fn 调用带标记的内层原生函数，以及 NaN/无穷的处理。运行 `./lipc run examples/ecosystem/30_native_purity.lip` 即可，只需 Python 3 标准库 math。`@{...}` 是作者对计算纯性的承诺。示例用 `str` 显示 `[3,nan,4,inf]`；直接返回非有限数值时选择 `-data-encoding c-hex`，默认 JSON 继续严格拒绝非有限数。
+
 ## 先记住五条规则
 
 1. `flow Name(...) -> Type { ... }` 声明可复用的图；默认选择根模块的 `Main`；没有 `Main` 时选择唯一根 Flow，多个时用 `-entry Name`。显式入口覆盖默认，名称区分大小写。有值的 Flow 由末尾的 `return` 给出结果，void 没有返回值。

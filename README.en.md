@@ -14,6 +14,19 @@ The focus is a solid computational core. Math, files, networking, databases, and
 
 Practical checks cover a CRUD website, SQLite queries, pandas ETL, scikit-learn regression/classification, NumPy linear algebra, and SciPy integration/optimization. The [linear model example](examples/advanced/27_linear_model.lip) demonstrates training, prediction, and error measurement with the pure core. Websites use explicit Host contracts for storage and templates; scientific libraries use the Go/Python bridge in scripts and the REPL. See the implementation guide for tested paths and current limits.
 
+The 1.1 working tree supports explicit purity promises and `nan`, `inf`, and `-inf`:
+
+```lip
+import python "math" as py
+fn outer(x:number)->number {
+    inner = fn(y:number)->number @{ py.sqrt(y) }
+    if x >= 0 { inner(x) } else { nan }
+}
+flow Main()->string { return str([outer(9), outer(-1)]) }
+```
+
+Here only `inner` directly calls native code, so `outer` needs no `@`. The marker is an author promise; the compiler does not prove Python/Go purity. Authorization, resource admission, cancellation, and journaling remain enforced. `nan != nan` is true. Negative infinity is below every finite number, which is below positive infinity. REPL/`str` display `nan`, `inf`, and `-inf`; ordinary JSON rejects these nonfinite numbers. Use `-data-encoding c-hex` for lossless CLI/generated input/output. Each input argument is a JSON string containing its canonical hex bytes; an example NaN named input is `-input '{"x":"037ff8000000000000"}'`.
+
 ## Suitable workflows and composition boundaries
 
 LIP fits **tool workflows with an explicit completion condition that combine results from several sources and explain the basis for a decision**. A typical structure is concurrent reads or checks → complete Claim collection → a pure decision → conditional external actions.
@@ -243,7 +256,7 @@ If GOBIN is set, add that directory to PATH. A custom location can be selected w
 
 ## Language core and program structure
 
-Bindings are immutable; inner scopes can shadow ordinary names. Values include null, bool, finite binary64 numbers, UTF-8 strings, lists, objects, pure functions, and requests. **Data** recursively excludes functions and requests and is the boundary format for entry protocols, Hosts, and Claims; same-run Flows can pass all ordinary values. An `any` annotation still requires the type and Data checks of its eventual use.
+Bindings are immutable; inner scopes can shadow ordinary names. Values include null, bool, finite binary64 numbers, signed infinities, and canonical `nan`, UTF-8 strings, lists, objects, pure functions, and requests. **Data** recursively excludes functions and requests and is the boundary format for entry protocols, Hosts, and Claims; same-run Flows can pass all ordinary values. An `any` annotation still requires the type and Data checks of its eventual use.
 
 | Work to express | Syntax |
 |---|---|
@@ -275,7 +288,7 @@ flow Main()->object {
 
 The result has two tools and a by_name index; first still has one tool. `put` replaces a field with the same key, while `concat` retains duplicate list entries. Empty input returns the initial state. A Flow can also perform an external action before carrying its result into the next round; see the [carry example](examples/structures/12_carry.lip). Prefer a comprehension when only transforming input items into a list; repeated `concat` has no constant-time append guarantee and may copy quadratically for large lists.
 
-Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; domain errors and non-finite results raise `E-NUMBER`. See the [tutorial](examples/README.en.md) for numerical, string, and control-structure examples.
+Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; finite-operand domain errors and overflow raise `E-NUMBER`; existing NaN/infinite operands follow specification §3.3. See the [tutorial](examples/README.en.md) for numerical, string, and control-structure examples.
 
 ### Entry points and successful results
 
@@ -355,7 +368,7 @@ flow Predict(model:object,rows:list)->list {
 
 `effect receiver.method(...)` uses the receiver's lexical binding, including saved REPL values and parameters in imported LIP modules. Nested members such as `effect library.linalg.solve(matrix,rhs)` also work. Constructing the request performs no member lookup or native call; `perform` applies the normal authorization and resource checks. Deleting or rebinding the public name preserves the receiver already captured by a saved request.
 
-Closures may capture resource references and requests and pass them across child Flows without extending resource lifetimes or changing permissions. Native actions still require `perform`; pure `fn` bodies cannot directly invoke native methods.
+Closures may capture resource references and requests and pass them across child Flows without extending resource lifetimes or changing permissions. Native actions still use `perform`. A fn directly invoking native computation requires an `@{...}` body, explicitly promising purity.
 
 Pure functions can also construct requests returning native objects. With the default library bridge, this program returns `5`:
 
@@ -435,14 +448,14 @@ Module attributes, submodules, classes, methods, named arguments, and native fun
 
 | Value or operation | Bridge behavior |
 |---|---|
-| null, bool, finite number, string | Ordinary Data; native integers must convert exactly within the supported range |
+| null, bool, number (including nan, inf, and -inf), string | Ordinary Data; native integers must convert exactly within the supported range |
 | LIP list / object | Convert to the Go target type or Python list / dict |
 | Ordinary Python list / tuple / string-keyed dict | Language containers, potentially containing resource references |
 | Go containers, structs, pointers, functions; Python arrays, DataFrames, bytes, etc. | Resource references scoped to the Host |
-| `native_data(value)` | A finite, acyclic Data snapshot through perform; supports Go containers/exported fields and Python containers/`tolist()` |
+| `native_data(value)` | An acyclic Data snapshot through perform; supports Go containers/exported fields and Python containers/`tolist()` |
 | `native_release(value)` | Release that reference; close files and similar resources with their own methods |
 
-Go numbers are checked against target integer ranges; string-to-`[]byte` conversion uses UTF-8. Safe integral Python arguments become int; other numbers become float. Take snapshots or encode bytes to cross Go/Python runtimes. Non-finite numbers and cyclic objects cannot become Data. A trailing error among multiple Go results is the failure channel; a sole error result remains a native resource, with nil as null. Native function references can be passed within a runtime; language pure functions need an application adapter to serve as native callbacks. The `native_data` / `native_release` helpers follow lexical name resolution; local declarations take precedence.
+Go numbers are checked against target integer ranges; string-to-`[]byte` conversion uses UTF-8. Safe integral Python arguments become int; other numbers become float. Take snapshots or encode bytes to cross Go/Python runtimes. Cyclic objects cannot become Data; NaN and signed infinities are supported, with NaN normalization. A trailing error among multiple Go results is the failure channel; a sole error result remains a native resource, with nil as null. Native function references can be passed within a runtime; language pure functions need an application adapter to serve as native callbacks. The `native_data` / `native_release` helpers follow lexical name resolution; local declarations take precedence.
 
 The Host owns workers, objects, and permissions. Native references record scope, owner, and generation. File-run handles expire at run completion; failed cells release newly created handles, while successful cells retain handles reachable through saved values, closures, proposals, or their result. Saved session handles remain valid until explicit release, reset, or close. An invalid or foreign handle raises `E-RESOURCE`. Closing or resetting invalidates existing references. Embedding Hosts can acquire run leases with `Host.BeginRun` and release them with `RunLease.End`; cleanup follows settlement of started operations on success, failure, cancellation, and budget termination. `Report.CleanupErrors` preserves cleanup faults separately from node errors. Cancellation or lost communication never automatically repeats an external action. Native libraries have their process or worker's OS permissions; applications supply deployment isolation when needed.
 

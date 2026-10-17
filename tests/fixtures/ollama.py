@@ -6,6 +6,24 @@ import os
 import sys
 import weakref
 
+# The PTY probe opens this gate after typing its draft. Model execution under
+# race instrumentation can outlast the timer, so wall-clock delay alone cannot
+# guarantee that the notification happens during editing.
+if os.environ.get("LIP_CHAT_EDIT_GATE"):
+    import threading
+    import time
+
+    original_timer = threading.Timer
+
+    def gated_timer(interval, function, args=None, kwargs=None):
+        def invoke():
+            while not os.path.exists(os.environ["LIP_CHAT_EDIT_GATE"]):
+                time.sleep(0.01)
+            function(*(args or []), **(kwargs or {}))
+        return original_timer(interval, invoke)
+
+    threading.Timer = gated_timer
+
 
 responses = weakref.WeakSet()
 

@@ -96,6 +96,9 @@ func CompileWithOptions(source string, host Host, options CompileOptions) (*Prog
 }
 func (p *Program) BuildInfo() Value { return p.build }
 func compileSyntax(s *syntax, host Host, build Value) (*Program, error) {
+	if host.Resources == nil {
+		host.Resources = NewResourcePool(nil)
+	}
 	contracts := make([]Contract, len(host.Contracts))
 	for i, c := range host.Contracts {
 		if err := validateContract(c); err != nil {
@@ -134,7 +137,15 @@ func (p *Program) Run(ctx context.Context, inputs map[string]Value, opts Options
 // DecodeEntryInput is the strict JSON boundary; RunEntry subsequently checks
 // positional/named binding and annotations against the selected signature.
 func DecodeEntryInput(data []byte) (Value, error) {
+	return DecodeEntryInputWithEncoding(data, "json")
+}
+
+// The EntryInput envelope stays JSON; the profile applies to each argument.
+func DecodeEntryInputWithEncoding(data []byte, encoding string) (Value, error) {
 	value, err := DecodeData(data)
+	if err == nil {
+		value, err = mapEntryInput(value, encoding, false)
+	}
 	if err != nil {
 		return Value{}, diagnostic("E-SCHEMA", "invalid EntryInput: "+err.Error())
 	}
@@ -142,6 +153,73 @@ func DecodeEntryInput(data []byte) (Value, error) {
 		return Value{}, err
 	}
 	return value, nil
+}
+
+func EncodeEntryInput(input Value, encoding string) ([]byte, error) {
+	v, err := mapEntryInput(input, encoding, true)
+	if err != nil {
+		return nil, err
+	}
+	return EncodeJSON(v)
+}
+
+func mapEntryInput(input Value, encoding string, encode bool) (Value, error) {
+	if err := checkDataEncoding(encoding); err != nil {
+		return Value{}, err
+	}
+	if err := checkEntryInput(input); err != nil {
+		return Value{}, err
+	}
+	if encoding == "json" {
+		return input, nil
+	}
+	convert := decodeCanonicalHex
+	if encode {
+		convert = canonicalHex
+	}
+	xs := make([]Value, len(input.o["positional"].l))
+	for i, v := range input.o["positional"].l {
+		x, err := convert(v)
+		if err != nil {
+			return Value{}, err
+		}
+		xs[i] = x
+	}
+	o := make(map[string]Value, len(input.o["named"].o))
+	for k, v := range input.o["named"].o {
+		x, err := convert(v)
+		if err != nil {
+			return Value{}, err
+		}
+		o[k] = x
+	}
+	return object(map[string]Value{"positional": ListValue(xs...), "named": object(o)}), nil
+}
+
+// Only EntryOutput.value is Data. kind and the void envelope remain JSON.
+func EncodeEntryOutput(output Value, encoding string) ([]byte, error) {
+	if err := checkDataEncoding(encoding); err != nil {
+		return nil, err
+	}
+	if output.k != Object {
+		return nil, diagnostic("E-VALUE", "invalid EntryOutput")
+	}
+	kind := output.o["kind"]
+	if kind.k == String && kind.s == "void" && len(output.o) == 1 {
+		return EncodeJSON(output)
+	}
+	v, ok := output.o["value"]
+	if kind.k != String || kind.s != "value" || len(output.o) != 2 || !ok {
+		return nil, diagnostic("E-VALUE", "invalid EntryOutput")
+	}
+	if encoding == "c-hex" {
+		var err error
+		v, err = canonicalHex(v)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return EncodeJSON(object(map[string]Value{"kind": kind, "value": v}))
 }
 
 func checkEntryInput(input Value) error {
@@ -298,7 +376,7 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 		if _, retained := saved[name]; p.syntax.cell && retained {
 			continue
 		}
-		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
+		env.values[name] = Value{k: Function, f: &function{trustedNative: e.trustedNative, params: e.params, typ: e.typ, body: e.body, captures: env, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
 	}
 	// Install every function before freezing captures so mutual recursion keeps
 	// the original function identities without retaining unrelated globals.
@@ -499,6 +577,7 @@ func (g *region) work() []dependency {
 
 type permitRequest struct {
 	need   map[string]uint64
+	serial string
 	resume chan flowResult
 }
 type nodeEvent struct {
@@ -1326,7 +1405,7 @@ func (r *runState) acceptEvent(event nodeEvent) {
 		n.permitCancel = cancel
 		r.permits++
 		go func() {
-			release, err := r.program.host.Resources.acquire(ctx, request.need)
+			release, err := r.program.host.Resources.acquire(ctx, request.need, request.serial)
 			r.events <- nodeEvent{node: n, permitReady: true, release: release, err: err}
 		}()
 		return
@@ -1673,11 +1752,11 @@ func (s *claimStore) join(pos Position, v Value) error {
 		return diagnostic("E-ID-COLLISION", "JoinDigest collision")
 	}
 	if old, ok := s.atoms[key]; ok {
-		same, _ := Equal(old, v)
+		same := identityKey(old) == identityKey(v)
 		if !same {
 			found := false
 			for _, variant := range s.variants[key] {
-				eq, _ := Equal(variant, v)
+				eq := identityKey(variant) == identityKey(v)
 				found = found || eq
 			}
 			if !found {
@@ -1765,14 +1844,18 @@ func (r *runState) perform(v *evaluator, t token, p *proposal) (Value, error) {
 			}
 		}
 		release := func() {}
-		if len(p.contract.Resources) > 0 {
+		if len(p.contract.Resources) > 0 || !p.contract.Concurrent {
 			if r.program.host.Resources == nil {
 				record.admission = true
 				record.Response = Rejected("E-RESOURCE", "no resource pool")
 				return record
 			}
 			var e error
-			release, e = v.acquirePermit(p.contract.Resources)
+			serial := ""
+			if !p.contract.Concurrent {
+				serial = identityKey(p.contract.Operation.Wire())
+			}
+			release, e = v.acquirePermit(p.contract.Resources, serial)
 			if e != nil {
 				if e == errorCut {
 					record.aborted = true
@@ -2512,8 +2595,8 @@ func (v *evaluator) recordRange(site, count int) {
 	}
 }
 
-func (v *evaluator) acquirePermit(need map[string]uint64) (func(), error) {
-	request := &permitRequest{need: need, resume: make(chan flowResult, 1)}
+func (v *evaluator) acquirePermit(need map[string]uint64, serial string) (func(), error) {
+	request := &permitRequest{need: need, serial: serial, resume: make(chan flowResult, 1)}
 	v.run.events <- nodeEvent{node: v.node, permit: request}
 	result := <-request.resume
 	return result.release, result.err

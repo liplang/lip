@@ -8,6 +8,8 @@ These executable examples develop one LIP model (the working tree follows the [1
 
 Start with `./lipc learn` for 38 interactive lessons and 76 small examples or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
 
+[30_native_purity](ecosystem/30_native_purity.lip) shows a marked inner native function inside an ordinary outer fn, plus NaN/infinity handling. Run `./lipc run examples/ecosystem/30_native_purity.lip`; Python 3 and its standard math module are sufficient. `@{...}` is the author’s promise of computational purity. The example displays `[3,nan,4,inf]` through `str`; returning nonfinite numbers directly requires `-data-encoding c-hex`. Default JSON remains strict.
+
 ## Five rules to remember
 
 1. `flow Name(...) -> Type { ... }` declares a reusable graph. Root `Main` is the default entry; otherwise use the sole root Flow or choose with `-entry Name`. Explicit selection overrides the default, and names are case-sensitive. A valued Flow ends in return; void has no value.

@@ -614,6 +614,8 @@ def unsupported():
     return {1, 2}
 def nonfinite():
     return float("inf")
+def too_large():
+    return 9007199254740992
 `
 	if err := os.WriteFile(filepath.Join(moduleDir, "lip_repl_fixture.py"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
@@ -666,9 +668,10 @@ def nonfinite():
 	eval(`flow direct(x:number)->number { return math.sqrt(x) }`, "")
 	eval(`direct(9)`, "3")
 	eval(`help("math.sqrt")`, "")
+	eval(`py.nonfinite() == inf`, "true")
 	for source, code := range map[string]string{
-		`failed=py.nonfinite()`:        "E-VALUE",
-		`py.nonfinite()`:               "E-VALUE",
+		`failed=py.too_large()`:        "E-VALUE",
+		`py.too_large()`:               "E-VALUE",
 		`py.missing()`:                 "E-EFFECT-REJECTED",
 		`py.add(fn()->number {1})`:     "E-SCHEMA",
 		`fn bad()->number {py.add(1)}`: "E-PURITY",
@@ -681,7 +684,7 @@ def nonfinite():
 	if _, saved := s.Values()["failed"]; saved {
 		t.Fatal("failed call committed a binding")
 	}
-	if names := s.Complete("py.nonfinite"); len(names) != 0 {
+	if names := s.Complete("py.too_large"); len(names) != 0 {
 		t.Fatalf("failed cell published its operation: %v", names)
 	}
 	eval(`py.add(1)`, "2")
@@ -1457,6 +1460,13 @@ func TestSessionScriptExamples(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+			}
+			if example.native {
+				if _, err := exec.LookPath("python3"); err != nil {
+					t.Skip("Python 3 unavailable")
+				}
+				host = NewNativeHost(host)
+				defer host.Close()
 			}
 			source, err := os.ReadFile(filepath.Join("..", "examples", example.path))
 			if err != nil {

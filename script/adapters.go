@@ -231,7 +231,7 @@ func toReflect(v Value, typ reflect.Type) (reflect.Value, error) {
 	switch typ.Kind() {
 	case reflect.Float32, reflect.Float64:
 		if v.k == Number {
-			if typ.Kind() == reflect.Float32 && float64(float32(v.n)) != v.n {
+			if typ.Kind() == reflect.Float32 && !math.IsNaN(v.n) && float64(float32(v.n)) != v.n {
 				return reflect.Value{}, diagnostic("E-SCHEMA", "lossy float32 conversion")
 			}
 			out.SetFloat(v.n)
@@ -324,19 +324,43 @@ func toReflect(v Value, typ reflect.Type) (reflect.Value, error) {
 	return reflect.Value{}, diagnostic("E-SCHEMA", "cannot map Data to "+typ.String())
 }
 
-// PythonHandler invokes an explicitly registered member of an installed
-// module. A worker process handles a single call; module output goes to stderr.
+// Pack Data arguments individually, leaving protocol metadata as ordinary JSON.
+func nativeArgumentWire(positional []Value, named map[string]Value) ([]string, map[string]string, error) {
+	xs := make([]string, len(positional))
+	for i, v := range positional {
+		x, err := canonicalHex(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		xs[i] = x.s
+	}
+	o := make(map[string]string, len(named))
+	for k, v := range named {
+		x, err := canonicalHex(v)
+		if err != nil {
+			return nil, nil, err
+		}
+		o[k] = x.s
+	}
+	return xs, o, nil
+}
+
+// PythonHandler invokes a registered member in a single-call worker using
+// c-hex Data transport. Module output goes to stderr.
 func PythonHandler(executable string, contract Contract) func(context.Context, Request) Response {
 	if executable == "" {
 		executable = "python3"
 	}
 	return func(ctx context.Context, r Request) Response {
-		params, err := requestArgs(r).Native()
+		args, kwargs, err := nativeArgumentWire(r.Positional, r.Named)
 		if err != nil {
 			return Rejected("E-SCHEMA", err.Error())
 		}
 		id, _ := r.CallID.Wire().Native()
-		payload, _ := json.Marshal(map[string]any{"module": contract.Operation.Path, "member": contract.Operation.Member, "args": params, "call_id": id, "write": contract.Effect != ReadOnlyEffect})
+		payload, err := json.Marshal(map[string]any{"module": contract.Operation.Path, "member": contract.Operation.Member, "args": args, "kwargs": kwargs, "call_id": id, "write": contract.Effect != ReadOnlyEffect})
+		if err != nil {
+			return Rejected("E-SCHEMA", err.Error())
+		}
 		cmd := exec.CommandContext(ctx, executable, "-c", pythonWorker)
 		cmd.Stdin = strings.NewReader(string(payload))
 		output, err := cmd.Output()
@@ -354,7 +378,11 @@ func PythonHandler(executable string, contract Contract) func(context.Context, R
 		status, _ := fields["status"].Text()
 		switch status {
 		case "result":
-			return Result(fields["value"])
+			result, err := decodeCanonicalHex(fields["value"])
+			if err != nil {
+				return Response{Outcome: RejectedOutcome, Error: diagnostic("E-VALUE", err.Error()), KnownCompleted: true}
+			}
+			return Result(result)
 		case "known_fault":
 			message, _ := fields["message"].Text()
 			return Response{Outcome: RejectedOutcome, Error: diagnostic("E-VALUE", message), KnownCompleted: true}
@@ -369,7 +397,7 @@ func PythonHandler(executable string, contract Contract) func(context.Context, R
 	}
 }
 
-const pythonWorker = `import contextlib, importlib, json, math, sys
+const pythonWorker = pythonCanonicalCodec + `import contextlib, importlib, json, math, sys
 request = json.load(sys.stdin, parse_int=float, parse_float=float)
 def data(x):
     if x is None or isinstance(x, (str, bool)):
@@ -379,8 +407,6 @@ def data(x):
             raise ValueError("integer outside safe range")
         return float(x)
     if isinstance(x, float):
-        if not math.isfinite(x):
-            raise ValueError("non-finite number")
         return 0.0 if x == 0 else x
     if isinstance(x, (list, tuple)):
         return [data(item) for item in x]
@@ -392,14 +418,15 @@ try:
         fn = importlib.import_module(request["module"])
         for name in request["member"].split("."):
             fn = getattr(fn, name)
-        positional, named = request["args"]
+        positional = [from_c_hex(x) for x in request["args"]]
+        named = {k:from_c_hex(v) for k,v in request["kwargs"].items()}
         result = fn(*positional, **named)
 except Exception as error:
     uncertain = request["write"] and isinstance(error, (TimeoutError, ConnectionError))
     response = {"status":"uncertain" if uncertain else "rejected", "message":str(error)}
 else:
     try:
-        response = {"status":"result", "value":data(result)}
+        response = {"status":"result", "value":c_hex(data(result))}
         json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except Exception as error:
         response = {"status":"known_fault", "message":str(error)}

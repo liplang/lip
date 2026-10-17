@@ -282,18 +282,22 @@ type ResourcePool struct {
 	capacity, used map[string]uint64
 	changed        chan struct{}
 	queue          []*resourceWaiter
+	serial         map[string]bool
 }
-type resourceWaiter struct{ need map[string]uint64 }
+type resourceWaiter struct {
+	need   map[string]uint64
+	serial string
+}
 
 func NewResourcePool(capacity map[string]uint64) *ResourcePool {
 	c := map[string]uint64{}
 	for k, v := range capacity {
 		c[k] = v
 	}
-	return &ResourcePool{capacity: c, used: map[string]uint64{}, changed: make(chan struct{})}
+	return &ResourcePool{capacity: c, used: map[string]uint64{}, serial: map[string]bool{}, changed: make(chan struct{})}
 }
-func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64) (func(), error) {
-	waiter := &resourceWaiter{need: need}
+func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64, serial string) (func(), error) {
+	waiter := &resourceWaiter{need: need, serial: serial}
 	p.mu.Lock()
 	for k, n := range need {
 		limit, ok := p.capacity[k]
@@ -322,7 +326,26 @@ func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64) (fun
 			return nil, ctx.Err()
 		}
 		p.mu.Lock()
-		fits := len(p.queue) > 0 && p.queue[0] == waiter
+		// Preserve FIFO among conflicting waiters without allowing a busy
+		// operation to block independent providers or disjoint resources.
+		fits, index := true, 0
+		for i, earlier := range p.queue {
+			if earlier == waiter {
+				index = i
+				break
+			}
+			if serial != "" && earlier.serial == serial {
+				fits = false
+			}
+			for k, n := range need {
+				if n > 0 && earlier.need[k] > 0 {
+					fits = false
+				}
+			}
+		}
+		if serial != "" && p.serial[serial] {
+			fits = false
+		}
 		for k, n := range need {
 			limit, ok := p.capacity[k]
 			if !ok || n > limit {
@@ -334,7 +357,10 @@ func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64) (fun
 			}
 		}
 		if fits {
-			p.queue = p.queue[1:]
+			p.queue = append(p.queue[:index], p.queue[index+1:]...)
+			if serial != "" {
+				p.serial[serial] = true
+			}
 			for k, n := range need {
 				p.used[k] += n
 			}
@@ -343,6 +369,9 @@ func (p *ResourcePool) acquire(ctx context.Context, need map[string]uint64) (fun
 			p.mu.Unlock()
 			return func() {
 				p.mu.Lock()
+				if serial != "" {
+					delete(p.serial, serial)
+				}
 				for k, n := range need {
 					p.used[k] -= n
 				}

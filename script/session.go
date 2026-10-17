@@ -99,7 +99,7 @@ func (s *Session) Complete(prefix string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names := map[string]bool{}
-	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import export as lip go python host true false null any bool number string list object function void claim claim.snapshot") {
+	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import export as lip go python host true false null nan inf any bool number string list object function void claim claim.snapshot") {
 		names[name] = true
 	}
 	for name := range builtinArity {
@@ -441,7 +441,7 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (result
 		if value.k == Function {
 			info.builtin = value.f.builtin
 			if info.builtin == "" {
-				info.fn = &expression{params: value.f.params, typ: value.f.typ}
+				info.fn = &expression{params: value.f.params, typ: value.f.typ, trustedNative: value.f.trustedNative}
 			}
 		}
 		initial[name] = info
@@ -669,6 +669,8 @@ import python "math"; math.sqrt(3) calls a Python library.
 import go "strings"; strings.ToUpper("hello") calls an exported Go function.
 native_data(value) takes a Data snapshot; native_release(value) releases a native reference.
 Direct library calls use the Host boundary; effect constructs a request, perform executes it.
+fn bodies remain pure. fn f(x:number)->number @{math.sqrt(x)} promises the native computation is pure; ordinary wrappers need no @, and nested fn require their own marker for direct native calls.
+nan and inf are number literals. -inf < finite numbers < inf; nan != nan. JSON rejects non-finite numbers. :run -data-encoding c-hex selects lossless Data transport.
 Known pure request builders preserve operation summaries across calls, aliases and cells. Parallel still requires all operations Concurrent ReadOnly; projections, dynamic calls and carry stay Unknown.
 The REPL displays expression and binding results. fmt.Print/Printf/Println return the byte count after the adapter handles error; this count is also displayed.
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
@@ -678,7 +680,7 @@ var sessionBuiltinHelp = map[string]string{
 	"log":          "log(level:string, value) -> null\nEmit a labelled diagnostic; delivery failure does not change computation. Allowed in fn.",
 	"telemetry":    "telemetry(name:string, fields:object) -> null\nEmit a one-way diagnostic event; no acknowledgement or exactly-once guarantee. Allowed in fn.",
 	"len":          "len(value) -> number\nReturn the Unicode scalar count, list length, or object field count.",
-	"str":          "str(value) -> string\nReturn strings unchanged; encode other Data as canonical JSON without whitespace.",
+	"str":          "str(value) -> string\nReturn strings unchanged; display other Data without whitespace, including nan and inf.",
 	"range":        "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",
 	"map":          "map(xs, f) -> list\nCall pure unary f in order and return the results.",
 	"fold":         "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed.",
@@ -689,7 +691,7 @@ var sessionBuiltinHelp = map[string]string{
 	"has":          "has(value:object, key:string) -> bool\nTest whether the object has this key.",
 	"put":          "put(value:object, key:string, item:any) -> object\nReturn a new object with the field added or replaced.",
 	"split":        "split(value:string, separator:string) -> list\nSplit a string on a nonempty separator.",
-	"parse_number": "parse_number(value:string) -> number\nParse the complete number text as a finite binary64 value.",
+	"parse_number": "parse_number(value:string) -> number\nParse complete finite binary64 number text or nan, inf, +inf, -inf.",
 }
 
 // Interactive conveniences lower into ordinary proposals, perform, blocks and

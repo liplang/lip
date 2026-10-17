@@ -385,6 +385,7 @@ func TestOllamaChatInterpreterAndGo(t *testing.T) {
 					t.Skip("terminal editing needs prompt_toolkit")
 				}
 				t.Setenv("LIP_CHAT_DB", filepath.Join(dir, mode.name+"-terminal.sqlite3"))
+				t.Setenv("LIP_CHAT_EDIT_GATE", filepath.Join(dir, mode.name+"-edit-ready"))
 				args := append([]string{"-B", filepath.Join(root, "tests", "fixtures", "ollama_terminal.py"), mode.executable}, mode.args...)
 				probe := exec.CommandContext(ctx, "python3", args...)
 				probe.Dir = dir

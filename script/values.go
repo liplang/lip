@@ -49,14 +49,16 @@ func (v Value) Kind() Kind   { return v.k }
 func NullValue() Value       { return Value{} }
 func BoolValue(b bool) Value { return Value{k: Bool, b: b} }
 func NumberValue(n float64) (Value, error) {
-	if math.IsNaN(n) || math.IsInf(n, 0) {
-		return Value{}, diagnostic("E-NUMBER", "number must be finite")
+	if math.IsNaN(n) {
+		n = math.Float64frombits(0x7ff8000000000000)
 	}
 	if n == 0 {
 		n = 0
 	}
 	return Value{k: Number, n: n}, nil
 }
+func nanValue() Value        { return Value{k: Number, n: math.Float64frombits(0x7ff8000000000000)} }
+func infValue() Value        { return Value{k: Number, n: math.Inf(1)} }
 func number(n float64) Value { v, _ := NumberValue(n); return v }
 func StringValue(s string) (Value, error) {
 	if !utf8.ValidString(s) {
@@ -527,6 +529,165 @@ func encodeCanonical(b *bytes.Buffer, v Value) {
 	}
 }
 
+// DecodeCanonical accepts only C(v), including canonical zero and NaN. Lengths
+// are checked against the remaining input before allocating container storage.
+func DecodeCanonical(data []byte) (Value, error) {
+	d := canonicalDecoder{data: data}
+	v, err := d.value(0)
+	if err == nil && d.offset != len(data) {
+		err = diagnostic("E-VALUE", "trailing canonical input")
+	}
+	return v, err
+}
+
+type canonicalDecoder struct {
+	data   []byte
+	offset int
+}
+
+func (d *canonicalDecoder) take(n uint64) ([]byte, error) {
+	if n > uint64(len(d.data)-d.offset) {
+		return nil, diagnostic("E-VALUE", "truncated canonical input")
+	}
+	b := d.data[d.offset : d.offset+int(n)]
+	d.offset += int(n)
+	return b, nil
+}
+func (d *canonicalDecoder) size() (uint64, error) {
+	b, err := d.take(8)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint64(b), nil
+}
+func (d *canonicalDecoder) value(depth int) (Value, error) {
+	if depth > 1024 {
+		return Value{}, diagnostic("E-VALUE", "canonical nesting budget exceeded")
+	}
+	tag, err := d.take(1)
+	if err != nil {
+		return Value{}, err
+	}
+	switch tag[0] {
+	case 0:
+		return NullValue(), nil
+	case 1, 2:
+		return BoolValue(tag[0] == 2), nil
+	case 3:
+		bits, err := d.size()
+		if err != nil {
+			return Value{}, err
+		}
+		n := math.Float64frombits(bits)
+		if bits == 0x8000000000000000 || math.IsNaN(n) && bits != 0x7ff8000000000000 {
+			return Value{}, diagnostic("E-VALUE", "noncanonical number")
+		}
+		return NumberValue(n)
+	case 4:
+		n, err := d.size()
+		if err != nil {
+			return Value{}, err
+		}
+		b, err := d.take(n)
+		if err != nil {
+			return Value{}, err
+		}
+		return StringValue(string(b))
+	case 5, 6:
+		n, err := d.size()
+		if err != nil {
+			return Value{}, err
+		}
+		remaining := uint64(len(d.data) - d.offset)
+		if tag[0] == 6 {
+			remaining /= 10
+		} // shortest string key + null value
+		if n > remaining {
+			return Value{}, diagnostic("E-VALUE", "invalid canonical container length")
+		}
+		if tag[0] == 5 {
+			xs := make([]Value, int(n))
+			for i := range xs {
+				xs[i], err = d.value(depth + 1)
+				if err != nil {
+					return Value{}, err
+				}
+			}
+			return Value{k: List, l: xs}, nil
+		}
+		o := make(map[string]Value, int(n))
+		previous := ""
+		for i := uint64(0); i < n; i++ {
+			key, err := d.value(depth + 1)
+			if err != nil {
+				return Value{}, err
+			}
+			if key.k != String || i > 0 && key.s <= previous {
+				return Value{}, diagnostic("E-VALUE", "canonical object keys must be sorted unique strings")
+			}
+			previous = key.s
+			x, err := d.value(depth + 1)
+			if err != nil {
+				return Value{}, err
+			}
+			o[key.s] = x
+		}
+		return Value{k: Object, o: o}, nil
+	}
+	return Value{}, diagnostic("E-VALUE", "unknown canonical tag")
+}
+
+func checkDataEncoding(encoding string) error {
+	if encoding != "json" && encoding != "c-hex" {
+		return diagnostic("E-VALUE", "unknown Data encoding "+encoding)
+	}
+	return nil
+}
+
+func canonicalHex(v Value) (Value, error) {
+	b, err := Canonical(v)
+	if err != nil {
+		return Value{}, err
+	}
+	return textValue(hex.EncodeToString(b)), nil
+}
+func decodeCanonicalHex(v Value) (Value, error) {
+	if v.k != String || len(v.s)%2 != 0 || strings.IndexFunc(v.s, func(r rune) bool { return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') }) >= 0 {
+		return Value{}, diagnostic("E-VALUE", "c-hex requires a lowercase even-length hexadecimal JSON string")
+	}
+	b, err := hex.DecodeString(v.s)
+	if err != nil {
+		return Value{}, diagnostic("E-VALUE", "invalid c-hex")
+	}
+	return DecodeCanonical(b)
+}
+
+// EncodeData and DecodeDataWithEncoding select an explicit transport profile;
+// they never infer tags from the shape of a business value.
+func EncodeData(v Value, encoding string) ([]byte, error) {
+	if err := checkDataEncoding(encoding); err != nil {
+		return nil, err
+	}
+	if encoding == "c-hex" {
+		var err error
+		v, err = canonicalHex(v)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return EncodeJSON(v)
+}
+func DecodeDataWithEncoding(data []byte, encoding string) (Value, error) {
+	if err := checkDataEncoding(encoding); err != nil {
+		return Value{}, err
+	}
+	v, err := DecodeData(data)
+	if err == nil && encoding == "c-hex" {
+		return decodeCanonicalHex(v)
+	}
+	return v, err
+}
+
 func Display(v Value) (string, error) {
 	if !v.IsData() {
 		return "", diagnostic("E-TYPE", "str requires Data")
@@ -541,6 +702,9 @@ func Display(v Value) (string, error) {
 func EncodeJSON(v Value) ([]byte, error) {
 	if !v.IsData() {
 		return nil, diagnostic("E-VALUE", "JSON requires Data")
+	}
+	if containsNonFinite(v) {
+		return nil, diagnostic("E-VALUE", "JSON cannot encode NaN or infinity; use c-hex")
 	}
 	var b strings.Builder
 	displayJSON(&b, v)
@@ -593,6 +757,15 @@ func displayJSON(b *strings.Builder, v Value) {
 // Select the shortest round-trip decimal by exact distance, then magnitude.
 // Ryu is used only to find the decimal exponent, not to choose a tie breaker.
 func formatNumber(n float64) string {
+	if math.IsNaN(n) {
+		return "nan"
+	}
+	if math.IsInf(n, 1) {
+		return "inf"
+	}
+	if math.IsInf(n, -1) {
+		return "-inf"
+	}
 	if n == 0 {
 		return "0"
 	}
@@ -671,6 +844,29 @@ func absInt(x int) int {
 	return x
 }
 
+func finiteNumber(n float64) (Value, error) {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return Value{}, diagnostic("E-NUMBER", "finite arithmetic produced a non-finite result")
+	}
+	return NumberValue(n)
+}
+func containsNonFinite(v Value) bool {
+	if v.k == Number && (math.IsNaN(v.n) || math.IsInf(v.n, 0)) {
+		return true
+	}
+	for _, x := range v.l {
+		if containsNonFinite(x) {
+			return true
+		}
+	}
+	for _, x := range v.o {
+		if containsNonFinite(x) {
+			return true
+		}
+	}
+	return false
+}
+
 func arithmetic(op string, a, b Value) (Value, error) {
 	if op == "+" && a.k == String && b.k == String {
 		return textValue(a.s + b.s), nil
@@ -678,23 +874,32 @@ func arithmetic(op string, a, b Value) (Value, error) {
 	if a.k != Number || b.k != Number {
 		return Value{}, diagnostic("E-TYPE", "arithmetic requires numbers")
 	}
+	if op == "**" && (b.n == 0 || a.n == 1) {
+		return number(1), nil
+	}
+	if math.IsNaN(a.n) || math.IsNaN(b.n) {
+		return nanValue(), nil
+	}
 	if (op == "/" || op == "//" || op == "%") && b.n == 0 {
 		return Value{}, diagnostic("E-NUMBER", "division by zero")
 	}
+	if math.IsInf(a.n, 0) || math.IsInf(b.n, 0) {
+		return infiniteArithmetic(op, a.n, b.n)
+	}
 	switch op {
 	case "+":
-		return NumberValue(a.n + b.n)
+		return finiteNumber(a.n + b.n)
 	case "-":
-		return NumberValue(a.n - b.n)
+		return finiteNumber(a.n - b.n)
 	case "*":
-		return NumberValue(a.n * b.n)
+		return finiteNumber(a.n * b.n)
 	case "/":
-		return NumberValue(a.n / b.n)
+		return finiteNumber(a.n / b.n)
 	case "**":
 		if a.n == 0 && b.n < 0 || a.n < 0 && math.Trunc(b.n) != b.n {
 			return Value{}, diagnostic("E-NUMBER", "power has no finite real value")
 		}
-		return NumberValue(corePower(a.n, b.n))
+		return finiteNumber(corePower(a.n, b.n))
 	case "*/":
 		if a.n <= 0 || b.n <= 0 || b.n == 1 {
 			return Value{}, diagnostic("E-NUMBER", "logarithm requires value > 0, base > 0 and base != 1")
@@ -705,7 +910,7 @@ func arithmetic(op string, a, b Value) (Value, error) {
 		if a.n == b.n {
 			return number(1), nil
 		}
-		return NumberValue(numericDiv(coreLog(a.n), coreLog(b.n)))
+		return finiteNumber(numericDiv(coreLog(a.n), coreLog(b.n)))
 	case "//", "%":
 		x, y := new(big.Rat).SetFloat64(a.n), new(big.Rat).SetFloat64(b.n)
 		q := new(big.Rat).Quo(x, y)
@@ -716,14 +921,81 @@ func arithmetic(op string, a, b Value) (Value, error) {
 		}
 		if op == "//" {
 			n, _ := new(big.Rat).SetInt(whole).Float64()
-			return NumberValue(n)
+			return finiteNumber(n)
 		}
 		r := new(big.Rat).Sub(x, new(big.Rat).Mul(new(big.Rat).SetInt(whole), y))
 		n, _ := r.Float64()
 		if n == b.n {
 			n = math.Nextafter(b.n, 0)
 		}
-		return NumberValue(n)
+		return finiteNumber(n)
+	}
+	return Value{}, diagnostic("E-TYPE", "unknown arithmetic operator")
+}
+
+// Infinite operands are handled before the fixed finite algorithms and exact
+// rational division. Finite overflow still goes through finiteNumber.
+func infiniteArithmetic(op string, a, b float64) (Value, error) {
+	switch op {
+	case "+":
+		return NumberValue(a + b)
+	case "-":
+		return NumberValue(a - b)
+	case "*":
+		return NumberValue(a * b)
+	case "/":
+		return NumberValue(a / b)
+	case "//", "%":
+		if math.IsInf(a, 0) {
+			return nanValue(), nil
+		}
+		// The infinite-divisor cases are the one-sided limits of floor
+		// division and its corresponding remainder, as in Python.
+		opposite := a != 0 && math.Signbit(a) != math.Signbit(b)
+		if op == "//" {
+			if opposite {
+				return number(-1), nil
+			}
+			return number(0), nil
+		}
+		if opposite {
+			return number(b), nil
+		}
+		return number(a), nil
+	case "**":
+		if math.IsInf(b, 0) {
+			magnitude := math.Abs(a)
+			if magnitude == 1 {
+				return number(1), nil
+			}
+			if (magnitude > 1) == (b > 0) {
+				return infValue(), nil
+			}
+			return number(0), nil
+		}
+		if b < 0 {
+			return number(0), nil
+		}
+		// IEEE real pow's infinite-base cases: a negative infinite base
+		// has a negative result only for an odd integer exponent.
+		if a < 0 && math.Trunc(b) == b && math.Mod(b, 2) != 0 {
+			return number(math.Inf(-1)), nil
+		}
+		return infValue(), nil
+	case "*/":
+		if a <= 0 || b <= 0 || b == 1 {
+			return Value{}, diagnostic("E-NUMBER", "logarithm requires value > 0, base > 0 and base != 1")
+		}
+		if math.IsInf(a, 1) {
+			if math.IsInf(b, 1) {
+				return nanValue(), nil
+			}
+			if b < 1 {
+				return number(math.Inf(-1)), nil
+			}
+			return infValue(), nil
+		}
+		return number(0), nil
 	}
 	return Value{}, diagnostic("E-TYPE", "unknown arithmetic operator")
 }
@@ -1003,6 +1275,15 @@ func compareErrors(a, b *Diagnostic) int {
 // parseNumericText implements the number-only Data boundary. It deliberately
 // does not depend on a source lexer, so compiled programs need no parser.
 func parseNumericText(s string) (Value, error) {
+	if s == "nan" {
+		return nanValue(), nil
+	}
+	if s == "inf" || s == "+inf" {
+		return infValue(), nil
+	}
+	if s == "-inf" {
+		return number(math.Inf(-1)), nil
+	}
 	invalid := func() (Value, error) { return Value{}, diagnostic("E-VALUE", "invalid numeric text") }
 	i := 0
 	if i < len(s) && (s[i] == '+' || s[i] == '-') {

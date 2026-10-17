@@ -14,6 +14,19 @@ LIP 的重点是把这套计算核心做扎实。数学、文件、网络、数�
 
 实际应用检查覆盖 CRUD 网站、SQLite 查询、pandas ETL、scikit-learn 回归/分类、NumPy 线性代数和 SciPy 积分/优化。[线性模型示例](examples/advanced/27_linear_model.lip) 使用纯核心演示训练、预测与误差计算。网站通过显式 Host 合约接入存储和模板；科学计算库在脚本和 REPL 中通过 Go/Python bridge 使用。已验证的执行路径与当前限制见实现说明。
 
+1.1 工作树已支持显式纯性承诺与 `nan`、`inf`、`-inf`：
+
+```lip
+import python "math" as py
+fn outer(x:number)->number {
+    inner = fn(y:number)->number @{ py.sqrt(y) }
+    if x >= 0 { inner(x) } else { nan }
+}
+flow Main()->string { return str([outer(9), outer(-1)]) }
+```
+
+这里只有 `inner` 直接调用原生计算，因此 `outer` 无须加 `@`。标记表示作者承诺纯性，编译器不证明 Python/Go 实现的纯性；授权、资源许可、取消与 journal 仍保留。`nan != nan` 为 true；`-inf < 有限数 < inf`；REPL 与 `str` 显示 `nan`、`inf`、`-inf`，普通 JSON 拒绝这些非有限数。CLI/生成程序用 `-data-encoding c-hex` 无损传输；每个输入实参分别写成规范编码的十六进制 JSON 字符串，例如 `-input '{"x":"037ff8000000000000"}'` 表示名为 x 的 NaN 输入。
+
 ## 适合的场景与组合边界
 
 LIP 最适合**有明确结束条件、需要汇集多方结果并说明决策依据的工具工作流**。典型结构是：并行读取或检查 → Claim 完整汇聚 → 纯函数判断 → 按条件执行外部动作。
@@ -27,7 +40,7 @@ LIP 最适合**有明确结束条件、需要汇集多方结果并说明决策�
 
 组合沿用四个角色：纯 `fn` 处理不可变值和完整快照；`flow` 复用带外部动作的多步工作；Claim 汇集各项贡献；Host 提供具有明确合约的外部能力。子 Flow 可返回函数、请求及其他普通值；其中的 Data 可由父层追加到自己的 Claim；活动 Claim 不作为共享可变对象传递。Flow 目标静态确定，重复调用使用 `for` 或推导式，`map`/`fold` 的回调使用纯函数。Claim 的来源标记说明哪项工作贡献了事实；文档地址、检查器版本与证据内容仍应由业务 Data 携带。
 
-并行调用要求合约显式声明 Concurrent ReadOnly。通用 Go/Python bridge 的操作为 Unknown；需要并行时，由应用注册适当的明确合约。纯函数可封装单步请求：静态已知的函数、简单别名、直接匿名函数和跨模块函数保留返回请求的操作摘要，多层调用与递归使用同一保守规则。实际 `perform` 根据所有候选操作的合约判断并行资格；容器投影、动态函数调用和 carry 结果仍为 Unknown。业务 `{ok:false}` 是普通数据，后续动作必须由 `if`/`match` 明确控制。
+标记函数体之外的直接并行 perform 要求合约显式声明 Concurrent ReadOnly。通用 Go/Python bridge 的操作为 Unknown；需要并行时，由应用注册适当的明确合约。纯函数可封装单步请求：静态已知的函数、简单别名、直接匿名函数和跨模块函数保留返回请求的操作摘要，多层调用与递归使用同一保守规则。实际 `perform` 根据所有候选操作的合约判断并行资格；容器投影、动态函数调用和 carry 结果仍为 Unknown。业务 `{ok:false}` 是普通数据，后续动作必须由 `if`/`match` 明确控制。
 
 这些场景以一次运行内的完整工作为单位。长期事件由 Host 管理并启动运行；事务、跨请求幂等与持久状态由 Host 合约提供。当前没有崩溃恢复，完整 Claim 读取也不会在达到某个阈值时提前返回。大型数值计算继续交给原生库，避免逐元素跨语言调用。组合验证与真实限制见[实现说明](IMPLEMENTATION.md)。
 
@@ -243,7 +256,7 @@ lipc learn -list
 
 ## 语言核心与程序结构
 
-绑定不可变，内层作用域可遮蔽普通名称。值包括 null、bool、有限 binary64 number、UTF-8 string、list、object、纯函数与请求；同一运行内的 Flow 可传递所有这些普通值；Host、入口协议和 Claim 使用递归不含函数或请求的 **Data**。`any` 仍接受实际使用位置的类型和 Data 检查。
+绑定不可变，内层作用域可遮蔽普通名称。值包括 null、bool、有限 binary64 number、正负无穷与规范 `nan`、UTF-8 string、list、object、纯函数与请求；同一运行内的 Flow 可传递所有这些普通值；Host、入口协议和 Claim 使用递归不含函数或请求的 **Data**。`any` 仍接受实际使用位置的类型和 Data 检查。
 
 | 要表达的工作 | 写法 |
 |---|---|
@@ -275,7 +288,7 @@ flow Main()->object {
 
 结果含两项 tools 和按名称索引的 by_name；first 仍只含一项。`put` 遇到同名键会覆盖该字段，`concat` 保留列表中的重复项。空输入返回初始状态。在 Flow 中也可先执行外部操作，再将结果带入下一轮，见 [carry 示例](examples/structures/12_carry.lip)。只需把输入逐项转换成列表时优先用推导式；反复 `concat` 不保证常数时间追加，大列表可能产生二次复制成本。
 
-算术为 `+ - * / // % ** */`：`**` 右结合，`2 ** 3 ** 2` 为 512，`-3 ** 2` 为 -9，`2 ** -3` 为 0.125；`8 */ 2` 是以 2 为底的对数，结果为 3。幂与对数采用规范固定的 binary64 近似算法，定义域或非有限结果报 `E-NUMBER`。完整数值、字符串、控制结构示例见 [教程](examples/README.md)。
+算术为 `+ - * / // % ** */`：`**` 右结合，`2 ** 3 ** 2` 为 512，`-3 ** 2` 为 -9，`2 ** -3` 为 0.125；`8 */ 2` 是以 2 为底的对数，结果为 3。幂与对数采用规范固定的 binary64 近似算法，有限实参的定义域错误或溢出报 `E-NUMBER`，已有 NaN/无穷按规范 §3.3 处理。完整数值、字符串、控制结构示例见 [教程](examples/README.md)。
 
 ### 入口与成功结果
 
@@ -355,7 +368,7 @@ flow Predict(model:object,rows:list)->list {
 
 `effect receiver.method(...)` 按 receiver 的词法绑定解析，支持已保存的 REPL 值和导入 LIP 模块中的参数，也支持 `effect library.linalg.solve(matrix,rhs)` 这样的嵌套成员。构造请求不读取成员或调用原生代码；`perform` 才执行正常的授权和资源检查。删除或重新绑定公开名字，不会改变已保存请求捕获的 receiver。
 
-闭包可以捕获资源引用和请求，再跨子 Flow 传递；这不会延长资源寿命或改变权限。原生操作仍由 `perform` 执行，不能在纯 `fn` 中直接调用原生方法。
+闭包可以捕获资源引用和请求，再跨子 Flow 传递；这不会延长资源寿命或改变权限。原生操作仍由 `perform` 执行。fn 直接调用原生计算时，须以 `@{...}` 显式承诺其纯性。
 
 纯函数也能构造返回原生对象的请求。下面使用默认库桥接运行，结果为 `5`：
 
@@ -435,14 +448,14 @@ In [5]: sp.linalg.norm(a)
 
 | 值或操作 | 桥接方式 |
 |---|---|
-| null、bool、有限 number、string | 普通 Data；原生整数转换须精确且在支持范围内 |
+| null、bool、number（含 nan、inf 与 -inf）、string | 普通 Data；原生整数转换须精确且在支持范围内 |
 | LIP list / object | 按 Go 目标签名转换，或变成 Python list / dict |
 | Python 普通 list / tuple / 字符串键 dict | 转成语言容器，成员可保留资源引用 |
 | Go 容器、结构体、指针、函数；Python 数组、DataFrame、bytes 等 | 保留为 Host 作用域内的资源引用 |
-| `native_data(value)` | 经 perform 取得有限无环 Data 快照；支持 Go 容器/导出字段与 Python 容器/`tolist()` |
+| `native_data(value)` | 经 perform 取得无环 Data 快照；支持 Go 容器/导出字段与 Python 容器/`tolist()` |
 | `native_release(value)` | 释放该引用；文件等资源另调用自身关闭方法 |
 
-Go number 按目标签名检查整数范围，string 到 `[]byte` 使用 UTF-8；Python 的安全整数值传为 int，其余 number 为 float。跨 Go/Python 传递数据时显式取快照或编码 bytes；非有限数、循环对象不能成为 Data。Go 多返回值的末尾 error 作为失败通道，唯一 error 返回值保留为原生资源，nil 为 null。原生函数引用可在同一运行时传递，语言纯函数作为原生回调时需要应用 adapter。`native_data` / `native_release` 辅助调用遵循词法名称解析，同名局部声明优先。
+Go number 按目标签名检查整数范围，string 到 `[]byte` 使用 UTF-8；Python 的安全整数值传为 int，其余 number 为 float。跨 Go/Python 传递数据时显式取快照或编码 bytes；循环对象不能成为 Data；NaN 与正负无穷可作为 Data，NaN 统一规范化。Go 多返回值的末尾 error 作为失败通道，唯一 error 返回值保留为原生资源，nil 为 null。原生函数引用可在同一运行时传递，语言纯函数作为原生回调时需要应用 adapter。`native_data` / `native_release` 辅助调用遵循词法名称解析，同名局部声明优先。
 
 Host 管理 worker、对象和权限。原生引用记录 scope、owner 和 generation。文件 run 创建的引用在 run 结束时失效；失败 cell 释放新建的引用，成功 cell 保留保存值、闭包、proposal 或结果可达的引用。已经保存的 session 引用保留至显式 release、reset 或 close；失效或越域引用报告 `E-RESOURCE`。关闭或重置使原有引用失效。嵌入应用可通过 `Host.BeginRun` 获取 run 租约，并通过 `RunLease.End` 释放；成功、失败、取消与预算终止均在已开始动作结算后清理。`Report.CleanupErrors` 单独保留清理故障，不伪造节点错误。取消或失联不会自动重跑外部动作。原生库使用宿主进程或 worker 的 OS 权限，需要隔离时由应用部署环境提供。
 

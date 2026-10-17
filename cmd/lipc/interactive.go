@@ -70,11 +70,15 @@ func showValue(value script.Value) string {
 	if value.Kind() == script.Effect {
 		return "<external request; not yet performed>"
 	}
-	data, err := script.EncodeJSON(value)
+	text, err := script.Display(value)
 	if err != nil {
 		return "<value containing functions or requests>"
 	}
-	return string(data)
+	if value.Kind() == script.String {
+		data, _ := script.EncodeJSON(value)
+		return string(data)
+	}
+	return text
 }
 
 func repl(ctx context.Context, args []string) error {
@@ -189,7 +193,7 @@ func repl(ctx context.Context, args []string) error {
 				fmt.Println("The REPL displays return values: fmt.Print/Printf/Println return a byte count, which is displayed too.")
 				fmt.Println("native_data(value) takes a Data snapshot; native_release(value) releases a native reference.")
 				fmt.Println(":vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.")
-				fmt.Println(":run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output] [-project DIR] [-frames N] file.lip runs a complete file with static modules.")
+				fmt.Println(":run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output] [-data-encoding json|c-hex] [-project DIR] [-frames N] file.lip runs a complete file with static modules.")
 				fmt.Println("Quote paths containing spaces or JSON with single/double quotes; no shell runs. :run inherits -host and uses independent file bindings.")
 				fmt.Println("fn/Flow declarations, static Data, exports, import lip, Claims, and script statements are supported. Call a declared Flow by name or through |>.")
 				fmt.Println("LIP imports resolve under -project DIR (default: current directory) and stay frozen until :reset.")
@@ -197,6 +201,7 @@ func repl(ctx context.Context, args []string) error {
 				fmt.Println("An if statement without else waits for the next line; enter else, a blank line, or another statement.")
 				fmt.Println("Names stay bound until :del removes them. Open () [] {} or triple-quoted strings allow more input; other expressions use a trailing \\ to continue.")
 				fmt.Println("Successful cells retain results without rerunning past actions; failed cells commit no bindings, and completed external actions remain.")
+				fmt.Println("fn f(x:number)->number @{math.sqrt(x)} promises native computational purity. Outer wrappers need no @; nested native bodies need their own marker. nan and inf are number literals; use -data-encoding c-hex for lossless file transport.")
 				fmt.Println("Known pure request builders retain operation summaries; parallel still requires every candidate Concurrent ReadOnly. Projections, dynamic calls and carry stay Unknown.")
 				fmt.Println("Non-tail calls default to 10,000 active frames; -frames changes the budget. Exhaustion reports E-BUDGET; the next cell can still run.")
 				fmt.Println("-parallel accepts any positive integer; it limits active evaluations without preallocating that many workers. :run inherits the limit unless overridden.")

@@ -1,8 +1,66 @@
 package script
 
+// Both Python adapters use the fixed c-hex Data profile. Protocol metadata is
+// ordinary JSON; no business object shape is reserved by the transport.
+const pythonCanonicalCodec = `import math, struct
+def c_hex(value):
+    def enc(x):
+        if x is None: return b'\x00'
+        if type(x) is bool: return b'\x02' if x else b'\x01'
+        if type(x) in (int, float):
+            n = float(x)
+            bits = bytes.fromhex("7ff8000000000000") if math.isnan(n) else struct.pack(">d", 0.0 if n == 0 else n)
+            return b'\x03' + bits
+        if type(x) is str:
+            data = x.encode("utf-8")
+            return b'\x04' + struct.pack(">Q", len(data)) + data
+        if type(x) is list:
+            return b'\x05' + struct.pack(">Q", len(x)) + b''.join(enc(v) for v in x)
+        if type(x) is dict and all(type(k) is str for k in x):
+            return b'\x06' + struct.pack(">Q", len(x)) + b''.join(enc(k)+enc(x[k]) for k in sorted(x))
+        raise ValueError("canonical encoding requires Data")
+    return enc(value).hex()
+def from_c_hex(text):
+    if type(text) is not str or len(text)%2 or any(c not in "0123456789abcdef" for c in text): raise ValueError("invalid c-hex")
+    data, offset = bytes.fromhex(text), 0
+    def take(n):
+        nonlocal offset
+        if n > len(data)-offset: raise ValueError("truncated canonical input")
+        result = data[offset:offset+n]
+        offset += n
+        return result
+    def size(): return struct.unpack(">Q", take(8))[0]
+    def dec(depth=0):
+        if depth > 512: raise ValueError("canonical nesting budget exceeded")
+        tag = take(1)[0]
+        if tag == 0: return None
+        if tag in (1,2): return tag == 2
+        if tag == 3:
+            bits = take(8)
+            n = struct.unpack(">d", bits)[0]
+            if bits.hex() == "8000000000000000" or math.isnan(n) and bits.hex() != "7ff8000000000000": raise ValueError("noncanonical number")
+            return n
+        if tag == 4: return take(size()).decode("utf-8")
+        if tag in (5,6):
+            n = size()
+            if n > (len(data)-offset)//(10 if tag == 6 else 1): raise ValueError("invalid canonical length")
+            if tag == 5: return [dec(depth+1) for _ in range(n)]
+            result, previous = {}, None
+            for _ in range(n):
+                key = dec(depth+1)
+                if type(key) is not str or previous is not None and key <= previous: raise ValueError("unsorted canonical keys")
+                previous = key
+                result[key] = dec(depth+1)
+            return result
+        raise ValueError("unknown canonical tag")
+    value = dec()
+    if offset != len(data): raise ValueError("trailing canonical input")
+    return value
+`
+
 // Protocol responses use a dedicated descriptor. Library stdout/stderr and
 // native writes never corrupt the JSON protocol or disappear into a buffer.
-const nativePythonWorker = `import importlib, inspect, json, math, numbers, os, pydoc, sys, types
+const nativePythonWorker = pythonCanonicalCodec + `import importlib, inspect, json, math, numbers, os, pydoc, sys, types
 protocol = os.fdopen(3, "w", encoding="utf-8")
 token = os.environ["LIP_NATIVE_TOKEN"]
 objects, identities = {}, {}
@@ -35,7 +93,6 @@ def encode(x, seen=None):
         return n
     if isinstance(x, numbers.Real):
         n = float(x)
-        if not math.isfinite(n): raise BoundaryError("non-finite number")
         return 0.0 if n == 0 else n
     if type(x) in (list, tuple, dict):
         seen = set() if seen is None else seen
@@ -127,9 +184,12 @@ for line in sys.stdin:
     request = None
     try:
         request = json.loads(line, parse_int=float, parse_float=float)
+        if request["module"] != "lip.cleanup":
+            request["args"] = [from_c_hex(x) for x in request["args"]]
+            request["kwargs"] = {k:from_c_hex(v) for k,v in request["kwargs"].items()}
         result = execute(request)
         completed = True
-        response = {"status":"result", "value":encode(result)}
+        response = {"status":"result", "value":c_hex(encode(result))}
         json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except BaseException as error:
         for key in set(objects) - before:

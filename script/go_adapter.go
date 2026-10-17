@@ -309,11 +309,7 @@ func (a *GoAdapter) encode(v reflect.Value) any {
 		}
 		return n
 	case reflect.Float32, reflect.Float64:
-		n := v.Float()
-		if math.IsNaN(n) || math.IsInf(n, 0) {
-			fail("E-VALUE", "non-finite number")
-		}
-		return n
+		return v.Float()
 	}
 	// Preserve native container types, methods, pointer identity and resources.
 	if v.Kind() == reflect.Struct && !v.CanAddr() {
@@ -398,7 +394,7 @@ func (a *GoAdapter) convert(x any, t reflect.Type) reflect.Value {
 				return out
 			}
 		case reflect.Float32, reflect.Float64:
-			if !out.OverflowFloat(n) && (t.Kind() != reflect.Float32 || float64(float32(n)) == n) {
+			if (math.IsInf(n, 0) || !out.OverflowFloat(n)) && (t.Kind() != reflect.Float32 || math.IsNaN(n) || float64(float32(n)) == n) {
 				out.SetFloat(n)
 				return out
 			}
@@ -859,5 +855,13 @@ func (a *GoAdapter) respond(r nativeGoRequest) (response map[string]any) {
 		}
 	}()
 	result := a.execute(r)
-	return map[string]any{"status": "result", "value": result}
+	value, err := FromNative(result)
+	if err != nil {
+		fail("E-VALUE", err.Error())
+	}
+	wire, err := canonicalHex(value)
+	if err != nil {
+		fail("E-VALUE", err.Error())
+	}
+	return map[string]any{"status": "result", "value": wire.s}
 }

@@ -30,16 +30,17 @@ func (s *scope) find(name string) (bindingInfo, bool) {
 }
 
 type checker struct {
-	syntax    *syntax
-	contracts map[string]Contract
-	aliases   map[string]importDecl
-	stores    map[string]*statement
-	writers   map[string]int
-	err       error
-	top       int
-	local     int
-	voidOK    *expression
-	returns   map[*expression]*operationSummary
+	trustedNative bool
+	syntax        *syntax
+	contracts     map[string]Contract
+	aliases       map[string]importDecl
+	stores        map[string]*statement
+	writers       map[string]int
+	err           error
+	top           int
+	local         int
+	voidOK        *expression
+	returns       map[*expression]*operationSummary
 }
 
 func unionOperations(a, b *operationSummary) *operationSummary {
@@ -113,7 +114,7 @@ func (c *checker) error(t token, code, msg string) {
 }
 func reserved(name string) bool {
 	_, b := builtinArity[name]
-	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null void ", " "+name+" ")
+	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan void ", " "+name+" ")
 }
 func (c *checker) declare(s *scope, name string, info bindingInfo, t token) {
 	if reserved(name) {
@@ -332,6 +333,9 @@ func (c *checker) assignType(t token, actual, expected string) {
 	c.error(t, "E-TYPE", "expected "+expected+", got "+actual)
 }
 func (c *checker) function(e *expression, env *scope) analysis {
+	previous := c.trustedNative
+	c.trustedNative = e.trustedNative
+	defer func() { c.trustedNative = previous }()
 	c.local++
 	defer func() { c.local-- }()
 	local := env.child()
@@ -710,8 +714,8 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 	case "perform":
 		x := sub(e.x)
 		c.require(e.tok, x, "effect")
-		if pure {
-			c.error(e.tok, "E-PURITY", "fn cannot perform")
+		if pure && !c.trustedNative {
+			c.error(e.tok, "E-PURITY", "native calls in fn require an @{...} purity promise")
 		}
 		a.typ = "any"
 		a.ops = nil
@@ -733,6 +737,9 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				}
 				a = mergeEffect(a, analysis{effect: contract.Effect, concurrent: contract.Concurrent})
 			}
+		}
+		if c.trustedNative {
+			a.effect, a.concurrent = PureEffect, true
 		}
 	case "pipe":
 		first := sub(e.x)

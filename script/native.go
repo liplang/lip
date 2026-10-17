@@ -624,7 +624,19 @@ func (n *NativeLibraries) invoke(ctx context.Context, op Operation, action strin
 		return Rejected("E-IMPORT", err.Error())
 	}
 	run, _ := ctx.Value(nativeRunKey{}).(nativeRun)
-	payload := map[string]any{"scope": run.scope, "owner": run.owner, "run": run.id, "language": language, "module": op.Path, "member": member, "action": action, "args": args, "kwargs": kwargs, "plugin": pluginPath}
+	positional, err := FromNative(args)
+	if err != nil {
+		return Rejected("E-SCHEMA", err.Error())
+	}
+	named, err := FromNative(kwargs)
+	if err != nil {
+		return Rejected("E-SCHEMA", err.Error())
+	}
+	wireArgs, wireKwargs, err := nativeArgumentWire(positional.l, named.o)
+	if err != nil {
+		return Rejected("E-SCHEMA", err.Error())
+	}
+	payload := map[string]any{"scope": run.scope, "owner": run.owner, "run": run.id, "language": language, "module": op.Path, "member": member, "action": action, "args": wireArgs, "kwargs": wireKwargs, "plugin": pluginPath}
 	// No automatic restart/retry: termination might follow a completed write.
 	done := make(chan struct{})
 	watchDone := make(chan struct{})
@@ -663,7 +675,11 @@ func nativeResponse(raw []byte) Response {
 	}
 	switch status {
 	case "result":
-		return Result(f["value"])
+		result, err := decodeCanonicalHex(f["value"])
+		if err != nil {
+			return Response{Outcome: RejectedOutcome, Error: diagnostic("E-VALUE", "invalid native result: "+err.Error()), KnownCompleted: true}
+		}
+		return Result(result)
 	case "known_fault":
 		return Response{Outcome: RejectedOutcome, Error: diagnostic("E-VALUE", message), KnownCompleted: true}
 	case "rejected":

@@ -1102,7 +1102,7 @@ flow Main()->number { return perform effect math.sum([1,2,3]) }`
 func TestNativeCyclesAndLossyIntegersRejected(t *testing.T) {
 	cyclic := map[string]any{}
 	cyclic["self"] = cyclic
-	for _, input := range []any{cyclic, int64(9007199254740992), []byte{1, 2}, mathNaN()} {
+	for _, input := range []any{cyclic, int64(9007199254740992), []byte{1, 2}, complex(1, 2)} {
 		if _, e := FromNative(input); e == nil {
 			t.Fatalf("accepted %T", input)
 		}
@@ -1171,7 +1171,6 @@ func TestGoDataSharedSlicesAndInvalidFieldNames(t *testing.T) {
 	}
 }
 
-func mathNaN() float64 { var zero float64; return zero / zero }
 func TestFunctionCapturesSnapshotNotMutableInput(t *testing.T) {
 	fields := map[string]Value{"score": number(1)}
 	original, _ := ObjectValue(fields)

@@ -1,0 +1,17 @@
+# The marker promises native computational purity; it does not prove it.
+import python "math" as py
+
+fn root(x:number)->number {
+    # Only this inner body calls native code. The outer fn needs no marker.
+    native_root = fn(y:number)->number @{ py.sqrt(y) }
+    if x >= 0 { native_root(x) } else { nan }
+}
+
+fn is_nan(x:number)->bool { x != x }
+
+flow Main()->object {
+    values = map([9,-1,16,inf], root)
+    # str displays nan and inf. Ordinary JSON cannot carry non-finite numbers;
+    # use -data-encoding c-hex when returning the values directly instead.
+    return {display:str(values), missing:is_nan(root(-1))}
+}

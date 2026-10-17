@@ -10,6 +10,7 @@ import (
 	goparser "go/parser"
 	gotoken "go/token"
 	"go/types"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,6 +127,7 @@ func (p *Program) EmitGo(options GoOptions) (source []byte, err error) {
 	}
 	body.WriteString("var generatedMetadataOnce sync.Once\nvar generatedStaticData map[string]dataDecl\nvar generatedFlows map[string]*flowDecl\nvar generatedBuild Value\n")
 	body.WriteString("func generatedProgram(host Host)(*Program,error){\n")
+	body.WriteString("if host.Resources==nil{host.Resources=NewResourcePool(nil)}\n")
 	if p.host.Native != nil {
 		body.WriteString("host=NewNativeHost(host)\n")
 		body.WriteString("host.Contracts=append([]Contract(nil),host.Contracts...)\n")
@@ -660,6 +662,15 @@ func valueLiteral(v Value) string {
 	case Bool:
 		return fmt.Sprintf("BoolValue(%t)", v.b)
 	case Number:
+		if math.IsNaN(v.n) {
+			return "nanValue()"
+		}
+		if math.IsInf(v.n, 1) {
+			return "infValue()"
+		}
+		if math.IsInf(v.n, -1) {
+			return "number(-infValue().n)"
+		}
 		return "number(" + strconv.FormatFloat(v.n, 'g', -1, 64) + ")"
 	case String:
 		return "textValue(" + quote(v.s) + ")"
@@ -702,7 +713,7 @@ func (g *goEmitter) armLiteral(as []arm) string {
 }
 func (g *goEmitter) exprLiteral(e *expression, i int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "expression{native:nativeExpr%d,tag:%s,name:%s,typ:%s,state:%s,tok:%s,value:%s,x:%s,y:%s,z:%s,params:%s,body:%s,arms:%s,info:analysis{typ:%s,effect:EffectClass(%d),concurrent:%t,hasFlow:%t},", i, quote(e.tag), quote(e.name), quote(e.typ), quote(e.state), tokenLiteral(e.tok), valueLiteral(e.value), g.exprRef(e.x), g.exprRef(e.y), g.exprRef(e.z), g.params(e.params), g.blockRef(e.body), g.armLiteral(e.arms), quote(e.info.typ), e.info.effect, e.info.concurrent, e.info.hasFlow)
+	fmt.Fprintf(&b, "expression{native:nativeExpr%d,trustedNative:%t,tag:%s,name:%s,typ:%s,state:%s,tok:%s,value:%s,x:%s,y:%s,z:%s,params:%s,body:%s,arms:%s,info:analysis{typ:%s,effect:EffectClass(%d),concurrent:%t,hasFlow:%t},", i, e.trustedNative, quote(e.tag), quote(e.name), quote(e.typ), quote(e.state), tokenLiteral(e.tok), valueLiteral(e.value), g.exprRef(e.x), g.exprRef(e.y), g.exprRef(e.z), g.params(e.params), g.blockRef(e.body), g.armLiteral(e.arms), quote(e.info.typ), e.info.effect, e.info.concurrent, e.info.hasFlow)
 	b.WriteString("args:[]argument{")
 	for _, a := range e.args {
 		fmt.Fprintf(&b, "{name:%s,expr:%s},", quote(a.name), g.exprRef(a.expr))
@@ -906,6 +917,7 @@ func generatedRun()error{
  input:=flag.String("input","{}","Flow inputs as JSON")
  entryInput:=flag.String("entry-input","","EntryInput JSON with positional and named fields")
  entryOutput:=flag.Bool("entry-output",false,"print the value/void success envelope")
+ dataEncoding:=flag.String("data-encoding","json","Data transport: json or c-hex (supports nan and inf)")
  parallel:=flag.Int("parallel",1,"active leaf evaluations; waiting containers yield")
  steps:=flag.Int64("steps",10000000,"step budget; 0 unlimited")
  elements:=flag.Int64("elements",1000000,"list budget; 0 unlimited")
@@ -916,11 +928,11 @@ func generatedRun()error{
  if *parallel<0{return fmt.Errorf("-parallel must be nonnegative (0 uses one)")}
  hasInput,hasEntryInput:=false,false;flag.Visit(func(f *flag.Flag){hasInput=hasInput||f.Name=="input";hasEntryInput=hasEntryInput||f.Name=="entry-input"});if hasInput&&hasEntryInput{return fmt.Errorf("choose -input or -entry-input")}
  inputJSON:=*entryInput;if !hasEntryInput{inputJSON="{\"positional\":[],\"named\":"+*input+"}"}
- data,err:=DecodeEntryInput([]byte(inputJSON));if err!=nil{return err}
+ data,err:=DecodeEntryInputWithEncoding([]byte(inputJSON),*dataEncoding);if err!=nil{return err}
  host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err};defer p.host.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt);defer cancel()
  var traces *TraceBuffer;if *trace{var stop func();traces,stop=StartTraceOutput(os.Stderr);defer stop()}
  r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000,MaxFrames:*frames,Trace:traces});if err!=nil{return err}
- output:=r.Output;if *entryOutput{output=*r.EntryOutput};out,err:=EncodeJSON(output);if err!=nil{return err};fmt.Println(string(out));return nil
+ out,err:=EncodeData(r.Output,*dataEncoding);if *entryOutput{out,err=EncodeEntryOutput(*r.EntryOutput,*dataEncoding)};if err!=nil{return err};fmt.Println(string(out));return nil
 }
 `
