@@ -19,7 +19,7 @@ import (
 // Execute the algorithm printed in the spec, independently of script/values.go,
 // so edits to the reference cannot silently disagree with its bit-vector table.
 func TestSpecNumericReference(t *testing.T) {
-	for _, edition := range []string{"LIP-1.0-SPEC.md", "LIP-1.0-SPEC.en.md"} {
+	for _, edition := range []string{"LIP-1.0-SPEC.md", "LIP-1.0-SPEC.en.md", "LIP-1.1-SPEC.md", "LIP-1.1-SPEC.en.md"} {
 		t.Run(edition, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
@@ -102,46 +102,50 @@ func TestDocumentationConsistency(t *testing.T) {
 	}
 	for _, path := range documents {
 		text := read(path)
-		other := strings.TrimSuffix(path, ".md") + ".en.md"
-		if strings.HasSuffix(path, ".en.md") {
-			other = strings.TrimSuffix(path, ".en.md") + ".md"
-		}
-		companion := read(other)
-		if !strings.Contains(prose(text), "]("+filepath.Base(other)+")") {
-			t.Errorf("%s: missing language switch to %s", path, other)
-		}
-		if !reflect.DeepEqual(codeSet(text), codeSet(companion)) {
-			t.Errorf("diagnostic coverage differs: %s / %s", path, other)
-		}
-		if !strings.HasSuffix(path, ".en.md") {
-			original, translated := fences.FindAllStringSubmatch(text, -1), fences.FindAllStringSubmatch(companion, -1)
-			if len(original) != len(translated) {
-				t.Errorf("reference block count differs: %s (%d) / %s (%d)", path, len(original), other, len(translated))
-			} else {
-				for i, block := range original {
-					if block[1] != translated[i][1] {
-						t.Errorf("%s: reference block %d languages differ", path, i+1)
-					}
-					if !strings.ContainsFunc(block[2], func(r rune) bool { return unicode.Is(unicode.Han, r) }) && block[2] != translated[i][2] {
-						t.Errorf("%s: reference block %d differs between editions", path, i+1)
-					}
-				}
+		// Skills are machine-facing workflow entrypoints, not bilingual product
+		// documents. Their relative links are still checked below.
+		if filepath.Base(path) != "SKILL.md" {
+			other := strings.TrimSuffix(path, ".md") + ".en.md"
+			if strings.HasSuffix(path, ".en.md") {
+				other = strings.TrimSuffix(path, ".en.md") + ".md"
 			}
-			destinations := func(text string) []string {
-				set := map[string]bool{}
-				for _, link := range links.FindAllStringSubmatch(prose(text), -1) {
-					target := strings.SplitN(link[2], "#", 2)[0]
-					set[strings.ReplaceAll(target, ".en.md", ".md")] = true
-				}
-				var names []string
-				for name := range set {
-					names = append(names, name)
-				}
-				sort.Strings(names)
-				return names
+			companion := read(other)
+			if !strings.Contains(prose(text), "]("+filepath.Base(other)+")") {
+				t.Errorf("%s: missing language switch to %s", path, other)
 			}
-			if !reflect.DeepEqual(destinations(text), destinations(companion)) {
-				t.Errorf("linked files/examples differ: %s / %s", path, other)
+			if !reflect.DeepEqual(codeSet(text), codeSet(companion)) {
+				t.Errorf("diagnostic coverage differs: %s / %s", path, other)
+			}
+			if !strings.HasSuffix(path, ".en.md") {
+				original, translated := fences.FindAllStringSubmatch(text, -1), fences.FindAllStringSubmatch(companion, -1)
+				if len(original) != len(translated) {
+					t.Errorf("reference block count differs: %s (%d) / %s (%d)", path, len(original), other, len(translated))
+				} else {
+					for i, block := range original {
+						if block[1] != translated[i][1] {
+							t.Errorf("%s: reference block %d languages differ", path, i+1)
+						}
+						if !strings.ContainsFunc(block[2], func(r rune) bool { return unicode.Is(unicode.Han, r) }) && block[2] != translated[i][2] {
+							t.Errorf("%s: reference block %d differs between editions", path, i+1)
+						}
+					}
+				}
+				destinations := func(text string) []string {
+					set := map[string]bool{}
+					for _, link := range links.FindAllStringSubmatch(prose(text), -1) {
+						target := strings.SplitN(link[2], "#", 2)[0]
+						set[strings.ReplaceAll(target, ".en.md", ".md")] = true
+					}
+					var names []string
+					for name := range set {
+						names = append(names, name)
+					}
+					sort.Strings(names)
+					return names
+				}
+				if !reflect.DeepEqual(destinations(text), destinations(companion)) {
+					t.Errorf("linked files/examples differ: %s / %s", path, other)
+				}
 			}
 		}
 		for _, link := range links.FindAllStringSubmatch(prose(text), -1) {
@@ -161,8 +165,8 @@ func TestDocumentationConsistency(t *testing.T) {
 			}
 		}
 	}
-	zh := read(filepath.Join(root, "spec/LIP-1.0-SPEC.md"))
-	en := read(filepath.Join(root, "spec/LIP-1.0-SPEC.en.md"))
+	zh := read(filepath.Join(root, "spec/LIP-1.1-SPEC.md"))
+	en := read(filepath.Join(root, "spec/LIP-1.1-SPEC.en.md"))
 	sections := regexp.MustCompile(`(?m)^#{2,3}\s+(\d+(?:\.\d+)?)\.`)
 	sectionIDs := func(text string) []string {
 		var ids []string

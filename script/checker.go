@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "slice": {3, 4}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}}
+var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "slice": {3, 4}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}, "print": {1}, "log": {2}, "telemetry": {2}}
 
 type bindingInfo struct {
 	info    analysis
@@ -165,6 +165,9 @@ func checkFlow(s *syntax, host Host, name string) (*checker, error) {
 	}
 	summary := pureInfo(f.result)
 	walkBlockExpressions(f.body, func(e *expression) { summary = mergeEffect(summary, e.info) })
+	if f.result != "void" && len(f.body.items) != 0 {
+		summary.ops = f.body.items[len(f.body.items)-1].expr.info.ops
+	}
 	f.summary, f.check = summary, c
 	return c, nil
 }
@@ -266,13 +269,7 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 		}
 	}
 	for _, p := range s.params {
-		if strings.TrimSuffix(p.typ, "?") == "function" || strings.TrimSuffix(p.typ, "?") == "effect" {
-			c.error(p.tok, "E-TYPE", "Flow input must be Data")
-		}
 		c.declare(flow, p.name, bindingInfo{info: pureInfo(p.typ)}, p.tok)
-	}
-	if strings.TrimSuffix(s.result, "?") == "function" || strings.TrimSuffix(s.result, "?") == "effect" {
-		c.error(s.body.tok, "E-TYPE", "Flow output must be Data")
 	}
 	returns := 0
 	for i, stmt := range s.body.items {
@@ -628,6 +625,9 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			}
 		}
 		a.ops = nil
+	case "native_receiver":
+		a = sub(e.x)
+		a.ops = nil
 	case "slice":
 		x := sub(e.x)
 		if x.typ != "any" && x.typ != "list" && x.typ != "string" {
@@ -710,9 +710,6 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 	case "perform":
 		x := sub(e.x)
 		c.require(e.tok, x, "effect")
-		if x.effect != PureEffect || x.hasFlow {
-			c.error(e.tok, "E-PURITY", "perform operand must be pure")
-		}
 		if pure {
 			c.error(e.tok, "E-PURITY", "fn cannot perform")
 		}
@@ -758,14 +755,6 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		c.voidOK = saved
 		a = mergeEffect(first, stage)
 		a.typ, a.ops = stage.typ, stage.ops
-		for _, arg := range e.y.args[1:] {
-			if arg.expr.info.typ == "function" || arg.expr.info.typ == "effect" {
-				c.error(arg.expr.tok, "E-TYPE", "pipeline named arguments must be Data")
-			}
-			if arg.expr.info.effect != PureEffect || arg.expr.info.hasFlow {
-				c.error(arg.expr.tok, "E-PURITY", "pipeline named arguments must be Pure")
-			}
-		}
 	case "flow":
 		a = c.flowCall(e, env, pure, parallel)
 	case "call":
@@ -799,6 +788,8 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 						a.typ = "number"
 					case "str":
 						a.typ = "string"
+					case "print", "log", "telemetry":
+						a.typ = "null"
 					case "has":
 						a.typ = "bool"
 					case "range", "map", "concat", "keys", "split":
@@ -936,7 +927,7 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 }
 
 func (c *checker) builtinTypes(e *expression, name string) {
-	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "concat": {"list", "list"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}}
+	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "concat": {"list", "list"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}, "log": {"string", "any"}, "telemetry": {"string", "object"}}
 	if name == "len" || name == "slice" {
 		typ := e.args[0].expr.info.typ
 		if typ != "any" && typ != "string" && typ != "list" && (name == "slice" || typ != "object") {
@@ -1002,15 +993,12 @@ func (c *checker) flowCall(e *expression, env *scope, pure, parallel bool) analy
 		c.error(e.tok, "E-PURITY", "fn cannot invoke Flow")
 		return pureInfo(f.result)
 	}
-	// Check every explicit input even when the callee is Pure.
+	// Arguments run in the caller's cursor before the child graph starts.
+	// Their effects must remain visible even when the callee itself is Pure.
+	arguments := pureInfo("any")
 	for _, arg := range e.args {
 		x := c.expression(arg.expr, env, false, parallel)
-		if x.effect != PureEffect || x.hasFlow {
-			c.error(arg.expr.tok, "E-PURITY", "Flow arguments must be Pure Data")
-		}
-		if x.typ == "function" || x.typ == "effect" {
-			c.error(arg.expr.tok, "E-TYPE", "Flow arguments must be Data")
-		}
+		arguments = mergeEffect(arguments, x)
 	}
 	c.checkArity(e, "", &expression{params: f.params}, env)
 	if f.result == "void" && c.voidOK != e {
@@ -1024,7 +1012,7 @@ func (c *checker) flowCall(e *expression, env *scope, pure, parallel bool) analy
 			c.error(e.tok, "E-TYPE", err.Error())
 		}
 	}
-	a := f.summary
+	a := mergeEffect(f.summary, arguments)
 	a.typ = f.result
 	a.hasFlow = true
 	return a

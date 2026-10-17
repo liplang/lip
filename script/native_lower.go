@@ -60,21 +60,233 @@ func (s nativeShape) element() nativeShape {
 	for _, x := range s.fields {
 		out = mergeNativeShape(out, x)
 	}
+	out.refs = append(out.refs, nativeProjectReferences(s.refs, nativeProjection{kind: "element"})...)
+	return out
+}
+
+func nativeProjectReferences(refs []nativeShapeReference, projection nativeProjection) []nativeShapeReference {
+	out := make([]nativeShapeReference, len(refs))
+	for i, ref := range refs {
+		out[i] = nativeShapeReference{key: ref.key, path: append(append([]nativeProjection(nil), ref.path...), projection)}
+	}
+	return out
+}
+
+func nativePutShape(receiver nativeShape, name string, value nativeShape) nativeShape {
+	out := nativeShape{fields: map[string]nativeShape{}, item: receiver.item}
+	for key, field := range receiver.fields {
+		out.fields[key] = field
+	}
+	out.fields[name] = value
+	out.refs = nativeProjectReferences(receiver.refs, nativeProjection{kind: "put", name: name, args: []nativeArgumentShape{{shape: value}}})
+	return out
+}
+
+func nativePutUnknownShape(receiver, value nativeShape) nativeShape {
+	item := value
+	if receiver.item != nil {
+		item = mergeNativeShape(item, *receiver.item)
+	}
+	out := nativeShape{fields: map[string]nativeShape{}, item: &item}
+	for name, field := range receiver.fields {
+		out.fields[name] = mergeNativeShape(field, value)
+	}
+	out.refs = nativeProjectReferences(receiver.refs, nativeProjection{kind: "putAny", args: []nativeArgumentShape{{shape: value}}})
+	return out
+}
+
+func nativeProject(s nativeShape, p nativeProjection) nativeShape {
+	var out nativeShape
+	switch p.kind {
+	case "field":
+		field, present := s.fields[p.name]
+		out = field
+		if !present && s.item != nil {
+			out = *s.item
+		}
+	case "index":
+		index := p.index
+		if index < 0 {
+			index += len(s.items)
+		}
+		if index >= 0 && index < len(s.items) {
+			out = s.items[index]
+		} else {
+			out = s.element()
+		}
+	case "element":
+		return s.element()
+	case "result":
+		if s.result != nil {
+			out = *s.result
+		}
+	case "call":
+		return nativeCallShape(s, p.args)
+	case "put":
+		return nativePutShape(s, p.name, p.args[0].shape)
+	case "putAny":
+		return nativePutUnknownShape(s, p.args[0].shape)
+	}
+	out.refs = append(out.refs, nativeProjectReferences(s.refs, p)...)
+	return out
+}
+
+func nativeSubstitute(s nativeShape, arguments map[*nativeParameterKey]nativeShape) nativeShape {
+	out := nativeShape{native: s.native, params: s.params, builtin: s.builtin}
+	for name, field := range s.fields {
+		if out.fields == nil {
+			out.fields = map[string]nativeShape{}
+		}
+		out.fields[name] = nativeSubstitute(field, arguments)
+	}
+	if s.items != nil {
+		out.items = make([]nativeShape, len(s.items))
+		for i, item := range s.items {
+			out.items[i] = nativeSubstitute(item, arguments)
+		}
+	}
+	if s.item != nil {
+		out.item = nativeShapePointer(nativeSubstitute(*s.item, arguments))
+	}
+	if s.result != nil {
+		out.result = nativeShapePointer(nativeSubstitute(*s.result, arguments))
+	}
+	for _, ref := range s.refs {
+		// A returned closure may call one of its own parameters with an outer
+		// capture. Bind that capture now even though the callee is still free;
+		// waiting until the inner invocation would lose the outer substitution.
+		path := append([]nativeProjection(nil), ref.path...)
+		for i, projection := range path {
+			path[i].args = append([]nativeArgumentShape(nil), projection.args...)
+			for j, arg := range projection.args {
+				path[i].args[j].shape = nativeSubstitute(arg.shape, arguments)
+			}
+		}
+		value, ok := arguments[ref.key]
+		if !ok {
+			out.refs = append(out.refs, nativeShapeReference{key: ref.key, path: path})
+			continue
+		}
+		for _, projection := range path {
+			value = nativeProject(value, projection)
+		}
+		out = mergeNativeShape(out, value)
+	}
+	return out
+}
+
+func nativeCallShape(callee nativeShape, args []nativeArgumentShape) nativeShape {
+	if callee.builtin != "" {
+		// Core functions return their documented shapes, not a union of every
+		// input. In particular len/keys/map callbacks do not taint pure Data.
+		switch callee.builtin {
+		case "map":
+			if len(args) == 2 {
+				result := nativeCallShape(args[1].shape, []nativeArgumentShape{{shape: args[0].shape.element()}})
+				return nativeShape{item: &result}
+			}
+		case "fold":
+			if len(args) == 3 {
+				result := nativeCallShape(args[2].shape, []nativeArgumentShape{{shape: args[1].shape}, {shape: args[0].shape.element()}})
+				return mergeNativeShape(args[1].shape, result)
+			}
+		case "concat":
+			if len(args) == 2 {
+				result := mergeNativeShape(args[0].shape.element(), args[1].shape.element())
+				return nativeShape{item: &result}
+			}
+		case "put":
+			if len(args) == 3 {
+				return nativePutUnknownShape(args[0].shape, args[2].shape)
+			}
+		case "slice":
+			if len(args) != 0 {
+				result := args[0].shape.element()
+				return nativeShape{item: &result}
+			}
+		}
+		return nativeShape{}
+	}
+	out := nativeShape{}
+	if callee.result != nil {
+		arguments := map[*nativeParameterKey]nativeShape{}
+		next := 0
+		for _, arg := range args {
+			// A conditional function value can have multiple actual signatures.
+			// Bind each symbolic formal using its own name/position, rather than
+			// pretending all alternatives share the first branch's signature.
+			for _, param := range callee.params {
+				if arg.name == "" && param.index == next || arg.name != "" && param.name == arg.name {
+					arguments[param.key] = arg.shape
+				}
+			}
+			if arg.name == "" {
+				next++
+			}
+		}
+		out = nativeSubstitute(*callee.result, arguments)
+	}
+	out.refs = append(out.refs, nativeProjectReferences(callee.refs, nativeProjection{kind: "call", args: args})...)
 	return out
 }
 
 func mergeNativeShape(a, b nativeShape) nativeShape {
 	out := nativeShape{native: a.native || b.native}
-	if a.fields != nil || b.fields != nil {
-		out.fields = map[string]nativeShape{}
-		for k, v := range a.fields {
-			out.fields[k] = v
-		}
-		for k, v := range b.fields {
-			out.fields[k] = mergeNativeShape(out.fields[k], v)
+	if a.builtin == b.builtin || b.empty() {
+		out.builtin = a.builtin
+	} else if a.empty() {
+		out.builtin = b.builtin
+	}
+	// These are provenance binders, not a runtime signature. Keep formals of
+	// every alternative distinct, including differing names and arities.
+	for _, params := range [][]nativeParameter{a.params, b.params} {
+		for _, param := range params {
+			present := false
+			for _, prior := range out.params {
+				present = present || prior == param
+			}
+			if !present {
+				out.params = append(out.params, param)
+			}
 		}
 	}
-	if a.items != nil || b.items != nil || a.item != nil || b.item != nil {
+	out.refs = append(append([]nativeShapeReference(nil), a.refs...), b.refs...)
+	if a.fields != nil || b.fields != nil {
+		out.fields = map[string]nativeShape{}
+		for k := range a.fields {
+			out.fields[k] = nativeShape{}
+		}
+		for k := range b.fields {
+			out.fields[k] = nativeShape{}
+		}
+		for k := range out.fields {
+			left, present := a.fields[k]
+			if !present && a.item != nil {
+				left = *a.item
+			}
+			right, present := b.fields[k]
+			if !present && b.item != nil {
+				right = *b.item
+			}
+			out.fields[k] = mergeNativeShape(left, right)
+		}
+	}
+	// Equal-length list alternatives retain their individual positions. A
+	// resource in one slot must not make an unrelated pure slot effectful.
+	if a.item == nil && b.item == nil && (a.items == nil || b.items == nil || len(a.items) == len(b.items)) && (a.items != nil || b.items != nil) {
+		count := max(len(a.items), len(b.items))
+		out.items = make([]nativeShape, count)
+		for i := range count {
+			left, right := nativeShape{}, nativeShape{}
+			if i < len(a.items) {
+				left = a.items[i]
+			}
+			if i < len(b.items) {
+				right = b.items[i]
+			}
+			out.items[i] = mergeNativeShape(left, right)
+		}
+	} else if a.items != nil || b.items != nil || a.item != nil || b.item != nil {
 		x := nativeShape{}
 		for _, s := range []nativeShape{a, b} {
 			if s.item != nil {
@@ -99,15 +311,173 @@ func mergeNativeShape(a, b nativeShape) nativeShape {
 }
 
 func (s nativeShape) empty() bool {
-	return !s.native && len(s.fields) == 0 && len(s.items) == 0 && s.item == nil && s.result == nil
+	return !s.native && s.builtin == "" && len(s.fields) == 0 && len(s.items) == 0 && s.item == nil && s.result == nil && len(s.refs) == 0
+}
+
+// Recursive native provenance uses a finite structural domain. The template
+// contains the non-recursive return positions of the whole recursive component.
+// Parameter identities may flow between those positions until stable. Growing
+// recursive containers/projection paths are deliberately not unfolded: callers
+// can always use an explicit receiver effect for unknown native provenance.
+func nativeRecursiveShape(s, template nativeShape) nativeShape {
+	out := nativeShape{native: s.native, params: s.params}
+	for _, ref := range s.refs {
+		allowed := len(ref.path) == 0
+		for _, candidate := range template.refs {
+			allowed = allowed || nativeReferenceEqual(nativeShapeReference{path: ref.path}, nativeShapeReference{path: candidate.path})
+		}
+		for _, projection := range ref.path {
+			// Higher-order argument shapes can themselves grow recursively.
+			// Keep the finite domain to structural projections, not call terms.
+			if len(projection.args) != 0 {
+				allowed = false
+			}
+		}
+		if allowed {
+			duplicate := false
+			for _, existing := range out.refs {
+				duplicate = duplicate || nativeReferenceEqual(existing, ref)
+			}
+			if !duplicate {
+				out.refs = append(out.refs, ref)
+			}
+		}
+	}
+	for name, field := range template.fields {
+		if out.fields == nil {
+			out.fields = map[string]nativeShape{}
+		}
+		out.fields[name] = nativeRecursiveShape(nativeProject(s, nativeProjection{kind: "field", name: name}), field)
+	}
+	if template.item != nil {
+		out.item = nativeShapePointer(nativeRecursiveShape(s.element(), template.element()))
+	} else if template.items != nil {
+		out.items = make([]nativeShape, len(template.items))
+		for i, item := range template.items {
+			out.items[i] = nativeRecursiveShape(nativeProject(s, nativeProjection{kind: "index", index: i}), item)
+		}
+	}
+	if template.result != nil {
+		out.result = nativeShapePointer(nativeRecursiveShape(nativeProject(s, nativeProjection{kind: "result"}), *template.result))
+	}
+	return out
+}
+
+func nativeReferenceEqual(a, b nativeShapeReference) bool {
+	if a.key != b.key || len(a.path) != len(b.path) {
+		return false
+	}
+	for i, p := range a.path {
+		q := b.path[i]
+		if p.kind != q.kind || p.name != q.name || p.index != q.index || len(p.args) != len(q.args) {
+			return false
+		}
+		for j, arg := range p.args {
+			if arg.name != q.args[j].name || !nativeShapeEqual(arg.shape, q.args[j].shape) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func nativeShapeEqual(a, b nativeShape) bool {
+	if a.native != b.native || a.builtin != b.builtin || len(a.params) != len(b.params) || len(a.refs) != len(b.refs) || len(a.fields) != len(b.fields) || len(a.items) != len(b.items) {
+		return false
+	}
+	for _, p := range a.params {
+		found := false
+		for _, q := range b.params {
+			found = found || p == q
+		}
+		if !found {
+			return false
+		}
+	}
+	for _, ref := range a.refs {
+		found := false
+		for _, candidate := range b.refs {
+			found = found || nativeReferenceEqual(ref, candidate)
+		}
+		if !found {
+			return false
+		}
+	}
+	for name, field := range a.fields {
+		other, ok := b.fields[name]
+		if !ok || !nativeShapeEqual(field, other) {
+			return false
+		}
+	}
+	for i, item := range a.items {
+		if !nativeShapeEqual(item, b.items[i]) {
+			return false
+		}
+	}
+	for i, p := range []*nativeShape{a.item, a.result} {
+		q := []*nativeShape{b.item, b.result}[i]
+		if (p == nil) != (q == nil) || p != nil && !nativeShapeEqual(*p, *q) {
+			return false
+		}
+	}
+	return true
+}
+
+// Tarjan's components are emitted after their dependencies. Calls within a
+// component are analyzed simultaneously, so spelling and DFS entry order do
+// not choose which return paths survive a recursive cycle.
+func nativeFunctionComponents(functions map[string]*expression) [][]string {
+	index, low := map[string]int{}, map[string]int{}
+	active := map[string]bool{}
+	var stack []string
+	var components [][]string
+	var visit func(string)
+	visit = func(name string) {
+		index[name] = len(index) + 1
+		low[name] = index[name]
+		stack, active[name] = append(stack, name), true
+		dependencies := map[string]*expression{}
+		for dependency := range freeNames(functions[name]) {
+			if f := functions[dependency]; f != nil {
+				dependencies[dependency] = f
+			}
+		}
+		for _, dependency := range sortedFunctionNames(dependencies) {
+			if index[dependency] == 0 {
+				visit(dependency)
+				low[name] = min(low[name], low[dependency])
+			} else if active[dependency] {
+				low[name] = min(low[name], index[dependency])
+			}
+		}
+		if low[name] == index[name] {
+			var component []string
+			for {
+				last := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				active[last] = false
+				component = append(component, last)
+				if last == name {
+					break
+				}
+			}
+			components = append(components, component)
+		}
+	}
+	for _, name := range sortedFunctionNames(functions) {
+		if index[name] == 0 {
+			visit(name)
+		}
+	}
+	return components
 }
 
 // Runtime function metadata contains provenance only. Lexical initializer
 // syntax belongs to the compiler and must not extend a closure's captures.
 func nativeRuntimeShape(s nativeShape) nativeShape {
-	out := nativeShape{native: s.native}
+	out := nativeShape{native: s.native, params: s.params, refs: s.refs, builtin: s.builtin}
 	for name, field := range s.fields {
-		if field = nativeRuntimeShape(field); !field.empty() {
+		if field = nativeRuntimeShape(field); !field.empty() || s.item != nil {
 			if out.fields == nil {
 				out.fields = map[string]nativeShape{}
 			}
@@ -128,22 +498,87 @@ func nativeRuntimeShape(s nativeShape) nativeShape {
 	if s.result != nil {
 		out.result = nativeShapePointer(nativeRuntimeShape(*s.result))
 	}
+	out.refs = append([]nativeShapeReference(nil), s.refs...)
+	for i, ref := range out.refs {
+		out.refs[i].path = append([]nativeProjection(nil), ref.path...)
+		for j, p := range out.refs[i].path {
+			out.refs[i].path[j].args = append([]nativeArgumentShape(nil), p.args...)
+			for k, arg := range p.args {
+				out.refs[i].path[j].args[k].shape = nativeRuntimeShape(arg.shape)
+			}
+		}
+	}
 	return out
 }
 func nativeValueShape(v Value) nativeShape {
+	return nativeValueShapeSeen(v, map[*function]bool{})
+}
+
+func nativeValueShapeSeen(v Value, active map[*function]bool) nativeShape {
 	if _, ok := NativeDescription(v); ok {
 		return nativeShape{native: true}
 	}
 	s := nativeShape{}
 	if v.k == Function && v.f != nil {
+		if active[v.f] {
+			return s
+		}
+		active[v.f] = true
+		defer delete(active, v.f)
 		s.result = v.f.nativeResult
+		s.params = v.f.nativeParams
+		s.builtin = v.f.builtin
+		if s.result != nil {
+			// A returned closure may still describe an enclosing parameter.
+			// Resolve only its frozen captures, never its own formal inputs.
+			// This is native provenance, not normative Ops inference.
+			arguments := map[*nativeParameterKey]nativeShape{}
+			bound := map[*nativeParameterKey]int{}
+			for _, param := range s.params {
+				bound[param.key]++
+			}
+			var captures func(nativeShape)
+			captures = func(shape nativeShape) {
+				for _, param := range shape.params {
+					bound[param.key]++
+				}
+				for _, ref := range shape.refs {
+					if bound[ref.key] == 0 {
+						if value, err := v.f.captures.lookup(ref.key.name); err == nil {
+							arguments[ref.key] = nativeValueShapeSeen(value, active)
+						}
+					}
+					for _, projection := range ref.path {
+						for _, arg := range projection.args {
+							captures(arg.shape)
+						}
+					}
+				}
+				for _, field := range shape.fields {
+					captures(field)
+				}
+				for _, item := range shape.items {
+					captures(item)
+				}
+				for _, pointer := range []*nativeShape{shape.item, shape.result} {
+					if pointer != nil {
+						captures(*pointer)
+					}
+				}
+				for _, param := range shape.params {
+					bound[param.key]--
+				}
+			}
+			captures(*s.result)
+			s.result = nativeShapePointer(nativeSubstitute(*s.result, arguments))
+		}
 	}
 	if v.k == Effect && v.p != nil {
 		s.result = v.p.nativeResult
 	}
 	if v.k == Object {
 		for k, x := range v.o {
-			if shape := nativeValueShape(x); !shape.empty() {
+			if shape := nativeValueShapeSeen(x, active); !shape.empty() {
 				if s.fields == nil {
 					s.fields = map[string]nativeShape{}
 				}
@@ -153,7 +588,7 @@ func nativeValueShape(v Value) nativeShape {
 	}
 	if v.k == List {
 		for i, x := range v.l {
-			if shape := nativeValueShape(x); !shape.empty() {
+			if shape := nativeValueShapeSeen(x, active); !shape.empty() {
 				if s.items == nil {
 					s.items = make([]nativeShape, len(v.l))
 				}
@@ -425,14 +860,16 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			// A stage is a static LIP declaration, never a native callable or a
 			// bridge helper. Preserve its callee for the ordinary stage checker.
 			lower(e.x, scope)
-			foreign[e] = shape(e.x, scope)
-			if result := shape(e.y.x, scope).result; result != nil {
-				foreign[e] = mergeNativeShape(foreign[e], *result)
+			callee := shape(e.y.x, scope)
+			if e.y.tag == "flow" {
+				callee = scope[e.y.name]
 			}
+			args := []nativeArgumentShape{{shape: shape(e.x, scope)}}
 			for _, arg := range e.y.args[1:] {
 				lower(arg.expr, scope)
-				foreign[e] = mergeNativeShape(foreign[e], shape(arg.expr, scope))
+				args = append(args, nativeArgumentShape{name: arg.name, shape: shape(arg.expr, scope)})
 			}
+			foreign[e] = nativeCallShape(callee, args)
 			return
 		}
 		if !refresh {
@@ -534,7 +971,12 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					}
 					op := Operation{"host", "lip.native", "call." + parts[1]}
 					name := add(op, "call")
-					args := append([]argument{{expr: &expression{tag: "id", tok: e.tok, name: parts[0]}}}, e.args...)
+					// Select only the ordinary wrapper path needed by this
+					// call. Unrelated fn/effect fields never cross the Host
+					// Data boundary; native attributes remain deferred.
+					receiver := &expression{tag: "native_receiver", tok: e.tok, name: parts[1],
+						x: &expression{tag: "id", tok: e.tok, name: parts[0]}}
+					args := append([]argument{{expr: receiver}}, e.args...)
 					pos, named := pack(args, e.tok)
 					e.name = name
 					e.args = []argument{{expr: pos}, {expr: named}}
@@ -624,8 +1066,13 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			local = child(scope)
 		}
 		if e.tag == "fn" {
-			for _, p := range e.params {
-				local[p.name] = nativeShape{}
+			if e.nativeParams == nil {
+				for i, p := range e.params {
+					e.nativeParams = append(e.nativeParams, nativeParameter{name: p.name, index: i, key: &nativeParameterKey{name: p.name}})
+				}
+			}
+			for _, p := range e.nativeParams {
+				local[p.name] = nativeShape{refs: []nativeShapeReference{{key: p.key}}}
 			}
 		}
 		if e.tag == "comprehension" {
@@ -663,17 +1110,16 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			if request, known := requestReturns[e]; known {
 				result = request
 			}
-			foreign[e] = nativeShape{result: nativeShapePointer(nativeRuntimeShape(result))}
+			foreign[e] = nativeShape{result: nativeShapePointer(nativeRuntimeShape(result)), params: e.nativeParams}
 			e.nativeResult = foreign[e].result
 		case "perform":
-			if result := shape(e.x, local).result; result != nil {
-				foreign[e] = *result
-			}
+			foreign[e] = nativeProject(shape(e.x, local), nativeProjection{kind: "result"})
 		case "block":
 			foreign[e] = shape(e.body.tail, bodyScope)
 		case "if":
 			foreign[e] = mergeNativeShape(shape(e.body.tail, bodyScope), shape(e.y, local))
 		case "match":
+			foreign[e] = nativeShape{}
 			for _, a := range e.arms {
 				foreign[e] = mergeNativeShape(foreign[e], shape(a.result, local))
 			}
@@ -693,6 +1139,12 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				out.fields[f.name] = shape(f.expr, local)
 			}
 			foreign[e] = out
+		case "flow":
+			args := make([]nativeArgumentShape, len(e.args))
+			for i, arg := range e.args {
+				args[i] = nativeArgumentShape{name: arg.name, shape: shape(arg.expr, local)}
+			}
+			foreign[e] = nativeCallShape(scope[e.name], args)
 		case "call":
 			if e.x.tag == "id" && e.x.name == "slice" && (len(e.args) == 3 || len(e.args) == 4) {
 				for _, arg := range e.args {
@@ -715,18 +1167,23 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				callee := prepare(e.x.tok, add(Operation{"host", "lip.native", "prepare"}, "prepare"), e.x, e.args)
 				perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
 			} else {
-				if result := shape(e.x, local).result; result != nil {
-					foreign[e] = *result
+				args := make([]nativeArgumentShape, len(e.args))
+				for i, arg := range e.args {
+					args[i] = nativeArgumentShape{name: arg.name, shape: shape(arg.expr, local)}
 				}
-				for _, a := range e.args {
-					foreign[e] = mergeNativeShape(foreign[e], shape(a.expr, local))
+				callee := shape(e.x, local)
+				foreign[e] = nativeCallShape(callee, args)
+				if callee.builtin == "put" && len(args) == 3 {
+					if key, known := nativeIndexLiteral(e.args[1].expr); known && key.k == String {
+						foreign[e] = nativePutShape(args[0].shape, key.s, args[2].shape)
+					}
 				}
 			}
 		case "field":
 			if !refresh && isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "get." + e.name}, "get"), []argument{{expr: e.x}})
 			} else {
-				foreign[e] = shape(e.x, local).fields[e.name]
+				foreign[e] = nativeProject(shape(e.x, local), nativeProjection{kind: "field", name: e.name})
 			}
 		case "index":
 			if !refresh && isNative(e.x, local) {
@@ -735,9 +1192,11 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				receiver := shape(e.x, local)
 				index, known := nativeIndexLiteral(e.y)
 				if known && index.k == String {
-					foreign[e] = receiver.fields[index.s]
+					foreign[e] = nativeProject(receiver, nativeProjection{kind: "field", name: index.s})
 				} else if i, err := relativeIndex(index, len(receiver.items)); known && err == nil {
-					foreign[e] = receiver.items[i]
+					foreign[e] = nativeProject(receiver, nativeProjection{kind: "index", index: i})
+				} else if known && index.k == Number && index.n >= -float64(int(^uint(0)>>1)) && index.n < float64(int(^uint(0)>>1)) && index.n == float64(int64(index.n)) {
+					foreign[e] = nativeProject(receiver, nativeProjection{kind: "index", index: int(index.n)})
 				} else if e.y.tag == "list" {
 					out := nativeShape{items: make([]nativeShape, len(e.y.elems))}
 					for j, element := range e.y.elems {
@@ -765,6 +1224,9 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 	}
 	scope := map[string]nativeShape{}
+	for name := range builtinArity {
+		scope[name] = nativeShape{builtin: name}
+	}
 	for alias := range aliases {
 		scope[alias] = nativeShape{}
 	}
@@ -853,28 +1315,110 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 					requestReturns[f] = nativeShape{result: nativeShapePointer(result)}
 				}
 			}
-			// Refresh pure return shapes after all recursive request summaries
-			// are known. This also updates enclosing closures and containers;
-			// already-lowered proposals must not be packed a second time.
+			// Refresh pure return shapes after recursive request summaries are
+			// known. Recursive parameter forwarding uses a finite fixed point,
+			// not an arbitrary number of DFS refreshes. Proposals are not repacked.
 			refresh = true
-			visiting, lowered = map[string]bool{}, map[string]bool{}
-			for _, name := range sortedFunctionNames(s.functions) {
-				declaration(name)
+			for _, component := range nativeFunctionComponents(s.functions) {
+				recursive := len(component) > 1 || freeNames(s.functions[component[0]])[component[0]]
+				if !recursive {
+					name := component[0]
+					lower(s.functions[name], scope)
+					scope[name] = shape(s.functions[name], scope)
+					continue
+				}
+				for _, name := range component {
+					scope[name] = nativeShape{}
+				}
+				seed := map[string]nativeShape{}
+				template := nativeShape{}
+				for _, name := range component {
+					lower(s.functions[name], scope)
+					seed[name] = shape(s.functions[name], scope)
+					template = mergeNativeShape(template, *seed[name].result)
+				}
+				for _, name := range component {
+					x := seed[name]
+					x.result = nativeShapePointer(nativeRecursiveShape(*x.result, template))
+					scope[name] = x
+				}
+				for {
+					next := map[string]nativeShape{}
+					changed := false
+					for _, name := range component {
+						lower(s.functions[name], scope)
+						x := shape(s.functions[name], scope)
+						result := mergeNativeShape(*scope[name].result, *x.result)
+						x.result = nativeShapePointer(nativeRecursiveShape(result, template))
+						next[name] = x
+						changed = changed || !nativeShapeEqual(scope[name], x)
+					}
+					for _, name := range component {
+						scope[name] = next[name]
+						f := s.functions[name]
+						foreign[f], f.nativeResult = next[name], next[name].result
+					}
+					if !changed || failure != nil {
+						break
+					}
+				}
 			}
 			refresh = false
 		}
 	}
+	if len(s.flows) != 0 {
+		visiting, lowered = map[string]bool{}, map[string]bool{}
+		var flow func(string)
+		flow = func(name string) {
+			if visiting[name] || lowered[name] {
+				return // The ordinary checker diagnoses cycles.
+			}
+			visiting[name] = true
+			f := s.flows[name]
+			view := &expression{tag: "fn", params: f.params, body: f.body}
+			dependencies := freeNames(view)
+			var calls func(*expression)
+			calls = func(e *expression) {
+				if e.tag == "flow" {
+					dependencies[e.name] = true
+				}
+				walkExpression(e, calls)
+			}
+			walkBlockExpressions(f.body, calls)
+			for _, dependency := range sortedFlowNames(s.flows) {
+				if dependencies[dependency] {
+					flow(dependency)
+				}
+			}
+			local := child(scope)
+			params := make([]nativeParameter, len(f.params))
+			for i, param := range f.params {
+				params[i] = nativeParameter{name: param.name, index: i, key: &nativeParameterKey{name: param.name}}
+				local[param.name] = nativeShape{refs: []nativeShapeReference{{key: params[i].key}}}
+			}
+			blockLower(f.body, local)
+			result := nativeShape{}
+			if f.result != "void" && len(f.body.items) != 0 {
+				result = shape(f.body.items[len(f.body.items)-1].expr, local)
+			}
+			// Native references use object encoding. A successful list/scalar
+			// return cannot itself be such a receiver. Keep any explicitly known
+			// nested provenance; unknown contents use explicit receiver effects.
+			switch strings.TrimSuffix(f.result, "?") {
+			case "list", "number", "string", "bool", "null", "function", "effect":
+				result.native = false
+			}
+			f.nativeResult, f.nativeParams = nativeShapePointer(nativeRuntimeShape(result)), params
+			scope[name] = nativeShape{result: f.nativeResult, params: params}
+			delete(visiting, name)
+			lowered[name] = true
+		}
+		for _, name := range sortedFlowNames(s.flows) {
+			flow(name)
+		}
+	}
 	if len(s.flows) == 0 || s.cell {
 		blockLower(s.body, scope)
-	}
-	if len(s.flows) != 0 {
-		for _, name := range sortedFlowNames(s.flows) {
-			local := child(scope)
-			for _, param := range s.flows[name].params {
-				local[param.name] = nativeShape{}
-			}
-			blockLower(s.flows[name].body, local)
-		}
 	}
 	return host, failure
 }

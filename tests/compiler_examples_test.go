@@ -34,7 +34,7 @@ var examples = []exampleCase{
 	{path: "structures/09_map_fold.lip", want: `{"squares":[1,4,9,16],"total":30}`},
 	{path: "structures/10_comprehensions.lip", want: `{"evens":[0,2,4,6],"reciprocals":[0.5,0.25]}`},
 	{path: "structures/11_loops.lip", want: `[1,3]`},
-	{path: "structures/12_carry.lip", want: `{"complete":6,"early":6}`},
+	{path: "structures/12_carry.lip", want: `{"catalog":{"by_name":{"read":{"name":"read"},"write":{"name":"write"}},"tools":[{"name":"read"},{"name":"write"}]},"complete":6,"early":6,"original_count":1}`},
 	{path: "advanced/13_tail_calls.lip", want: `{"even":true,"indirect":0,"sum":5000050000}`},
 	{path: "advanced/14_parallel_claim.lip", want: `{"count":3,"results":[{"input":3,"square":9},{"input":1,"square":1},{"input":2,"square":4}]}`},
 	{path: "advanced/15_inputs.lip", input: `{"name":"Ada","scores":[0.6,0.9]}`, want: `{"accepted":[0.9],"message":"Hello, Ada"}`},
@@ -45,6 +45,8 @@ var examples = []exampleCase{
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
 	{path: "advanced/26_flows.lip", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},
+	{path: "advanced/28_flow_values.lip", want: `{"direct":5,"pipeline":7}`},
+	{path: "advanced/29_diagnostics.lip", want: "6"},
 	{path: "advanced/27_linear_model.lip", want: `{"intercept":1,"mse":0,"predictions":[9,11],"singular_rejected":true,"slope":2}`},
 	{path: "refine.lip", want: `{"rounds":4,"score":0.8}`},
 	{path: "evidence.lip", want: `{"missing":["b","c"]}`},
@@ -570,22 +572,25 @@ flow Main()->object {
 func TestGoBackendStaticModules(t *testing.T) {
 	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
 		"main.lip": {Version: "local", Text: `import lip "./lib.lip" as lib
-flow Main()->object{return {value:3 |>lib.Adjust,closure:lib.make(2)(3)}}`},
+flow Main()->object{return {value:3 |>lib.Adjust,closure:lib.make(2)(3),flow_capture:lib.Apply(3,lib.Factory(2))}}`},
 		"lib.lip": {Version: "1", Text: `BASE:number=7
 export fn make(x:number)->function{fn(y:number)->number{x+y+BASE}}
-export flow Adjust(x:number)->number{return x+BASE}`},
+export flow Adjust(x:number)->number{return x+BASE}
+export flow Factory(x:number)->function{return fn(y:number)->number{x+y+BASE}}
+export flow Apply(x:number,f:function)->number{return f(x)}`},
 	}}
+	const want = `{"closure":12,"flow_capture":12,"value":10}`
 	p, err := CompileSourceSet(set, Host{}, CompileOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	report, err := p.Run(context.Background(), nil, Options{Parallelism: 1})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || display(t, report.Output) != want {
+		t.Fatal(report, err)
 	}
 	executable, _ := buildNative(t, p, GoOptions{})
 	stdout, stderr, err := runNative(t, executable)
-	if err != nil || strings.TrimSpace(stdout) != display(t, report.Output) {
+	if err != nil || strings.TrimSpace(stdout) != want {
 		t.Fatal(stdout, stderr, err)
 	}
 }
@@ -643,9 +648,10 @@ flow Main(mode:string)->any {
   "void" => null,
   "alias" => [{n:1}] |>left.Keep,
   "closure_pipeline" => {direct:(fn(xs:list)->number{xs |>len})([1,2]),captured:right.make_pipeline(3)(4),nested:map([1,2],fn(x:number)->number{x |>decorate(delta=x |>decorate(delta=1))})},
-  "input" => left.Accept({f:fn()->number{1}}),
+  "input" => left.Accept({f:fn()->number{1}}).f(),
+  "returned_function" => left.BadReturn().f(),
   "output" => left.BadReturn(),
-  "stage_input" => 1 |>right.take(config={f:fn()->number{1}}),
+  "stage_input" => 1 |>right.take(config=right.config()),
   _ => left.Fail()
  }
 }`},
@@ -660,7 +666,8 @@ export flow Fail()->number{return fail("module child")}`},
 export flow Items()->list{return [1,2]}
 export fn make(x:number)->function{fn(y:number)->number{base.scale(x+y)}}
 export fn make_pipeline(x:number)->function{fn(y:number)->number{x+y |>base.scale}}
-export fn take(x:number,config:object)->number{fail("body must not run")}`},
+export fn config()->any{{f:fn()->number{1}}}
+export flow take(x:number,config:number)->number{return fail("body must not run")}`},
 		"shared.lip": {Version: "1", Text: `export BASE:number=2
 export fn echo(facts:number)->number{facts}
 fn double(x:number)->number{x*BASE}
@@ -676,7 +683,7 @@ export fn scale(x:number)->number{x |>double}`},
 		{"empty", "[]", ""}, {"skip", "null", ""}, {"void", "null", ""},
 		{"alias", `{"data":[{"n":1}],"snapshot":[[{"n":1}]]}`, ""},
 		{"closure_pipeline", `{"captured":14,"direct":2,"nested":[3,5]}`, ""},
-		{"input", "", "E-SCHEMA"}, {"output", "", "E-SCHEMA"}, {"stage_input", "", "E-SCHEMA"}, {"error", "", "E-FAIL"},
+		{"input", "1", ""}, {"returned_function", "1", ""}, {"output", "", "E-SCHEMA"}, {"stage_input", "", "E-SCHEMA"}, {"error", "", "E-FAIL"},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			input := `{"mode":"` + test.mode + `"}`

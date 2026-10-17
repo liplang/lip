@@ -1389,3 +1389,250 @@ func generatedHost()(Host,error){host:=NewNativeHost(Host{});host.Native.Go.Regi
 	}
 	nativeCell(t, s, `view[-1]`, `0`)
 }
+
+func TestNativeHigherOrderAndBranchProvenance(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/composition", map[string]any{"New": bytes.NewBufferString})
+	const declarations = `fn identity(x:any)->any{x}
+fn partial(value:any)->function{fn(f:function)->any{f(value)}}
+fn nested(value:any)->function{fn(f:function)->function{fn(g:function)->any{g(f(value))}}}
+fn shadow(value:any)->function{fn(value:any)->any{value}}
+fn pair(flag:bool,value:any)->list{if flag {[[1,2],value]}else{[[3],value]}}
+fn matched(flag:bool,value:any)->list{match flag {true=>[[1,2,3],value],_=>[[4],value]}}
+fn named_choice(flag:bool)->function{if flag {fn(value:any)->any{value}}else{fn(other:any)->any{other}}}
+fn arity_choice(flag:bool)->function{if flag {fn(value:any)->any{value}}else{fn(ignored:any,other:any)->any{other}}}
+fn swapped_choice(flag:bool)->function{if flag {fn(x:any,y:any)->any{x}}else{fn(y:any,x:any)->any{y}}}
+fn recursive_pair(n:number,value:any)->list{if n==0 {[[1,2],value]}else{recursive_pair(n-1,value)}}
+flow Partial(value:any)->function{return partial(value)}
+flow Pair(flag:bool,value:any)->list{return pair(flag,value)}
+`
+	const main = `flow Main()->object{
+ resource=lib.New("hello")
+ delayed=partial(resource)
+ deeper=nested(resource)(identity)
+ left=pair(true,resource)
+ right=pair(false,resource)
+ pattern=matched(true,resource)
+ child=Pair(false,resource)
+ recursive=recursive_pair(3,resource)
+ pure=fn()->list{[len(left[0]),len(right[0]),len(pattern[0]),len(child[0]),len(recursive[0])]}
+ return {pure:pure(),sizes:[delayed(identity).Len(),partial(value=resource)(f=identity).Len(),deeper(identity).Len(),shadow(0)(resource).Len(),Partial(resource)(identity).Len(),left[1].Len(),right[-1].Len(),pattern[1].Len(),child[1].Len(),named_choice(false)(other=resource).Len(),arity_choice(false)(0,resource).Len(),swapped_choice(false)(x=0,y=resource).Len(),recursive[1].Len()],length:partial([resource])(len)}
+}`
+	const want = `{"length":1,"pure":[2,1,3,1,2],"sizes":[5,5,5,5,5,5,5,5,5,5,5,5,5]}`
+	for _, reverse := range []bool{false, true} {
+		decl := declarations
+		if reverse {
+			lines := strings.Split(strings.TrimSpace(decl), "\n")
+			for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+				lines[i], lines[j] = lines[j], lines[i]
+			}
+			decl = strings.Join(lines, "\n") + "\n"
+		}
+		source := "import go \"application/composition\" as lib\n" + decl + main
+		if reverse {
+			source = strings.NewReplacer("partial", "zebra", "identity", "alpha").Replace(source)
+		}
+		p, err := Compile(source, host)
+		if err != nil {
+			t.Fatal(reverse, err)
+		}
+		for _, parallel := range []int{1, 7} {
+			r, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+			if err != nil || display(t, r.Output) != want {
+				t.Fatal(reverse, parallel, r, err)
+			}
+		}
+		exe, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import "bytes"
+func generatedHost()(Host,error){h:=NewNativeHost(Host{});h.Native.Go.RegisterPackage("application/composition",map[string]any{"New":bytes.NewBufferString});return h,nil}`})
+		stdout, stderr, err := runNative(t, exe)
+		if err != nil || strings.TrimSpace(stdout) != want {
+			t.Fatal(reverse, stdout, stderr, err)
+		}
+	}
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	nativeCell(t, s, "import go \"application/composition\" as lib\n"+declarations, "")
+	nativeCell(t, s, `saved=lib.New("hello");delayed=partial(saved);deeper=nested(saved)`, "")
+	nativeCell(t, s, `delayed(identity).Len()`, `5`)
+	nativeCell(t, s, `stage=deeper(identity)`, "")
+	nativeCell(t, s, `stage(identity).Len()`, `5`)
+	nativeCell(t, s, `left=Pair(true,saved);(fn()->number{len(left[0])})()`, `2`)
+	nativeCell(t, s, `left[-1].Len()`, `5`)
+	nativeCell(t, s, `chosen=named_choice(false)`, "")
+	nativeCell(t, s, `chosen(other=saved).Len()`, `5`)
+}
+
+func TestNativeReturnProvenance(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/refactoring", map[string]any{"New": bytes.NewBufferString})
+	const declarations = `fn literal(ignored:object)->list{[1,2,3]}
+fn identity(value:any)->any{value}
+fn box(value:object,ignored:object)->object{{resource:value,plain:[1,2]}}
+fn first(value:object)->object{value.resource}
+fn factory(value:any)->function{fn()->any{value}}
+fn apply(f:function,value:any)->any{f(value)}
+fn inserted(value:object)->object{put({plain:[1,2]},"resource",value)}
+fn replaced(box:object,value:any)->object{put(box,"resource",value)}
+fn unknown_key()->string{"resource"}
+fn overwritten(box:object,value:any)->object{put(put(box,unknown_key(),value),"plain",[1,2,3])}
+fn exchange_a(n:number,p:any,q:any,ignored:any)->any{if n==0 {p}else{exchange_b(n-1,q,p,ignored)}}
+fn exchange_b(n:number,p:any,q:any,ignored:any)->any{exchange_a(n,p,q,ignored)}
+fn repeated(n:number,ignored:any)->list{if n==0 {[1,2,3]}else{repeated(n-1,ignored)}}
+fn bundle(n:number,value:any)->object{if n==0 {{resource:value,plain:[1,2]}}else{bundle(n-1,value)}}
+fn nested(n:number,value:any)->any{if n==0 {value}else{nested(n-1,{resource:value})}}
+fn projected(n:number,value:any)->any{if n==0 {value.resource}else{projected(n-1,value.resource)}}
+fn callback(n:number)->function{if n==0 {len}else{other_callback(n-1)}}
+fn other_callback(n:number)->function{if n==0 {str}else{callback(n-1)}}
+flow Echo(value:any)->any{return value}
+flow Create(text:string)->object{return lib.New(text)}
+flow Make(text:string)->effect{return effect lib.New(text)}
+flow Closure(value:object)->function{return fn()->object{value}}
+`
+	const main = `flow Main()->object {
+ resource=lib.New("hello")
+ xs=literal(resource)
+ pure=fn()->number{len(xs)}
+ piped=resource |>literal
+ pure_pipe=fn()->number{len(piped)}
+ container=box(value=resource,ignored=resource)
+ plain=fn()->number{len(container.plain)}
+ forwarded=identity(resource)
+ selected=first(container)
+ captured=factory(resource)()
+ higher=apply(identity,resource)
+ mapped=map([resource],identity)[0]
+ concatenated=concat([resource],[])[0]
+ updated=put({},"resource",resource).resource
+ child=Echo(Create("three"))
+ requested=perform Make("four")
+ closure=Closure(resource)()
+ exchanged=exchange_b(1,0,resource,resource)
+ recursive_plain=repeated(3,resource)
+ recursive_pure=fn()->number{len(recursive_plain)}
+ recursive_box=bundle(3,resource)
+ field_pure=fn()->number{len(recursive_box.plain)}
+ inserted_box=inserted(resource)
+ updated_pure=fn()->number{len(inserted_box.plain)}
+ replaced_box=replaced(inserted_box,[1,2,3])
+ replaced_pure=fn()->number{len(replaced_box.resource)}
+ overwritten_box=overwritten(inserted_box,resource)
+ overwritten_pure=fn()->number{len(overwritten_box.plain)}
+ growing=nested(2,resource)
+ shrinking=projected(1,{resource:{resource:resource}})
+ return {pure:[pure(),pure_pipe(),plain(),recursive_pure(),field_pure(),callback(2)([1,2]),updated_pure(),replaced_pure(),overwritten_pure()],sizes:[forwarded.Len(),selected.Len(),captured.Len(),higher.Len(),child.Len(),requested.Len(),closure.Len(),mapped.Len(),concatenated.Len(),updated.Len(),exchanged.Len(),recursive_box.resource.Len(),perform effect growing.resource.resource.Len(),perform effect shrinking.Len(),inserted_box.resource.Len(),overwritten_box.resource.Len()]}
+}`
+	const want = `{"pure":[3,3,2,3,2,2,2,3,3],"sizes":[5,5,5,5,5,4,5,5,5,5,5,5,5,5,5,5]}`
+	for _, reverse := range []bool{false, true} {
+		decl := declarations
+		if reverse {
+			lines := strings.Split(strings.TrimSpace(decl), "\n")
+			for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+				lines[i], lines[j] = lines[j], lines[i]
+			}
+			decl = strings.Join(lines, "\n") + "\n"
+		}
+		source := "import go \"application/refactoring\" as lib\n" + decl + main
+		if reverse {
+			source = strings.NewReplacer("exchange_a", "zebra", "exchange_b", "alpha").Replace(source)
+		}
+		p, err := Compile(source, host)
+		if err != nil {
+			t.Fatal(reverse, err)
+		}
+		for _, parallel := range []int{1, 7} {
+			report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+			if err != nil || display(t, report.Output) != want {
+				t.Fatal(reverse, parallel, report, err)
+			}
+		}
+		exe, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import "bytes"
+func generatedHost()(Host,error){h:=NewNativeHost(Host{});h.Native.Go.RegisterPackage("application/refactoring",map[string]any{"New":bytes.NewBufferString});return h,nil}`})
+		stdout, stderr, err := runNative(t, exe)
+		if err != nil || strings.TrimSpace(stdout) != want {
+			t.Fatal(stdout, stderr, err)
+		}
+		s, err := NewSession(host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nativeCell(t, s, source, "")
+		nativeCell(t, s, `saved=lib.New("word")`, "")
+		nativeCell(t, s, `plain=literal(saved);(fn()->number{len(plain)})()`, `3`)
+		nativeCell(t, s, `copied=identity(saved);copied.Len()`, `4`)
+		nativeCell(t, s, `saved_factory=factory(saved)`, "")
+		nativeCell(t, s, `copy=saved_factory();copy.Len()`, `4`)
+		nativeCell(t, s, `child_factory=Closure(saved)`, "")
+		nativeCell(t, s, `child_copy=child_factory();child_copy.Len()`, `4`)
+		nativeCell(t, s, `returned=Echo(Create("sixsix"));returned.Len()`, `6`)
+		nativeCell(t, s, `Main()`, want)
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Explicit receiver requests may pass through arbitrary ordinary wrappers. Only
+// the selected path reaches Host Data; fn/effect siblings remain local values.
+func TestNativeExplicitReceiverMixedContainers(t *testing.T) {
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	const source = `import go "bytes"
+fn request(box:object)->effect {effect box.inner.buffer.String()}
+flow Box(buffer:any)->object {return {inner:{buffer:buffer,callback:fn()->number{99}},other:fn()->null{null}}}
+flow Execute(request:effect)->string{return perform request}
+flow Main()->object {
+    buffer=bytes.NewBufferString("hello")
+    box=Box(buffer)
+    prepared=request(box)
+    text=Execute(prepared)
+    alias=if true {box} else {{}}
+    nested=perform effect alias.inner.buffer.String()
+    missing={callback:fn()->null{null}}
+    missing_request=effect missing.absent.String()
+    skipped=if false {perform missing_request} else {"safe"}
+    native_release(buffer)
+    return {text:text,nested:nested,untouched:box.inner.callback(),skipped:skipped}
+}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"nested":"hello","skipped":"safe","text":"hello","untouched":99}`
+	for _, parallel := range []int{1, 7} {
+		r, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil || display(t, r.Output) != want || len(r.Journal.Records()) != 4 {
+			t.Fatal(r, err)
+		}
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	for _, parallel := range []string{"1", "7"} {
+		stdout, stderr, err := runNative(t, executable, "-parallel", parallel)
+		if err != nil || strings.TrimSpace(stdout) != want {
+			t.Fatal(stdout, stderr, err)
+		}
+	}
+	session, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	nativeCell(t, session, source, "")
+	nativeCell(t, session, `Main()`, want)
+	// Pruning the receiver must never exempt actual arguments from Data checks.
+	p, err = Compile(`import go "bytes"
+flow Main()->number {b=bytes.NewBufferString("");box={b:b,f:fn()->null{null}};perform effect box.b.WriteString(fn()->null{null});return 7}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := p.Run(context.Background(), nil, Options{})
+	if err == nil || r.Error == nil || r.Error.Code != "E-SCHEMA" || len(r.Journal.Records()) != 1 {
+		t.Fatal(r, err)
+	}
+}

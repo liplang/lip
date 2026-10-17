@@ -2,6 +2,7 @@
 
 import gc
 import json
+import os
 import sys
 import weakref
 
@@ -20,6 +21,27 @@ class Chunk:
         return {"message": self.message, "done": self.done}
 
 
+class RequestProbe:
+    """A replaceable streaming endpoint with observable call/close events."""
+
+    def __init__(self):
+        self.events = []
+
+    def chat(self, messages, tools):
+        assert tools == []
+        text = messages[-1]["content"]
+        self.events.append("request:" + text)
+
+        def chunks():
+            try:
+                yield Chunk({"content": "", "thinking": text, "tool_calls": []}, False)
+                yield Chunk({"content": None, "thinking": None, "tool_calls": None}, True)
+            finally:
+                self.events.append("close")
+
+        return chunks()
+
+
 class Client:
     def __init__(self, host, timeout):
         pass
@@ -28,6 +50,9 @@ class Client:
         pass
 
     def chat(self, model, messages, tools, stream, keep_alive, options):
+        assert model == (os.environ.get("LIP_CHAT_MODEL") or "llama3.1:8b")
+        assert keep_alive == "30m"
+        assert options == {"temperature": 0.2, "num_predict": 1024}
         if sys.stdout.isatty():
             import termios
             assert termios.tcgetattr(sys.stdout)[3] & termios.ICANON, "raw mode leaked into model execution"

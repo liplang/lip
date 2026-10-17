@@ -1,0 +1,10 @@
+# fn keeps its calculation independent of diagnostic delivery.
+# Run: lipc run examples/advanced/29_diagnostics.lip
+# Diagnostics go to stderr; stdout contains 6. Use -trace=false to hide them.
+fn doubled(x:number)->number {
+    print("Computing a value")
+    log("debug", {input:x})
+    telemetry("calculation", {operation:"double"})
+    x * 2
+}
+flow Main()->number { return doubled(3) }

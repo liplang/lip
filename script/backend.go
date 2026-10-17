@@ -19,7 +19,7 @@ import (
 // library; selected Go libraries are linked from the application's module.
 // Executables need neither the compiler nor a source checkout.
 //
-//go:embed compiler.go checker.go values.go evaluator.go scheduler.go host.go adapters.go native.go native_workers.go go_adapter.go
+//go:embed compiler.go checker.go values.go evaluator.go scheduler.go host.go trace.go adapters.go native.go native_workers.go go_adapter.go
 var runtimeSources embed.FS
 
 // GoOptions supplies trusted native integration code, never LIP program text.
@@ -702,7 +702,7 @@ func (g *goEmitter) armLiteral(as []arm) string {
 }
 func (g *goEmitter) exprLiteral(e *expression, i int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "expression{native:nativeExpr%d,tag:%s,name:%s,typ:%s,state:%s,tok:%s,value:%s,x:%s,y:%s,z:%s,params:%s,body:%s,arms:%s,info:analysis{typ:%s,effect:EffectClass(%d),concurrent:%t},", i, quote(e.tag), quote(e.name), quote(e.typ), quote(e.state), tokenLiteral(e.tok), valueLiteral(e.value), g.exprRef(e.x), g.exprRef(e.y), g.exprRef(e.z), g.params(e.params), g.blockRef(e.body), g.armLiteral(e.arms), quote(e.info.typ), e.info.effect, e.info.concurrent)
+	fmt.Fprintf(&b, "expression{native:nativeExpr%d,tag:%s,name:%s,typ:%s,state:%s,tok:%s,value:%s,x:%s,y:%s,z:%s,params:%s,body:%s,arms:%s,info:analysis{typ:%s,effect:EffectClass(%d),concurrent:%t,hasFlow:%t},", i, quote(e.tag), quote(e.name), quote(e.typ), quote(e.state), tokenLiteral(e.tok), valueLiteral(e.value), g.exprRef(e.x), g.exprRef(e.y), g.exprRef(e.z), g.params(e.params), g.blockRef(e.body), g.armLiteral(e.arms), quote(e.info.typ), e.info.effect, e.info.concurrent, e.info.hasFlow)
 	b.WriteString("args:[]argument{")
 	for _, a := range e.args {
 		fmt.Fprintf(&b, "{name:%s,expr:%s},", quote(a.name), g.exprRef(a.expr))
@@ -766,7 +766,7 @@ func compiledRuntime() (string, map[string]string, map[string]*ast.FuncDecl, err
 	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl flowDecl dataDecl syntax analysis operationSummary function proposal bindingInfo asciiDigit asciiLetter validID checker builtinArity error resolve") {
 		allowed[n] = true
 	}
-	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "adapters.go", "native.go", "native_workers.go", "go_adapter.go"} {
+	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "trace.go", "adapters.go", "native.go", "native_workers.go", "go_adapter.go"} {
 		src, _ := runtimeSources.ReadFile(name)
 		f, err := goparser.ParseFile(gotoken.NewFileSet(), name, src, 0)
 		if err != nil {
@@ -910,6 +910,7 @@ func generatedRun()error{
  steps:=flag.Int64("steps",10000000,"step budget; 0 unlimited")
  elements:=flag.Int64("elements",1000000,"list budget; 0 unlimited")
  frames:=flag.Int("frames",DefaultMaxFrames,"non-tail call frame budget; 0 uses default; tail calls reuse frames")
+ trace:=flag.Bool("trace",true,"show best-effort print/log/telemetry diagnostics on stderr")
  flag.Parse();if flag.NArg()!=0{return fmt.Errorf("compiled program accepts flags only")}
  if *frames<0{return fmt.Errorf("-frames must be nonnegative (0 uses the default)")}
  if *parallel<0{return fmt.Errorf("-parallel must be nonnegative (0 uses one)")}
@@ -918,7 +919,8 @@ func generatedRun()error{
  data,err:=DecodeEntryInput([]byte(inputJSON));if err!=nil{return err}
  host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err};defer p.host.Close()
  ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt);defer cancel()
- r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000,MaxFrames:*frames});if err!=nil{return err}
+ var traces *TraceBuffer;if *trace{var stop func();traces,stop=StartTraceOutput(os.Stderr);defer stop()}
+ r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000,MaxFrames:*frames,Trace:traces});if err!=nil{return err}
  output:=r.Output;if *entryOutput{output=*r.EntryOutput};out,err:=EncodeJSON(output);if err!=nil{return err};fmt.Println(string(out));return nil
 }
 `

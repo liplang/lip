@@ -37,7 +37,8 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("run/repl/serve and generated executables accept -frames N (default 10000; 0 selects default). Tail calls reuse frames; exhaustion reports E-BUDGET.")
 		fmt.Println("-parallel N accepts any positive integer and limits active leaf evaluations; workers start on demand. REPL :run inherits the selected limit.")
 		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
-		fmt.Println("learn: 36 short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.")
+		fmt.Printf("learn: %d short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.\n", len(course))
+		fmt.Println("print/log/telemetry are one-way diagnostics, allowed in fn. Output goes to stderr; run/repl accept -trace=false to disable delivery.")
 		return nil
 	case "run", "emit-go", "build":
 		args = args[1:]
@@ -56,6 +57,7 @@ func run(ctx context.Context, args []string) error {
 	steps := flags.Int64("steps", 10000000, "step budget (0 unlimited)")
 	elements := flags.Int64("elements", 1000000, "list allocation budget (0 unlimited)")
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget (0 uses default; tail calls reuse frames)")
+	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -114,7 +116,13 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000, MaxFrames: *frames})
+		var traces *script.TraceBuffer
+		if *trace {
+			var stop func()
+			traces, stop = script.StartTraceOutput(os.Stderr)
+			defer stop()
+		}
+		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000, MaxFrames: *frames, Trace: traces})
 		if err != nil {
 			return err
 		}

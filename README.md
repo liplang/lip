@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
-当前版本：**1.0**。
+当前发布版本：**1.0**。本工作树正在实现 [1.1 规范草案](spec/LIP-1.1-SPEC.md)；[1.0 规范](spec/LIP-1.0-SPEC.md)保留，发布版本号暂不调整。
 
 **用值描述计算，用图组织工作，用事实形成结果。**
 
@@ -10,7 +10,7 @@ LIP 是一门面向可组合计算、并行分析与工具协作的小语言。�
 
 LIP 的重点是把这套计算核心做扎实。数学、文件、网络、数据库和模型能力接入 **Go / Python 生态**；从交互探索到编译为 Go，沿用同一套值、依赖、身份与调用规则。它适合需要分解任务、收集证据、调用工具并形成明确结论的程序。
 
-[语言规范](spec/LIP-1.0-SPEC.md) · [示例教程](examples/README.md) · [实现与验证](IMPLEMENTATION.md)
+[语言规范](spec/LIP-1.1-SPEC.md) · [示例教程](examples/README.md) · [实现与验证](IMPLEMENTATION.md)
 
 实际应用检查覆盖 CRUD 网站、SQLite 查询、pandas ETL、scikit-learn 回归/分类、NumPy 线性代数和 SciPy 积分/优化。[线性模型示例](examples/advanced/27_linear_model.lip) 使用纯核心演示训练、预测与误差计算。网站通过显式 Host 合约接入存储和模板；科学计算库在脚本和 REPL 中通过 Go/Python bridge 使用。已验证的执行路径与当前限制见实现说明。
 
@@ -25,7 +25,7 @@ LIP 最适合**有明确结束条件、需要汇集多方结果并说明决策�
 | 分阶段的数据处理 | 查询与计算交给 Go/Python 库，LIP 组织依赖、汇总结果，再按顺序写入 | [并行读与顺序写](examples/ecosystem/19_parallel_read_write.lip)、SQLite/pandas 应用检查 |
 | 有轮次边界的工具协作 | 用携带值循环表达“思考—调用工具—观察—再决定”，复用子 Flow 完成每一步 | [记录式迭代](examples/ecosystem/20_recorded_iteration.lip)、[refine](examples/refine.lip) |
 
-组合沿用四个角色：纯 `fn` 处理不可变值和完整快照；`flow` 复用带外部动作的多步工作；Claim 汇集各项贡献；Host 提供具有明确合约的外部能力。子 Flow 返回 Data，由父层追加到自己的 Claim；活动 Claim 不作为共享可变对象传递。Flow 目标静态确定，重复调用使用 `for` 或推导式，`map`/`fold` 的回调使用纯函数。Claim 的来源标记说明哪项工作贡献了事实；文档地址、检查器版本与证据内容仍应由业务 Data 携带。
+组合沿用四个角色：纯 `fn` 处理不可变值和完整快照；`flow` 复用带外部动作的多步工作；Claim 汇集各项贡献；Host 提供具有明确合约的外部能力。子 Flow 可返回函数、请求及其他普通值；其中的 Data 可由父层追加到自己的 Claim；活动 Claim 不作为共享可变对象传递。Flow 目标静态确定，重复调用使用 `for` 或推导式，`map`/`fold` 的回调使用纯函数。Claim 的来源标记说明哪项工作贡献了事实；文档地址、检查器版本与证据内容仍应由业务 Data 携带。
 
 并行调用要求合约显式声明 Concurrent ReadOnly。通用 Go/Python bridge 的操作为 Unknown；需要并行时，由应用注册适当的明确合约。纯函数可封装单步请求：静态已知的函数、简单别名、直接匿名函数和跨模块函数保留返回请求的操作摘要，多层调用与递归使用同一保守规则。实际 `perform` 根据所有候选操作的合约判断并行资格；容器投影、动态函数调用和 carry 结果仍为 Unknown。业务 `{ok:false}` 是普通数据，后续动作必须由 `if`/`match` 明确控制。
 
@@ -108,13 +108,26 @@ flowchart TD
 
 `-parallel N` 接受 Go `int` 范围内任意正整数，不会预先分配 N 个 worker 或 N 个事件槽。普通运行的零值表示一个额度；负数报配置错误。REPL 默认四个额度，`:run` 继承所选额度，除非显式覆盖。符合合约的工作按需启动，同时受共享资源许可、时限、图和指令预算约束。提高额度只扩大可能的重叠工作数，不增加 CPU 核数或 provider 容量；通用原生操作仍遵守保守的 Unknown 合约。
 
-已完成的分支作用域、循环轮次和子 Flow 会在整个 run 结束前释放局部图节点的数据引用。管道将不可变 Data 结果传给调用方，子 Flow 的临时数据便可由 Go GC 回收。仍被使用的共享结果、闭包捕获、Claim、journal 记录和 REPL 绑定继续保留。这是作用域结束时的清理，尚不是每个绑定的精确最后使用分析，也不是常量内存执行；图历史与 journal 仍随工作量增长。
+已完成的分支作用域、循环轮次和子 Flow 会在整个 run 结束前释放局部图节点的数据引用。管道将不可变普通值结果传给调用方，子 Flow 的临时数据便可由 Go GC 回收。仍被使用的共享结果、闭包捕获、Claim、journal 记录和 REPL 绑定继续保留。这是作用域结束时的清理，尚不是每个绑定的精确最后使用分析，也不是常量内存执行；图历史与 journal 仍随工作量增长。
 
 ## LIP 的鲜明特性
 
 ### 值计算与工作组织各有清晰的表达
 
 `fn` 是捕获不可变值的纯函数，适合转换、校验、递归和归约；`flow` 是可复用的图模板，适合组织有依赖、分支、循环和外部调用的工作。普通绑定把结果连接起来，子 Flow 的成功表示整个子图完成，包括返回值之外的已选工作。因而，上层拿到结果时，也拿到了该阶段已经完成的承诺。
+
+
+`fn` 也可以输出诊断，方便调试计算：
+
+```lip
+fn doubled(x:number)->number {
+    log("debug", {input:x})
+    x * 2
+}
+flow Main()->number { return doubled(3) }
+```
+
+结果仍是 `6`。`print(value)`、`log(level, value)` 和 `telemetry(name, fields)` 都返回 `null`；它们只发送诊断，接收端关闭、满队列或故障不会影响计算。CLI 默认显示到 stderr，stdout 保留结果；`-trace=false` 关闭诊断投递，参数仍正常求值和检查。独立并行节点的日志次序不固定。完整小例见 [29_diagnostics](examples/advanced/29_diagnostics.lip)。需要确认送达、读取日志或影响业务状态的操作，仍使用 `effect/perform`；原生库的 `print/log` 不自动获得此权限。
 
 纯函数支持直接、互递归和间接的 proper tail calls；Flow 用显式循环展开重复工作。局部表达式与参数从左到右求值，独立图节点则依据依赖和操作合约调度。顺序与并行都由程序结构说明。
 
@@ -151,8 +164,22 @@ flow Main()->string {
 | 请求值可以放在哪里 | 当前规则 |
 |---|---|
 | 局部绑定、list/object、闭包、fn 参数与返回值 | 可以；保存和传递均不执行 |
-| Flow 参数与返回值，包括程序入口/出口 | 必须是 Data，不能携带 effect |
+| 同一运行内的 Flow 参数与返回值 | 可以携带函数、effect 及其嵌套容器 |
+| 程序入口/出口协议 | 必须是 Data，不能携带函数或 effect |
 | Host 参数与返回值、Claim 贡献、JSON | 必须是 Data，不能携带 effect |
+
+例如，`-host demo` 下仍输出 `"HELLO"`。Prepare 返回请求，Execute 接收并执行它；嵌套实参按顺序完成：
+
+```lip
+import go "strings" as text
+flow Prepare(name:string)->effect { return effect text.ToUpper(name) }
+flow Execute(request:effect)->any { return perform request }
+flow Main()->string { return Execute(Prepare("hello")) }
+```
+
+函数也能这样传递；[闭包跨 Flow 示例](examples/advanced/28_flow_values.lip)展示返回带捕获的函数，再把它传给另一个 Flow。Flow 定义本身仍不能赋值或传递。
+
+`Combine(Read(1), Read(2))` 的两个实参依次完成。若希望符合合约的独立读取有并发机会，先分别绑定 `a = Read(1)`、`b = Read(2)`，再调用 `Combine(a, b)`；嵌套写法更短，但不会自动并发。
 
 纯函数封装保留已知的操作摘要：[并行读与顺序写](examples/ecosystem/19_parallel_read_write.lip) 展示 `perform upper_request(name)` 的并行用法。只有 Host 将操作显式注册为 Concurrent ReadOnly 才允许并行，通用 bridge 的 Unknown 合约不会因包装升级。通过未知 fn 形参或容器投影取回请求，仍可顺序执行，但不能据此证明并行安全。
 
@@ -181,13 +208,13 @@ Go/Python 的直接库调用也转换为这套协议。交互便利性、显式�
 
 循环迭代、子 Flow、贡献和调用按源码位置与动态路径获得身份。它们连接错误定位、Claim 来源和调用记录，避免用任务抵达或完成的先后给工作编号。多个模块在构建时冻结为同一源码快照；源码、版本和依赖解析共同确定构建身份。
 
-在固定输入与外部应答、公平且有限终结、无 live snapshot 和取消/预算干扰等规范前提下，合法调度得到相同成功结果或相同主错误。Claim 的逻辑顺序与结构身份提供可复查的依据；完整条件见 [规范 §13](spec/LIP-1.0-SPEC.md#13-确定性与保证边界)。
+在固定输入与外部应答、公平且有限终结、无 live snapshot 和取消/预算干扰等规范前提下，合法调度得到相同成功结果或相同主错误。Claim 的逻辑顺序与结构身份提供可复查的依据；完整条件见 [规范 §13](spec/LIP-1.1-SPEC.md#13-确定性与保证边界)。
 
 ### 一份程序，从探索走到 Go 可执行文件
 
-REPL、36 节内置课程、文件执行与 Go 生成使用同一核心。生成器把表达式编译为专用 Go 求值函数，并带上调度与 Host 运行时；生成程序直接执行这些函数，无需重新解析 LIP 源文或读取源码目录。
+REPL、38 节内置课程、文件执行与 Go 生成使用同一核心。生成器把表达式编译为专用 Go 求值函数，并带上调度与 Host 运行时；生成程序直接执行这些函数，无需重新解析 LIP 源文或读取源码目录。
 
-LIP 1.0 的这些机制已经落实为可运行的编译器与运行时。现有测试同时构建并执行生成程序，对照输出、错误、身份和调用边界；组合测试在并发额度 1、2、4、7、1238、73295 下检查模块、闭包、循环、子图与管道的协同。逐章覆盖与具体测试见 [实现与验证](IMPLEMENTATION.md)。
+这些机制已经落实为可运行的编译器与运行时。现有测试同时构建并执行生成程序，对照输出、错误、身份和调用边界；组合测试在并发额度 1、2、4、7、1238、73295 下检查模块、闭包、循环、子图与管道的协同。逐章覆盖与具体测试见 [实现与验证](IMPLEMENTATION.md)。
 
 ## 开始使用
 
@@ -216,7 +243,7 @@ lipc learn -list
 
 ## 语言核心与程序结构
 
-绑定不可变，内层作用域可遮蔽普通名称。值包括 null、bool、有限 binary64 number、UTF-8 string、list、object、纯函数与请求；跨 Flow、Host 和 Claim 的数据使用递归不含函数或请求的 **Data**。`any` 仍接受实际使用位置的类型和 Data 检查。
+绑定不可变，内层作用域可遮蔽普通名称。值包括 null、bool、有限 binary64 number、UTF-8 string、list、object、纯函数与请求；同一运行内的 Flow 可传递所有这些普通值；Host、入口协议和 Claim 使用递归不含函数或请求的 **Data**。`any` 仍接受实际使用位置的类型和 Data 检查。
 
 | 要表达的工作 | 写法 |
 |---|---|
@@ -227,6 +254,26 @@ lipc learn -list
 | 独立工作与事实汇聚 | `for x in xs parallel { facts <+ x*x }` |
 | 结构化阶段 | `x |> Adjust |> Finish` |
 | 外部请求与执行 | `request=effect op(args)`、`perform request` |
+
+列表和对象也能逐轮构造。`next` 把整个新状态交给下一轮，循环结果还可以接着处理下一批：
+
+```lip
+fn AddTools(names:list, initial:object)->object {
+    for name in names with s = initial {
+        tool = {name:name}
+        next {
+            tools: concat(s.tools, [tool]),
+            by_name: put(s.by_name, name, tool)
+        }
+    }
+}
+flow Main()->object {
+    first = AddTools(["read"], {tools:[], by_name:{}})
+    return AddTools(["write"], first)
+}
+```
+
+结果含两项 tools 和按名称索引的 by_name；first 仍只含一项。`put` 遇到同名键会覆盖该字段，`concat` 保留列表中的重复项。空输入返回初始状态。在 Flow 中也可先执行外部操作，再将结果带入下一轮，见 [carry 示例](examples/structures/12_carry.lip)。只需把输入逐项转换成列表时优先用推导式；反复 `concat` 不保证常数时间追加，大列表可能产生二次复制成本。
 
 算术为 `+ - * / // % ** */`：`**` 右结合，`2 ** 3 ** 2` 为 512，`-3 ** 2` 为 -9，`2 ** -3` 为 0.125；`8 */ 2` 是以 2 为底的对数，结果为 3。幂与对数采用规范固定的 binary64 近似算法，定义域或非有限结果报 `E-NUMBER`。完整数值、字符串、控制结构示例见 [教程](examples/README.md)。
 
@@ -252,11 +299,11 @@ flow Empty()->void {}
 # {"kind":"void"}
 ```
 
-`-input` 是命名参数的 JSON 对象；`-entry-input` 接收完整 EntryInput，两者互斥。输入在分配 run_id、创建 journal 和图节点之前验证，不符报 `E-SCHEMA`。默认输出为 JSON；`-entry-output` 保留成功封装，明确区分 void 与返回 null 的 `{"kind":"value","value":null}`。成功结果等待全图完成。输出日志或写文件使用外部操作；教学 Host 的 console 输出到 stderr，stdout 留给结果。
+`-input` 是命名参数的 JSON 对象；`-entry-input` 接收完整 EntryInput，两者互斥。输入在分配 run_id、创建 journal 和图节点之前验证，不符报 `E-SCHEMA`。默认输出为 JSON；`-entry-output` 保留成功封装，明确区分 void 与返回 null 的 `{"kind":"value","value":null}`。成功结果等待全图完成。业务日志或写文件使用外部操作；单向调试输出可用前述 print/log/telemetry；教学 Host 的 console 输出到 stderr，stdout 留给结果。
 
 ### 子 Flow、管道与静态模块
 
-子 Flow 通过参数接收上下文，实例内的 binding 和 Claim 独立。显式 Flow 实参须为纯 Data，需要先完成另一个调用时用绑定或管道。Flow 目标静态确定，调用环在编译时拒绝。
+子 Flow 通过参数接收上下文，实例内的 binding 和 Claim 独立。参数和返回值可携带函数、effect 及其容器；实参按源码顺序完整求值后才启动子图，允许直接嵌套调用。Flow 目标静态确定，调用环在编译时拒绝。
 
 管道阶段使用具名 fn、Flow、导出的模块 fn/Flow 或核心纯函数；函数值和原生库函数使用普通调用。`|>` 优先级低于 `||`，比较阶段结果写 `(x |> F) == y`。业务 `{ok:false}` 是普通 Data，由 `if` / `match` 明确决定下一步。
 
@@ -308,6 +355,8 @@ flow Predict(model:object,rows:list)->list {
 
 `effect receiver.method(...)` 按 receiver 的词法绑定解析，支持已保存的 REPL 值和导入 LIP 模块中的参数，也支持 `effect library.linalg.solve(matrix,rhs)` 这样的嵌套成员。构造请求不读取成员或调用原生代码；`perform` 才执行正常的授权和资源检查。删除或重新绑定公开名字，不会改变已保存请求捕获的 receiver。
 
+闭包可以捕获资源引用和请求，再跨子 Flow 传递；这不会延长资源寿命或改变权限。原生操作仍由 `perform` 执行，不能在纯 `fn` 中直接调用原生方法。
+
 纯函数也能构造返回原生对象的请求。下面使用默认库桥接运行，结果为 `5`：
 
 ```lip
@@ -333,6 +382,8 @@ flow Main()->number {
 多轮工具程序通过“思考 → 调用 → 观察 → 再决定”推进。[recorded_iteration](examples/ecosystem/20_recorded_iteration.lip) 展示把记录的应答传给下一轮，[evidence](examples/evidence.lip) 展示完整证据汇聚，[refine](examples/refine.lip) 展示携带值的迭代。模型与业务工具可以由同样的 Host 合约接入；长期事件由 Host 接收，再启动各自独立的运行。
 
 [本地 Ollama 聊天示例](examples/tmp_ollama_chat.lip) 将流式聊天、七个工具的分派与参数检查、SQLite 计算记录和主动提醒放在同一个 `.lip` 文件中。模型调用使用官方 Python `ollama` 客户端，存储和计时直接调用标准库；安装与运行步骤见[示例说明](examples/README.md#本地-ollama-聊天记录与提醒)。数据库默认位于当前工作目录的 `.ollama_chat/state.sqlite3`，可通过 `LIP_CHAT_DB` 指定路径。
+
+这个示例也实际使用 1.1 的普通值传递：`RunAgent` 接收纯请求构造函数，`StreamReply` 接收并执行它产生的 effect，`Query`/`Write` 接收 SQLite 请求并负责游标清理。模型配置集中在启动处；替换请求构造函数时，仍须提供相同的流式响应接口。
 
 ### 第三方库与运行环境
 
@@ -483,7 +534,7 @@ slice(a,null,null,-1)  # 同 a[::-1]
 省略边界与 null 同义；负步长时，省略 stop 与显式 -1 不同。列表索引保留顺序和重复项。
 用 `./lipc learn -lesson slicing` 练习，REPL 中可用 `help(slice)` 查看规则。
 
-36 节课程配有 72 个可运行小例子，从读一个列表元素、取一个对象字段、调用一个函数开始，再逐步组合 Flow、Claim 和外部请求。复杂切片、幂和对数放在最后作为额外练习。每课先展示例子、具体输入和预期结果；通常只需填写 `__ANSWER__` 的代码，按 Enter 即验证，无需重写整个程序。除第一课外，每课都用多个输入验收。
+38 节课程配有 76 个可运行小例子，从读一个列表元素、取一个对象字段、调用一个函数开始，再逐步组合 Flow、Claim 和外部请求。复杂切片、幂和对数放在最后作为额外练习。每课先展示例子、具体输入和预期结果；通常只需填写 `__ANSWER__` 的代码，按 Enter 即验证，无需重写整个程序。除第一课外，每课都用多个输入验收。
 
 | 学习命令 | 用法 |
 |---|---|
@@ -530,7 +581,7 @@ go build -o .build/hello .build/hello.go
 # "Hello, LIP!"
 ```
 
-生成程序固定入口与源码快照，支持 `-input`、`-entry-input`、`-entry-output`、`-parallel`、`-frames`、`-steps`、`-elements`。启动时核对 Host 合约，保持编译与运行的操作定义一致。纯核心与教学 Host 的 Go 部分仅依赖标准库；Python 操作需要对应运行环境；生成程序的 Go 包在构建时链接，部署后调用不需要工具链或 plugin。
+生成程序固定入口与源码快照，支持 `-input`、`-entry-input`、`-entry-output`、`-parallel`、`-frames`、`-steps`、`-elements`、`-trace=false`。启动时核对 Host 合约，保持编译与运行的操作定义一致。纯核心与教学 Host 的 Go 部分仅依赖标准库；Python 操作需要对应运行环境；生成程序的 Go 包在构建时链接，部署后调用不需要工具链或 plugin。
 
 项目内缓存可通过 Makefile 使用：
 
@@ -568,7 +619,7 @@ request 提供 method、path、raw_path、host、params、query、headers、body
 
 默认时限 30 秒，请求/响应正文各 1 MiB，规范 Data 编码各 8 MiB，全路由最多同时处理 64 个请求。CLI 提供 `-timeout`、`-concurrent`、`-body-bytes`、`-response-bytes`、`-parallel`、`-frames`、`-steps`、`-elements`；零选择默认值，嵌入配置另有 `HTTPOptions.MaxDataBytes`。
 
-`serve` 使用纯核心或 `-host demo` 的显式合约。嵌入可用 `NewHTTPHandler` / `NewHTTPMux`，外接鉴权 middleware；Authorize 与操作接收同一 context，Host 和连接池由应用管理。`HTTPOptions.OnError` 接收服务端诊断，公开错误仅提供固定类别。HTTP 使用显式 Host 操作，通用原生桥接当前用于文件、会话与生成程序。完整契约见 [规范 §12.1](spec/LIP-1.0-SPEC.md#121-可选-http-host-接入)。
+`serve` 使用纯核心或 `-host demo` 的显式合约。嵌入可用 `NewHTTPHandler` / `NewHTTPMux`，外接鉴权 middleware；Authorize 与操作接收同一 context，Host 和连接池由应用管理。`HTTPOptions.OnError` 接收服务端诊断，公开错误仅提供固定类别。HTTP 使用显式 Host 操作，通用原生桥接当前用于文件、会话与生成程序。完整契约见 [规范 §12.1](spec/LIP-1.1-SPEC.md#121-可选-http-host-接入)。
 
 ## 嵌入与构建身份
 
@@ -619,7 +670,7 @@ cmd/lipc/  CLI、REPL、内置课程与 HTTP
 script/    编译、检查、求值、调度、Go 生成与 Host
 examples/  带注释的可执行程序
 tests/     核心规则与解释/生成一致性
-spec/      LIP 1.0 语言合约
+spec/      LIP 1.1 工作草案与保留的 1.0 语言合约
 ```
 
 核心与工具按职责集中维护。新的库能力优先通过 Go/Python 和 Host 接入，保持语言本身小而完整。

@@ -730,6 +730,136 @@ flow Main()->any {
 	}
 }
 
+// All argument actions belong to the caller cursor. Compare concrete results,
+// errors and action traces across nested Flow calls, dynamic functions, control
+// expressions, replay and actual generated programs.
+func TestFlowValueControlAndFailureComposition(t *testing.T) {
+	const source = `import host "composition"
+fn erase(value:any)->any{value}
+fn again(n:number,f:function)->any{if n==0 {f}else{again(n-1,f)}}
+fn request_a(n:number,value:number)->effect{if n==0 {effect composition.touch(value)}else{request_b(n-1,value)}}
+fn request_b(n:number,value:number)->effect{request_a(n,value)}
+flow Tap(value:number)->number{return perform effect composition.touch(value)}
+flow Echo(value:any)->any{return value}
+flow Add(x:number,y:number)->number{return x+y}
+flow Need(x:number,y:any)->number{Tap(99);return x}
+flow Execute(p:effect)->any{return perform p}
+flow Main(mode:string)->any{
+ return match mode {
+ "callee_bad"=>({Tap(1);erase(17)})(Tap(9)),
+ "arity"=>[fn(x:number)->number{x}][0](Tap(1),Tap(2)),
+ "named_arity"=>[fn(x:number)->number{x}][0](other=Tap(9)),
+ "argument_failure"=>Add(fail("first"),y=Tap(9)),
+ "function_type"=>[fn(x:number,y:number)->number{fail("body")}][0](erase("bad"),Tap(2)),
+ "flow_type"=>Need(erase("bad"),Tap(2)),
+ "function_named"=>[fn(x:number,y:number)->number{x*10+y}][0](y=Tap(2),x=Tap(1)),
+ "flow_named"=>Add(y=Tap(2),x=Tap(1)),
+ "pipeline"=>Tap(1) |>Add(y=Tap(2)),
+ "conditional"=>if true {Echo(fn(x:number)->number{x+1})(Tap(3))}else{Tap(99)},
+ "short_circuit"=>[false && (Tap(9)==9),true || (Tap(99)==99)],
+ "empty"=>[Echo(effect composition.touch(i)) for i in []],
+ "carry_effect"=>{p=for i in [1,2] with state=effect composition.touch(0) {value=Execute(Echo(state));next effect composition.touch(value+i)};Execute(p)},
+ "carry_function"=>{f=for i in [1,2,3] with state=fn(x:number)->number{x} {saved=Echo(state);next fn(x:number)->number{saved(x)+i}};Echo(f)(0)},
+ "closure_list"=>map([Echo(fn(x:number)->number{x+i}) for i in [1,2,3]],fn(f:function)->number{f(10)}),
+ "tail_callback"=>Echo(again(5000,fn(x:number)->number{x+1}))(3),
+ "recursive_request"=>perform request_b(5,4),
+ _=>fail("unknown test mode")
+ }
+}`
+	var mu sync.Mutex
+	var trace []int
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "composition", Member: "touch"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: WriteEffect,
+		Invoke: func(_ context.Context, r Request) Response {
+			mu.Lock()
+			trace = append(trace, int(num(r.Positional[0])))
+			mu.Unlock()
+			return Result(r.Positional[0])
+		},
+	}}}
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import("context";"fmt";"os")
+func generatedHost()(Host,error){return Host{Contracts:[]Contract{{Operation:Operation{Language:"host",Path:"composition",Member:"touch"},Version:"1",Params:[]Parameter{{Name:"value",Schema:Schema{Type:"number"}}},Result:Schema{Type:"number"},Effect:WriteEffect,Invoke:func(_ context.Context,r Request)Response{value,_:=r.Positional[0].Float();fmt.Fprintf(os.Stderr,"touch=%d\n",int(value));return Result(r.Positional[0])}}}},nil}`})
+	for _, test := range []struct{ mode, want, code, trace string }{
+		{"callee_bad", "", "E-TYPE", "[1]"},
+		{"arity", "", "E-ARITY", "[]"},
+		{"named_arity", "", "E-ARITY", "[]"},
+		{"argument_failure", "", "E-FAIL", "[]"},
+		{"function_type", "", "E-TYPE", "[2]"},
+		{"flow_type", "", "E-SCHEMA", "[2]"},
+		{"function_named", "12", "", "[2 1]"},
+		{"flow_named", "3", "", "[2 1]"},
+		{"pipeline", "3", "", "[1 2]"},
+		{"conditional", "4", "", "[3]"},
+		{"short_circuit", "[false,true]", "", "[]"},
+		{"empty", "[]", "", "[]"},
+		{"carry_effect", "3", "", "[0 1 3]"},
+		{"carry_function", "6", "", "[]"},
+		{"closure_list", "[11,12,13]", "", "[]"},
+		{"tail_callback", "4", "", "[]"},
+		{"recursive_request", "4", "", "[4]"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			for _, parallel := range []int{1, 7} {
+				mu.Lock()
+				trace = nil
+				mu.Unlock()
+				journal := NewMemoryJournal()
+				input := map[string]Value{"mode": textValue(test.mode)}
+				var diagnosticText string
+				for replay := 0; replay < 2; replay++ {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					r, runErr := p.Run(ctx, input, Options{Parallelism: parallel, RunID: "control-composition", Journal: journal})
+					cancel()
+					mu.Lock()
+					gotTrace := fmt.Sprint(trace)
+					mu.Unlock()
+					if gotTrace != test.trace {
+						t.Fatal(parallel, replay, "action trace", gotTrace, test.trace)
+					}
+					if test.code == "" {
+						if runErr != nil || display(t, r.Output) != test.want {
+							t.Fatal(parallel, replay, r, runErr)
+						}
+					} else {
+						if runErr == nil || r.Error == nil || r.Error.Code != test.code || len(r.Error.Position) == 0 {
+							t.Fatal(parallel, replay, r, runErr)
+						}
+						if replay != 0 && diagnosticText != runErr.Error() {
+							t.Fatal("replay changed diagnostic attribution", diagnosticText, runErr)
+						}
+						diagnosticText = runErr.Error()
+					}
+				}
+				stdout, stderr, nativeErr := runNative(t, exe, "-parallel", strconv.Itoa(parallel), "-input", `{"mode":"`+test.mode+`"}`)
+				var nativeTrace []int
+				for _, line := range strings.Split(stderr, "\n") {
+					if strings.HasPrefix(line, "touch=") {
+						n, err := strconv.Atoi(strings.TrimPrefix(line, "touch="))
+						if err != nil {
+							t.Fatal(line, err)
+						}
+						nativeTrace = append(nativeTrace, n)
+					}
+				}
+				if fmt.Sprint(nativeTrace) != test.trace {
+					t.Fatal("generated action trace", nativeTrace, stderr)
+				}
+				if test.code == "" {
+					if nativeErr != nil || strings.TrimSpace(stdout) != test.want {
+						t.Fatal(stdout, stderr, nativeErr)
+					}
+				} else if nativeErr == nil || stdout != "" || !strings.Contains(stderr, diagnosticText) {
+					t.Fatal("generated error attribution", diagnosticText, stdout, stderr, nativeErr)
+				}
+			}
+		})
+	}
+}
+
 func TestNullableAnyOperationSchemaUsesCoreTypeRules(t *testing.T) {
 	host := testHost(func(_ context.Context, request Request) Response { return Result(request.Positional[0]) })
 	host.Contracts[0].Params[0].Schema.Type = "any?"
@@ -1197,6 +1327,154 @@ flow Main()->number{values=[Child(x) for x in [1,2]];done=perform effect worker.
 		if err != nil || num(report.Output) != 9 || reads.Load() != 2 {
 			t.Fatal(report, err, reads.Load())
 		}
+	}
+}
+
+func TestAfterNestedCursorCompletion(t *testing.T) {
+	asObject := func(fields map[string]Value) Value {
+		t.Helper()
+		value, err := ObjectValue(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	p, err := Compile(`flow Value(n:number)->number{return n}
+flow Keep(value:any)->any{return value}
+flow Main(mode:string,flag:bool,xs:list)->any{
+ return match mode{
+  "branch"=>Keep(if flag {Value(9)}else{Value(1)}),
+  "short"=>Keep(flag && (Value(9)==9)),
+  "loop"=>Keep([Value(x) for x in xs]),
+  "local_loop"=>{for x in xs {Value(x)};Keep(1)},
+  "local_if"=>{if flag {Value(9)};Keep(1)},
+  "local_match"=>{match flag {true=>{Value(9)}};Keep(1)},
+  _=>Keep(Value(1))
+ }
+}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The trusted embedding harness supplies Host After through the same public
+	// Run API. Generated code remains compiled LIP, with no source interpreter.
+	exe, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import("context";"fmt";"os";"strconv")
+func generatedHost()(Host,error){return Host{},nil}
+func init(){
+ wire:=os.Getenv("LIP_TEST_AFTER");if wire==""{return}
+ constraint,err:=DecodeData([]byte(wire));if err!=nil{panic(err)};fields,_:=constraint.Fields()
+ input,err:=DecodeData([]byte(os.Getenv("LIP_TEST_AFTER_INPUT")));if err!=nil{panic(err)};args,_:=input.Fields()
+ parallel,_:=strconv.Atoi(os.Getenv("LIP_TEST_AFTER_PARALLEL"))
+ p,err:=generatedProgram(Host{});if err!=nil{panic(err)}
+ r,err:=p.Run(context.Background(),args,Options{Parallelism:parallel,After:[]After{{Target:fields["target"],Requires:fields["requires"]}}})
+ if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)};out,err:=Display(r.Output);if err!=nil{panic(err)};fmt.Println(out);os.Exit(0)
+}`})
+	for _, test := range []struct {
+		mode, want string
+		flag       bool
+		empty      bool
+		reverse    bool
+	}{
+		{"branch", "1", false, false, false}, {"branch", "9", true, false, false},
+		{"short", "false", false, false, false}, {"short", "true", true, false, false},
+		{"loop", "[1,2]", false, false, false}, {"loop", "[]", false, true, false},
+		{"local_loop", "1", false, false, false}, {"local_loop", "1", false, true, false},
+		{"local_if", "1", true, false, false}, {"local_if", "1", false, false, false},
+		{"local_match", "1", true, false, false}, {"local_match", "1", false, false, false},
+		{"direct", "1", false, false, false}, {"direct", "", false, false, true},
+	} {
+		t.Run(fmt.Sprintf("%s/%t/%t/%t", test.mode, test.flag, test.empty, test.reverse), func(t *testing.T) {
+			input := map[string]Value{"mode": textValue(test.mode), "flag": BoolValue(test.flag), "xs": ListValue(number(1), number(2))}
+			prefixes := map[int]Position{}
+			for _, flag := range []bool{true, false} {
+				input["flag"] = BoolValue(flag)
+				r, err := p.Run(context.Background(), input, Options{Parallelism: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, n := range r.Nodes {
+					if len(n.Position) > 1 {
+						prefix := n.Position[:len(n.Position)-1].Copy()
+						prefixes[prefix[len(prefix)-1].Site] = prefix
+					}
+				}
+			}
+			var sites []int
+			for site := range prefixes {
+				sites = append(sites, site)
+			}
+			sort.Ints(sites)
+			if len(sites) < 2 {
+				t.Fatal("missing invocation prefixes", prefixes)
+			}
+			input["flag"] = BoolValue(test.flag)
+			if test.empty {
+				input["xs"] = ListValue()
+			}
+			for _, selectorMode := range []int{0, 1, 2} {
+				dynamic := selectorMode == 1
+				if selectorMode == 2 && (test.mode != "direct" || test.reverse) {
+					continue
+				}
+				if dynamic && (test.mode == "loop" || test.mode == "local_loop") {
+					continue // Empty dynamic indices are covered by impossible-index tests.
+				}
+				selector := func(site int) Value {
+					if dynamic {
+						return ListValue(textValue("region"), textValue("flow"), prefixes[site].Wire())
+					}
+					return ListValue(textValue("site"), textValue("call"), textValue(strconv.Itoa(site)))
+				}
+				target, requires := sites[0], sites[1]
+				if strings.HasPrefix(test.mode, "local_") {
+					// Source order places the statement call before Keep here.
+					target, requires = requires, target
+				}
+				if selectorMode == 2 {
+					other := map[string]Value{"mode": textValue("branch"), "flag": BoolValue(true), "xs": ListValue()}
+					r, err := p.Run(context.Background(), other, Options{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Value(9) lies in a different, unselected outer match arm.
+					requires = 0
+					for _, n := range r.Nodes {
+						if len(n.Position) > 1 && n.Position[len(n.Position)-2].Site > requires {
+							requires = n.Position[len(n.Position)-2].Site
+						}
+					}
+				}
+				constraint := After{Target: selector(target), Requires: selector(requires)}
+				if test.reverse {
+					constraint.Target, constraint.Requires = constraint.Requires, constraint.Target
+				}
+				for _, parallel := range []int{1, 7} {
+					for repeat := 0; repeat < 10; repeat++ {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						r, err := p.Run(ctx, input, Options{Parallelism: parallel, After: []After{constraint}})
+						cancel()
+						if test.reverse {
+							if d, ok := err.(*Diagnostic); !ok || d.Code != "E-GRAPH-CYCLE" {
+								t.Fatal(dynamic, parallel, repeat, "accepted reversed cursor order", r, err)
+							}
+						} else if err != nil || display(t, r.Output) != test.want {
+							t.Fatal(dynamic, parallel, repeat, r, err)
+						}
+					}
+					t.Setenv("LIP_TEST_AFTER", display(t, asObject(map[string]Value{"target": constraint.Target, "requires": constraint.Requires})))
+					t.Setenv("LIP_TEST_AFTER_INPUT", display(t, asObject(input)))
+					t.Setenv("LIP_TEST_AFTER_PARALLEL", strconv.Itoa(parallel))
+					stdout, stderr, err := runNative(t, exe)
+					if test.reverse {
+						if err == nil || !strings.Contains(stderr, "E-GRAPH-CYCLE") {
+							t.Fatal(dynamic, parallel, stdout, stderr, err)
+						}
+					} else if err != nil || strings.TrimSpace(stdout) != test.want {
+						t.Fatal(dynamic, parallel, stdout, stderr, err)
+					}
+				}
+			}
+		})
 	}
 }
 

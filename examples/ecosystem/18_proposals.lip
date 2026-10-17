@@ -8,9 +8,12 @@ fn upper_request(value:string)->effect { effect text.ToUpper(value) }
 # Ordinary fn parameters/results can carry requests. This generic parameter has
 # Unknown Ops, so forwarding works sequentially but cannot establish parallel safety.
 fn forward(request:effect)->effect { request }
+# Same-run Flows can return a request or receive one for execution.
+flow Prepare(value:string)->effect { return upper_request(value) }
+flow Execute(request:effect)->any { return perform request }
 flow Main() -> object {
-    request = upper_request("hello")
-    result = perform request
+    request = Prepare("hello")
+    result = Execute(request)
     # A recorded external result can become an argument to the next request.
     repeated = perform forward(upper_request(result + ", lip"))
     # The operation's result schema decides the type: string above, number here.

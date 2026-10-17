@@ -29,6 +29,7 @@ func serve(ctx context.Context, args []string) error {
 	steps := flags.Int64("steps", 1000000, "step budget per request")
 	elements := flags.Int64("elements", 100000, "list budget per request")
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget per request (0 uses default)")
+	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -90,9 +91,15 @@ func serve(ctx context.Context, args []string) error {
 		}
 		compiled = append(compiled, script.HTTPRoute{Pattern: route.pattern, Program: program})
 	}
+	var traces *script.TraceBuffer
+	if *trace {
+		var stop func()
+		traces, stop = script.StartTraceOutput(os.Stderr)
+		defer stop()
+	}
 	handler, err := script.NewHTTPMux(compiled, script.HTTPOptions{
 		Timeout: *timeout, MaxBodyBytes: *bodyLimit, MaxResponseBytes: *responseLimit, MaxConcurrentRequests: *concurrent,
-		Run: script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxFrames: *frames},
+		Run: script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxFrames: *frames, Trace: traces},
 		OnError: func(r *http.Request, report script.Report, err error) {
 			fmt.Fprintf(os.Stderr, "HTTP %s %q: %v\n", r.Method, r.URL.Path, err)
 		},

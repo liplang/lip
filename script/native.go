@@ -62,11 +62,37 @@ type nativeStaticValue struct{ typ types.Type }
 // Native syntax provenance is independent of the normative type/effect system.
 // Functions retain their result shape with their frozen lexical captures.
 type nativeShape struct {
+	builtin      string
 	native       bool
 	fields       map[string]nativeShape
 	items        []nativeShape
 	item, result *nativeShape
 	source       *expression
+	params       []nativeParameter
+	refs         []nativeShapeReference
+}
+
+// Symbolic return provenance records only parameter identities and projections,
+// never syntax or runtime values. This keeps session closures small and allows
+// return shapes to distinguish unused inputs from values actually returned.
+type nativeParameter struct {
+	name  string
+	index int
+	key   *nativeParameterKey
+}
+type nativeParameterKey struct{ name string }
+type nativeShapeReference struct {
+	key  *nativeParameterKey
+	path []nativeProjection
+}
+type nativeProjection struct {
+	kind, name string
+	index      int
+	args       []nativeArgumentShape
+}
+type nativeArgumentShape struct {
+	name  string
+	shape nativeShape
 }
 
 func (n *NativeLibraries) freezeStatic() { n.mu.Lock(); defer n.mu.Unlock(); n.static = true }
@@ -225,6 +251,33 @@ func (n *NativeLibraries) endRun(run nativeRun, values []Value) error {
 		}
 	}
 	return nil
+}
+
+// nativeReceiver fixes only a dotted receiver's ordinary wrapper path. It never
+// reads native properties, executes a callable, or changes the original object.
+// Keeping the wrapper keys lets the authorized native call resolve its original
+// operation path, including attributes that are unknown until perform.
+func nativeReceiver(value Value, path string) Value {
+	var prefix []string
+	for _, name := range strings.Split(path, ".") {
+		if value.k != Object {
+			break
+		}
+		if ref, native := value.o[nativeReferenceKey]; native && ref.k == Object {
+			break
+		}
+		next, ok := value.o[name]
+		if !ok {
+			value = object(nil)
+			break
+		}
+		prefix = append(prefix, name)
+		value = next
+	}
+	for i := len(prefix) - 1; i >= 0; i-- {
+		value = object(map[string]Value{prefix[i]: value})
+	}
+	return value
 }
 
 // NativeDescription does not inspect or call the referenced object.

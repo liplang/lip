@@ -63,68 +63,51 @@ SYSTEM_PROMPT: string = """
 """
 
 # 这是给模型看的工具说明；下方 LIP Flow 负责参数检查和显式分派。
-TOOLS: list = [
-    {type: "function", function: {
-        name: "calculate",
-        description: "仅用于普通数字四则计算，返回数值结果 value 和记录 id，自动保存。小数不是时刻；时间偏移使用 shift_time。a、b 必须是 JSON 数字。",
-        parameters: {
-            type: "object",
-            properties: {
+fn Tool(name: string, description: string, properties: object, required: list) -> object {
+    parameters = {type: "object", properties: properties, additionalProperties: false}
+    schema = if len(required) == 0 { parameters } else { put(parameters, "required", required) }
+    {type: "function", function: {name: name, description: description, parameters: schema}}
+}
+
+fn BuildTools() -> list {
+    [
+        Tool("calculate",
+            "仅用于普通数字四则计算，返回数值结果 value 和记录 id，自动保存。小数不是时刻；时间偏移使用 shift_time。a、b 必须是 JSON 数字。", {
                 operation: {type: "string", enum: ["add", "subtract", "multiply", "divide"]},
                 a: {type: "number", description: "左操作数"},
                 b: {type: "number", description: "右操作数"},
                 label: {type: "string", description: "可选用途或备注，最多 500 字"}
-            },
-            required: ["operation", "a", "b"], additionalProperties: false
-        }
-    }},
-    {type: "function", function: {
-        name: "get_current_time",
-        description: "读取当前本地时间。display 可直接回答用户，value 是带时区偏移的 ISO 8601；无需再次转换时区。本轮系统消息已有当前时间时不必重复读取。",
-        parameters: {type: "object", properties: {}, additionalProperties: false}
-    }},
-    {type: "function", function: {
-        name: "shift_time",
-        description: "计算从现在起指定小时、分钟、秒后的本地日期和时刻，可跨日；负数表示之前。直接引用 display。例：31小时52分钟传 hours=31, minutes=52；无需先读取时间或做四则计算。",
-        parameters: {type: "object", properties: {
-            hours: {type: "number", description: "可选，小时数，默认 0"},
-            minutes: {type: "number", description: "可选，分钟数，默认 0"},
-            seconds: {type: "number", description: "可选，秒数，默认 0"}
-        }, additionalProperties: false}
-    }},
-    {type: "function", function: {
-        name: "list_calculations",
-        description: "从本地数据库查询历史计算，跨会话有效，按最新在前返回操作数、结果、备注、时间和 id。",
-        parameters: {type: "object", properties: {
-            query: {type: "string", description: "可选，按 label 包含的文字筛选"},
-            limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
-        }, additionalProperties: false}
-    }},
-    {type: "function", function: {
-        name: "set_reminder",
-        description: "保存一次性提醒，到点在终端主动提示。after_seconds 与 at 必须且只能提供一个。程序需保持运行，重启补发到期提醒。",
-        parameters: {type: "object", properties: {
-            message: {type: "string", description: "提醒内容，1–500 字"},
-            after_seconds: {type: "number", description: "从现在起多少秒后提醒，大于 0，最多 366 天"},
-            at: {type: "string", description: "带时区的未来 RFC 3339 时间，例如 2026-10-16T18:30:00+08:00"}
-        }, required: ["message"], additionalProperties: false}
-    }},
-    {type: "function", function: {
-        name: "list_reminders",
-        description: "查询已保存的提醒，返回 id、内容、到期时间、状态；默认仅列待触发的提醒。",
-        parameters: {type: "object", properties: {
-            status: {type: "string", enum: ["pending", "delivered", "cancelled", "all"]},
-            limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
-        }, additionalProperties: false}
-    }},
-    {type: "function", function: {
-        name: "cancel_reminder",
-        description: "按查询工具返回的 id 取消一条尚未触发的提醒。",
-        parameters: {type: "object", properties: {
-            id: {type: "string", description: "提醒 id，例如 1，以字符串传入"}
-        }, required: ["id"], additionalProperties: false}
-    }}
-]
+            }, ["operation", "a", "b"]),
+        Tool("get_current_time",
+            "读取当前本地时间。display 可直接回答用户，value 是带时区偏移的 ISO 8601；无需再次转换时区。本轮系统消息已有当前时间时不必重复读取。", {}, []),
+        Tool("shift_time",
+            "计算从现在起指定小时、分钟、秒后的本地日期和时刻，可跨日；负数表示之前。直接引用 display。例：31小时52分钟传 hours=31, minutes=52；无需先读取时间或做四则计算。", {
+                hours: {type: "number", description: "可选，小时数，默认 0"},
+                minutes: {type: "number", description: "可选，分钟数，默认 0"},
+                seconds: {type: "number", description: "可选，秒数，默认 0"}
+            }, []),
+        Tool("list_calculations",
+            "从本地数据库查询历史计算，跨会话有效，按最新在前返回操作数、结果、备注、时间和 id。", {
+                query: {type: "string", description: "可选，按 label 包含的文字筛选"},
+                limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
+            }, []),
+        Tool("set_reminder",
+            "保存一次性提醒，到点在终端主动提示。after_seconds 与 at 必须且只能提供一个。程序需保持运行，重启补发到期提醒。", {
+                message: {type: "string", description: "提醒内容，1–500 字"},
+                after_seconds: {type: "number", description: "从现在起多少秒后提醒，大于 0，最多 366 天"},
+                at: {type: "string", description: "带时区的未来 RFC 3339 时间，例如 2026-10-16T18:30:00+08:00"}
+            }, ["message"]),
+        Tool("list_reminders",
+            "查询已保存的提醒，返回 id、内容、到期时间、状态；默认仅列待触发的提醒。", {
+                status: {type: "string", enum: ["pending", "delivered", "cancelled", "all"]},
+                limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
+            }, []),
+        Tool("cancel_reminder",
+            "按查询工具返回的 id 取消一条尚未触发的提醒。", {
+                id: {type: "string", description: "提醒 id，例如 1，以字符串传入"}
+            }, ["id"])
+    ]
+}
 
 # 只按完整用户轮次裁剪，保留 assistant 工具调用与对应的全部观察。
 fn TrimHistory(messages: list) -> list {
@@ -157,6 +140,7 @@ fn ValidFields(args: object, required: list, optional: list) -> bool {
 }
 
 fn IsNumber(value: any) -> bool { match value { number => true, _ => false } }
+
 fn ValidLimit(value: any) -> bool {
     match value { number => value >= 1 && value <= 100 && value % 1 == 0, _ => false }
 }
@@ -261,18 +245,18 @@ flow ShiftTime(args: object) -> object {
     return result
 }
 
-# SQL 参数始终单独传入；关闭游标，不在聊天历史中保存数据库资源。
-flow Query(db: object, sql: string, args: list) -> list {
-    cursor = perform effect db.execute(sql, args)
+# SQL requests yield SQLite cursors; each Flow closes and releases its cursor.
+flow Query(request: effect) -> list {
+    cursor = perform request
     rows = perform effect cursor.fetchall()
     perform effect cursor.close()
     native_release(cursor)
     return rows
 }
 
-flow Write(db: object, sql: string, args: list) -> number {
-    cursor = perform effect db.execute(sql, args)
-    changed = cursor.rowcount
+flow Write(request: effect) -> number {
+    cursor = perform request
+    changed = py.getattr(cursor, "rowcount")
     perform effect cursor.close()
     native_release(cursor)
     return changed
@@ -346,8 +330,8 @@ END;
     runtime = {db: db, timers: timers, path: location}
     # 重启时补发到期提醒；未来提醒恢复为标准库 Timer。
     now = seconds.time()
-    Write(db, "UPDATE reminders SET status='delivered' WHERE status='pending' AND due_at<=?", [now])
-    pending = Query(db, "SELECT CAST(id AS TEXT), due_at FROM reminders WHERE status='pending'", [])
+    Write(effect db.execute("UPDATE reminders SET status='delivered' WHERE status='pending' AND due_at<=?", [now]))
+    pending = Query(effect db.execute("SELECT CAST(id AS TEXT), due_at FROM reminders WHERE status='pending'", []))
     for row in pending {
         id = row[0]
         due = row[1]
@@ -395,11 +379,10 @@ flow Calculate(runtime: object, args: object) -> object {
             string => {
                 calculated = Arithmetic(args.operation, args.a, args.b)
                 if !calculated.ok { calculated } else {
-                    stamp = seconds.time()
-                    created = Timestamp(stamp)
-                    Write(runtime.db, "INSERT INTO calculations(operation,a,b,value,label,created_at) VALUES(?,?,?,?,?,?)",
-                        [args.operation, args.a, args.b, calculated.value, label, created])
-                    rows = Query(runtime.db, "SELECT CAST(last_insert_rowid() AS TEXT)", [])
+                    created = Timestamp(seconds.time())
+                    Write(effect runtime.db.execute("INSERT INTO calculations(operation,a,b,value,label,created_at) VALUES(?,?,?,?,?,?)",
+                        [args.operation, args.a, args.b, calculated.value, label, created]))
+                    rows = Query(effect runtime.db.execute("SELECT CAST(last_insert_rowid() AS TEXT)", []))
                     {ok: true, saved: true, id: rows[0][0], value: calculated.value}
                 }
             },
@@ -416,9 +399,9 @@ flow ListCalculations(runtime: object, args: object) -> object {
     result = if !ValidFields(args, [], ["query", "limit"]) || !valid_query || !ValidLimit(limit) {
         {ok: false, error: "query 为文本，limit 为 1–100 的整数"}
     } else {
-        rows = Query(runtime.db,
+        rows = Query(effect runtime.db.execute(
             "SELECT CAST(id AS TEXT),operation,a,b,value,label,created_at FROM calculations WHERE instr(label,?)>0 ORDER BY id DESC LIMIT ?",
-            [query, limit])
+            [query, limit]))
         {ok: true, calculations: [{id: row[0], operation: row[1], a: row[2], b: row[3],
             value: row[4], label: row[5], created_at: row[6]} for row in rows]}
     }
@@ -452,9 +435,9 @@ flow SetReminder(runtime: object, args: object) -> object {
     result = if !deadline.ok { deadline } else {
         created = Timestamp(now)
         due_text = Timestamp(deadline.due)
-        Write(runtime.db, "INSERT INTO reminders(message,due_at,status,created_at) VALUES(?,?,'pending',?)",
-            [message, deadline.due, created])
-        rows = Query(runtime.db, "SELECT CAST(last_insert_rowid() AS TEXT)", [])
+        Write(effect runtime.db.execute("INSERT INTO reminders(message,due_at,status,created_at) VALUES(?,?,'pending',?)",
+            [message, deadline.due, created]))
+        rows = Query(effect runtime.db.execute("SELECT CAST(last_insert_rowid() AS TEXT)", []))
         id = rows[0][0]
         StartTimer(runtime, id, deadline.due)
         {ok: true, id: id, message: message, due_at: due_text, status: "pending"}
@@ -469,9 +452,9 @@ flow ListReminders(runtime: object, args: object) -> object {
         !Includes(["pending", "delivered", "cancelled", "all"], status) || !ValidLimit(limit)) {
         {ok: false, error: "status 必须为 pending/delivered/cancelled/all，limit 为 1–100 的整数"}
     } else {
-        rows = Query(runtime.db,
+        rows = Query(effect runtime.db.execute(
             "SELECT CAST(id AS TEXT),message,due_at,status,created_at FROM reminders WHERE (?='all' OR status=?) ORDER BY due_at,id LIMIT ?",
-            [status, status, limit])
+            [status, status, limit]))
         reminders = for row in rows with items = [] {
             due_text = Timestamp(row[2])
             next concat(items, [{id: row[0], message: row[1], due_at: due_text, status: row[3], created_at: row[4]}])
@@ -490,7 +473,7 @@ flow CancelReminder(runtime: object, args: object) -> object {
     result = if !ValidFields(args, ["id"], []) || !valid_id {
         {ok: false, error: "id 必须是查询返回的提醒编号字符串"}
     } else {
-        changed = Write(runtime.db, "UPDATE reminders SET status='cancelled' WHERE CAST(id AS TEXT)=? AND status='pending'", [id])
+        changed = Write(effect runtime.db.execute("UPDATE reminders SET status='cancelled' WHERE CAST(id AS TEXT)=? AND status='pending'", [id]))
         if changed == 0 { {ok: false, error: "找不到尚未触发的提醒"} } else {
             ReapTimers(runtime, id)
             {ok: true, id: id, status: "cancelled"}
@@ -507,8 +490,7 @@ flow DispatchTool(runtime: object, name: string, args: any) -> object {
             "calculate" => Calculate(runtime, args),
             "get_current_time" => {
                 if len(args) != 0 { {ok: false, error: "get_current_time 不接受参数"} } else {
-                    now = seconds.time()
-                    LocalTime(now)
+                    LocalTime(seconds.time())
                 }
             },
             "shift_time" => ShiftTime(args),
@@ -660,10 +642,10 @@ flow ReadPrompt(input: object) -> object {
 }
 
 # 明确的闲聊/使用反馈不提供工具；其余消息仍由模型选择工具，保留指代能力。
-flow ToolsFor(text: string) -> list {
+flow ToolsFor(text: string, available: list) -> list {
     task = re.search("提醒|计算|记录|几点|时间|小时|分钟|秒|[0-9]", text)
     chat = re.search("你是什么|你是.*助手|你.*agent|编辑体验|响应速度|删除不掉|退格|输入体验|^你好[！!。 ]*$|^谢谢", text)
-    tools = if task == null && chat != null { [] } else { TOOLS }
+    tools = if task == null && chat != null { [] } else { available }
     if task != null { native_release(task) }
     if chat != null { native_release(chat) }
     return tools
@@ -682,45 +664,53 @@ flow AfterCommand(text: string) -> object {
     return result
 }
 
-# 发起一轮模型请求。正文流式显示；thinking 与工具调用也完整保留到历史。
-# SDK 负责协议解析和响应校验；连接、HTTP、超时等异常沿 bridge 报错。
-flow StreamReply(client: object, messages: list, tools: list, terminal: bool) -> object {
+# 读取并固定一个分块；收到 done 前意外结束时先关闭流，再报告错误。
+flow DecodeChunk(raw: any, stream: any) -> object {
+    chunk = if raw == null {
+        perform effect stream.close()
+        fail("Ollama 响应提前结束：尚未收到 done=true")
+    } else {
+        snapshot = perform effect raw.model_dump(mode="json")
+        native_release(raw)
+        snapshot
+    }
+    return chunk
+}
+
+# 分块的默认字段和历史累积是纯计算，终端显示单独处理。
+fn MergeChunk(state: object, message: object) -> object {
+    content = Get(message, "content", null)
+    thinking = Get(message, "thinking", null)
+    calls = Get(message, "tool_calls", null)
+    {
+        content: state.content + if content == null { "" } else { content },
+        thinking: state.thinking + if thinking == null { "" } else { thinking },
+        tool_calls: concat(state.tool_calls, if calls == null { [] } else { calls }),
+        started: state.started || (content != null && content != "")
+    }
+}
+
+flow ShowChunk(message: object, started: bool, terminal: bool) -> void {
+    content = Get(message, "content", null)
+    if content != null && content != "" {
+        if !started {
+            if terminal { fmt.Print("\r\u{1b}[2K") }
+            fmt.Print("助手> ")
+        }
+        fmt.Print(content)
+    }
+}
+
+# 发起一轮模型请求。正文流式显示；thinking 与工具调用完整保留到历史。
+flow StreamReply(request: effect, terminal: bool) -> object {
     if terminal { fmt.Print("助手> 等待模型…") }
-    setting = os.Getenv("LIP_CHAT_MODEL")
-    model = if setting == "" { MODEL } else { setting }
-    stream = perform effect client.chat(model=model, messages=messages, tools=tools, stream=true,
-        keep_alive="30m", options={temperature: 0.2, num_predict: 1024})
+    stream = perform request
     # next 是 LIP 关键字，通过 getattr 取得 Python 的迭代函数。
     read_next = py.getattr(py, "next")
     answer = for with s = {content: "", thinking: "", tool_calls: [], started: false} {
-        raw = read_next(stream, null)
-        chunk = if raw == null {
-            perform effect stream.close()
-            fail("Ollama 响应提前结束：尚未收到 done=true")
-        } else {
-            snapshot = perform effect raw.model_dump(mode="json")
-            # 转成 Data 后即释放分块对象，长时间流式聊天不积累原生引用。
-            native_release(raw)
-            snapshot
-        }
-        # SDK 对象转为普通 Data，历史中不保留 Python 对象引用。
-        message = chunk.message
-        content = if message.content != null { message.content } else { "" }
-        thinking = if message.thinking != null { message.thinking } else { "" }
-        calls = if message.tool_calls != null { message.tool_calls } else { [] }
-        if content != "" {
-            if !s.started {
-                if terminal { fmt.Print("\r\u{1b}[2K") }
-                fmt.Print("助手> ")
-            }
-            fmt.Print(content)
-        }
-        updated = {
-            content: s.content + content,
-            thinking: s.thinking + thinking,
-            tool_calls: concat(s.tool_calls, calls),
-            started: s.started || content != ""
-        }
+        chunk = DecodeChunk(read_next(stream, null), stream)
+        ShowChunk(chunk.message, s.started, terminal)
+        updated = MergeChunk(s, chunk.message)
         if chunk.done == true { break updated } else { next updated }
     }
     perform effect stream.close()
@@ -730,19 +720,25 @@ flow StreamReply(client: object, messages: list, tools: list, terminal: bool) ->
     return {role: "assistant", content: answer.content, thinking: answer.thinking, tool_calls: answer.tool_calls}
 }
 
+# 顺序执行模型本轮提出的工具，将每个观察追加到历史。
+flow RunTools(runtime: object, calls: list, tools: list, pending: list) -> list {
+    history = for call in calls with messages = pending {
+        observation = RunTool(runtime, call, tools)
+        next concat(messages, [observation])
+    }
+    return history
+}
+
 # agent 的核心：模型决策 → 执行本轮全部工具 → 反馈结果 → 再次决策。
 # 一轮可以提出多个调用；原型按返回顺序执行。没有工具调用就完成当前输入。
-flow RunAgent(client: object, runtime: object, messages: list, tools: list, terminal: bool) -> list {
+flow RunAgent(request: function, runtime: object, messages: list, tools: list, terminal: bool) -> list {
     result = for step in range(MAX_STEPS) with s = {messages: messages, done: false} {
-        reply = StreamReply(client, s.messages, tools, terminal)
+        reply = StreamReply(request(s.messages, tools), terminal)
         pending = concat(s.messages, [reply])
         if len(reply.tool_calls) == 0 {
             break {messages: pending, done: true}
         } else {
-            updated = for call in reply.tool_calls with history = pending {
-                observation = RunTool(runtime, call, tools)
-                next concat(history, [observation])
-            }
+            updated = RunTools(runtime, reply.tool_calls, tools, pending)
             next {messages: updated, done: false}
         }
     }
@@ -752,79 +748,100 @@ flow RunAgent(client: object, runtime: object, messages: list, tools: list, term
     return result.messages
 }
 
-# 外层只处理用户会话；一条输入可以触发 agent 内的多次模型/工具往返。
-flow Main() -> void {
-    # 普通行输入/模型执行期间使用系统 Ctrl-C；编辑期间由 prompt_toolkit 处理按键。
-    signal.Reset()
-    input = OpenInput()
-    model_setting = os.Getenv("LIP_CHAT_MODEL")
-    model = if model_setting == "" { MODEL } else { model_setting }
+# 模型连接与请求配置集中于此；返回的闭包固定本次会话的 client 和 model。
+flow OpenModel() -> object {
+    setting = os.Getenv("LIP_CHAT_MODEL")
+    model = if setting == "" { MODEL } else { setting }
     client = ollama.Client(host=HOST, timeout=TIMEOUT_SECONDS)
-    runtime = OpenStore()
+    request = fn(messages: list, tools: list) -> effect {
+        effect client.chat(model=model, messages=messages, tools=tools, stream=true,
+            keep_alive="30m", options={temperature: 0.2, num_predict: 1024})
+    }
+    return {name: model, client: client, request: request}
+}
+
+flow Welcome(model: string, input: object, runtime: object) -> void {
     fmt.Println("Ollama agent · " + model + "（/help 帮助，/exit 退出）")
     database_path = runtime.path
     fmt.Println("计算和提醒保存至：" + database_path + "；提醒需要保持程序运行。")
-    now = seconds.time()
-    local = LocalTime(now)
+    local = LocalTime(seconds.time())
     fmt.Println("本地时间：" + local.display + " · " + local.timezone)
     if input.terminal { fmt.Println("方向键编辑/历史；Ctrl-A/E 行首/尾；Ctrl-U 删至行首；Ctrl-R 搜索；Ctrl-C 取消输入；Ctrl-D 退出。") }
+}
+
+# 命令返回是否已处理及新的历史；未知输入交由聊天流程处理。
+flow RunCommand(runtime: object, text: string, messages: list) -> object {
+    result = match text {
+        "/help" => {
+            fmt.Println("/time 本地时间；/after 31h52m 时间偏移；/new 清空聊天；/calculations 最近计算；/reminders 待办提醒；/exit 退出。可直接说：10 秒后提醒我喝水；计算 123*456 并标记为采购预算。")
+            {handled: true, messages: messages}
+        },
+        "/new" => {
+            fmt.Println("已清空聊天上下文。")
+            {handled: true, messages: [{role: "system", content: SYSTEM_PROMPT}]}
+        },
+        "/time" => {
+            current = DispatchTool(runtime, "get_current_time", {})
+            fmt.Println("助手> " + current.display + " · " + current.timezone)
+            {handled: true, messages: messages}
+        },
+        "/calculations", "/reminders" => {
+            tool = if text == "/calculations" { "list_calculations" } else { "list_reminders" }
+            records = DispatchTool(runtime, tool, {})
+            encoded = json.dumps(records, ensure_ascii=false)
+            fmt.Println(encoded)
+            {handled: true, messages: messages}
+        },
+        _ => if strings.HasPrefix(text, "/after") {
+            shifted = AfterCommand(text)
+            answer = if shifted.ok { shifted.display } else { shifted.error }
+            fmt.Println("助手> " + answer)
+            {handled: true, messages: messages}
+        } else { {handled: false, messages: messages} }
+    }
+    return result
+}
+
+# 每次用户输入重新注入时间，并按完整轮次裁剪历史。
+flow ChatTurn(request: function, runtime: object, text: string, messages: list, available: list, terminal: bool) -> list {
+    current_time = DispatchTool(runtime, "get_current_time", {})
+    time_json = json.dumps(current_time, ensure_ascii=false)
+    context = {role: "system", content: SYSTEM_PROMPT + "\n本轮当前时间：" + time_json}
+    recent = TrimHistory(concat(messages, [{role: "user", content: text}]))
+    pending = concat([context], recent[1:])
+    tools = ToolsFor(text, available)
+    return RunAgent(request, runtime, pending, tools, terminal)
+}
+
+# 外层只处理会话；一条输入的模型/工具往返由 RunAgent 完成。
+flow Conversation(request: function, runtime: object, input: object, tools: list) -> void {
     history = for with messages = [{role: "system", content: SYSTEM_PROMPT}] {
         prompt = ReadPrompt(input)
         match prompt.kind {
             "exit" => { break messages }
             "empty" => { next messages }
             _ => {
-                match prompt.text {
-                    "/help" => {
-                        fmt.Println("/time 本地时间；/after 31h52m 时间偏移；/new 清空聊天；/calculations 最近计算；/reminders 待办提醒；/exit 退出。可直接说：10 秒后提醒我喝水；计算 123*456 并标记为采购预算。")
-                        next messages
-                    },
-                    "/new" => {
-                        fmt.Println("已清空聊天上下文。")
-                        next [{role: "system", content: SYSTEM_PROMPT}]
-                    },
-                    "/time" => {
-                        current = DispatchTool(runtime, "get_current_time", {})
-                        fmt.Println("助手> " + current.display + " · " + current.timezone)
-                        next messages
-                    },
-                    "/calculations" => {
-                        records = DispatchTool(runtime, "list_calculations", {})
-                        text = json.dumps(records, ensure_ascii=false)
-                        fmt.Println(text)
-                        next messages
-                    },
-                    "/reminders" => {
-                        records = DispatchTool(runtime, "list_reminders", {})
-                        text = json.dumps(records, ensure_ascii=false)
-                        fmt.Println(text)
-                        next messages
-                    },
-                    _ => {
-                        after = strings.HasPrefix(prompt.text, "/after")
-                        if after {
-                            shifted = AfterCommand(prompt.text)
-                            text = if shifted.ok { shifted.display } else { shifted.error }
-                            fmt.Println("助手> " + text)
-                            next messages
-                        } else {
-                            current_time = DispatchTool(runtime, "get_current_time", {})
-                            time_json = json.dumps(current_time, ensure_ascii=false)
-                            context = {role: "system", content: SYSTEM_PROMPT + "\n本轮当前时间：" + time_json}
-                            recent = TrimHistory(concat(messages, [{role: "user", content: prompt.text}]))
-                            pending = concat([context], recent[1:])
-                            tools = ToolsFor(prompt.text)
-                            updated = RunAgent(client, runtime, pending, tools, input.terminal)
-                            next updated
-                        }
-                    }
+                command = RunCommand(runtime, prompt.text, messages)
+                updated = if command.handled { command.messages } else {
+                    ChatTurn(request, runtime, prompt.text, messages, tools, input.terminal)
                 }
+                next updated
             }
         }
     }
+}
+
+flow Main() -> void {
+    # 普通行输入/模型执行期间使用系统 Ctrl-C；编辑期间由 prompt_toolkit 处理按键。
+    signal.Reset()
+    input = OpenInput()
+    model = OpenModel()
+    runtime = OpenStore()
+    Welcome(model.name, input, runtime)
+    Conversation(model.request, runtime, input, BuildTools())
     ReapTimers(runtime, "*")
     perform effect runtime.db.close()
-    perform effect client.close()
+    perform effect model.client.close()
     if input.terminal { perform effect input.reader.close() }
     native_release(input.reader)
     fmt.Println("\n会话结束。")

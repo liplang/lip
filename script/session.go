@@ -427,8 +427,10 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (result
 		return CellResult{}, err
 	}
 	nativeValues := copyValues(s.values)
-	for name := range s.flows {
-		nativeValues[name] = NullValue()
+	for name, f := range s.flows {
+		// Retained Flow definitions are not runtime values. A private shape-only
+		// carrier lets lowering use their frozen returns before graph cloning.
+		nativeValues[name] = Value{k: Function, f: &function{nativeResult: f.nativeResult, nativeParams: f.nativeParams}}
 	}
 	initial := map[string]bindingInfo{}
 	for name, value := range s.values {
@@ -648,6 +650,10 @@ Enter LIP expressions, statements, fn/Flow declarations, static Data, exports, a
 Lists support a[-1], a[[2,0,-1]], and a[start:stop:step]; a[::-1] reverses a list.
 Strings support scalar indices and slices by Unicode scalar; slice bounds clip and step cannot be zero.
 Named fn/Flow and pure core functions support |> pipelines. Declare a Flow, then call it by name or through |>.
+Flow arguments/results may carry functions, effects, and nested containers; Flow itself is not a value.
+fn may use print/log/telemetry for one-way diagnostics. They return null; delivery never changes computation.
+CLI diagnostics use stderr; -trace=false disables delivery, including inherited :run, without skipping argument checks.
+Arguments run in source order and may contain calls. Entry JSON, Host calls, and Claims still require Data.
 Claims collect facts with provenance. Complete reads wait for all contributions; active stores last one cell or Flow invocation.
 Use :begin / :end for a whole script, forward declarations, or Claim declaration/join/read in one cell.
 Non-tail calls default to 10,000 active frames per evaluation; CLI -frames selects the budget. Tail calls reuse frames. Exhaustion reports E-BUDGET without committing bindings; later cells can run.
@@ -668,6 +674,9 @@ The REPL displays expression and binding results. fmt.Print/Printf/Println retur
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
 
 var sessionBuiltinHelp = map[string]string{
+	"print":        "print(value) -> null\nEmit a bounded diagnostic display without computational feedback; allowed in fn. CLI output goes to stderr.",
+	"log":          "log(level:string, value) -> null\nEmit a labelled diagnostic; delivery failure does not change computation. Allowed in fn.",
+	"telemetry":    "telemetry(name:string, fields:object) -> null\nEmit a one-way diagnostic event; no acknowledgement or exactly-once guarantee. Allowed in fn.",
 	"len":          "len(value) -> number\nReturn the Unicode scalar count, list length, or object field count.",
 	"str":          "str(value) -> string\nReturn strings unchanged; encode other Data as canonical JSON without whitespace.",
 	"range":        "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",

@@ -707,3 +707,46 @@ func TestHTTPIndexAndSlice(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPDiagnosticsStayOutsideResponse(t *testing.T) {
+	p := webProgram(t, `flow Main(request:object)->object{log("request",request.path);return {status:200,json:{ok:true}}}`, Host{})
+	traces, err := NewTraceBuffer(32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHTTPHandler(p, HTTPOptions{Run: Options{Trace: traces, Parallelism: 7}, MaxConcurrentRequests: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest("GET", fmt.Sprintf("/trace/%d", i), nil))
+			if response.Code != 200 || strings.TrimSpace(response.Body.String()) != `{"ok":true}` {
+				t.Error(response.Code, response.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+	events := traceEvents(traces)
+	runs := map[string]bool{}
+	paths := map[string]bool{}
+	for _, event := range events {
+		if event.Level != "request" || event.RunID == "" || runs[event.RunID] || paths[event.Text] {
+			t.Fatal(event)
+		}
+		runs[event.RunID], paths[event.Text] = true, true
+	}
+	if len(events) != 8 {
+		t.Fatal(events)
+	}
+	// A closed receiver cannot turn a successful HTTP response into an error.
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/closed", nil))
+	if response.Code != 200 || traces.Dropped() != 1 {
+		t.Fatal(response.Code, traces.Dropped())
+	}
+}

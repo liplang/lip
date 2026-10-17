@@ -48,6 +48,8 @@ type Options struct {
 	MaxFrames int
 	Journal   *MemoryJournal
 	After     []After
+	// Trace receives bounded diagnostic snapshots; nil disables delivery.
+	Trace *TraceBuffer
 }
 
 // After adds a completion dependency between nodes, regions, or static sites.
@@ -296,7 +298,7 @@ func (p *Program) runBound(ctx context.Context, inputs map[string]Value, opts Op
 		if _, retained := saved[name]; p.syntax.cell && retained {
 			continue
 		}
-		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env, nativeResult: e.nativeResult}}
+		env.values[name] = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: env, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
 	}
 	// Install every function before freezing captures so mutual recursion keeps
 	// the original function identities without retaining unrelated globals.
@@ -427,6 +429,7 @@ type node struct {
 	resume       chan flowResult
 	parked       bool
 	called       map[int]bool
+	closedCalls  map[int]bool
 	localRanges  sync.Map
 	stmt         *statement
 	env          *environment
@@ -499,6 +502,7 @@ type permitRequest struct {
 	resume chan flowResult
 }
 type nodeEvent struct {
+	closedCalls []int
 	permit      *permitRequest
 	permitReady bool
 	release     func()
@@ -1238,8 +1242,8 @@ func (r *runState) schedule() Report {
 					event.value, event.err = v.result(n.stmt.expr, n.env)
 				}
 				if event.err == nil && n.stmt.tag == "return" {
-					if !event.value.IsData() {
-						event.err = diagnostic("E-SCHEMA", "Flow output is not Data")
+					if n.instance == r.entry && !r.program.syntax.cell && !event.value.IsData() {
+						event.err = diagnostic("E-SCHEMA", "program entry output must be Data; consume functions and effects within LIP")
 					} else if n.instance.result != "void" {
 						if err := checkType(event.value, n.instance.result); err != nil {
 							event.err = diagnostic("E-SCHEMA", err.Error())
@@ -1295,6 +1299,15 @@ func (r *runState) schedule() Report {
 	return report
 }
 func (r *runState) acceptEvent(event nodeEvent) {
+	if len(event.closedCalls) != 0 {
+		if event.node.closedCalls == nil {
+			event.node.closedCalls = map[int]bool{}
+		}
+		for _, site := range event.closedCalls {
+			event.node.closedCalls[site] = true
+		}
+		return // Cursor progress does not release the active leaf's budget.
+	}
 	if event.permitReady {
 		r.permits--
 		n := event.node
@@ -1352,8 +1365,13 @@ func (r *runState) acceptEvent(event nodeEvent) {
 		r.regions = append(r.regions, g)
 		n.waiting, n.resume, n.parked = g, request.resume, true
 		r.buildBlock(request.definition.body, env, request.prefix, g, nil)
-		if len(r.opts.After) > 0 && r.hasCycle() {
-			r.buildErr = at(diagnostic("E-GRAPH-CYCLE", "cycle after Flow expansion"), n.stmt.tok)
+		if len(r.opts.After) > 0 {
+			// Events may be coalesced before the next scheduling pass. Refresh
+			// closure/call progress before using the symbolic boundaries in DFS.
+			r.refreshAfter()
+			if r.hasCycle() {
+				r.buildErr = at(diagnostic("E-GRAPH-CYCLE", "cycle after Flow expansion"), n.stmt.tok)
+			}
 		}
 		return
 	}
@@ -1573,7 +1591,7 @@ func (r *runState) updateRegions() bool {
 	return progress
 }
 
-// Completed lexical scopes cannot export live bindings or stores. Data results
+// Completed lexical scopes cannot export live bindings or stores. Ordinary results
 // and frozen closure captures own their values independently. Keep graph and
 // range metadata for ordering, After, and diagnostics, but drop local payloads.
 // Never mutate an environment or a Value's backing storage: other scopes may
@@ -1866,9 +1884,6 @@ func (v *evaluator) invokeFlow(e *expression, env *environment) (Value, error) {
 	inputs := make(map[string]Value, len(f.params))
 	for i, param := range f.params {
 		value := values[i]
-		if !value.IsData() {
-			return Value{}, diagnostic("E-SCHEMA", "Flow input must be Data")
-		}
 		if err := checkType(value, param.typ); err != nil {
 			return Value{}, diagnostic("E-SCHEMA", err.Error())
 		}
@@ -2332,7 +2347,7 @@ func (r *runState) refreshAfter() {
 				continue
 			}
 			for _, call := range template.calls {
-				if n.called[call.expression.tok.site] && len(call.loops) == 0 {
+				if n.closedCalls[call.expression.tok.site] || n.called[call.expression.tok.site] && len(call.loops) == 0 {
 					continue
 				}
 				if (t.kind == "call" || t.kind == "flow") && call.expression.tok.site == t.site || r.containsAfter(call.expression.name, t, map[string]bool{}) {
@@ -2454,6 +2469,43 @@ func (r *runState) refreshAfter() {
 		}
 	}
 }
+
+// Once an outer-cursor expression succeeds or is unselected, all calls
+// lexically inside it are settled, including completed local iterations.
+// Notify After before a later call parks this same owner node. An expression
+// inside an active local iteration cannot close the whole static call site.
+func (v *evaluator) completeCalls(e *expression) {
+	if e == nil || v.run == nil || v.node == nil || len(v.run.opts.After) == 0 || len(v.path) != 0 || !e.info.hasFlow {
+		return
+	}
+	var sites []int
+	var visit func(*expression)
+	visit = func(x *expression) {
+		if x.tag == "fn" {
+			return
+		}
+		if x.tag == "flow" && !v.closedCalls[x.tok.site] {
+			if v.closedCalls == nil {
+				v.closedCalls = map[int]bool{}
+			}
+			v.closedCalls[x.tok.site] = true
+			sites = append(sites, x.tok.site)
+		}
+		walkExpression(x, visit)
+	}
+	visit(e)
+	if len(sites) != 0 {
+		v.run.events <- nodeEvent{node: v.node, closedCalls: sites}
+	}
+}
+
+func (v *evaluator) completeBlockCalls(b *block) {
+	if b != nil && v.run != nil && len(v.run.opts.After) != 0 {
+		// This shape is only a lexical traversal root, never evaluated or saved.
+		v.completeCalls(&expression{body: b, info: analysis{hasFlow: true}})
+	}
+}
+
 func (v *evaluator) recordRange(site, count int) {
 	if v.node != nil {
 		v.node.localRanges.Store(identityKey(v.path.Wire())+":"+strconv.Itoa(site), count)

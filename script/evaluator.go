@@ -55,11 +55,12 @@ type evalResult struct {
 	tail  *tailCall
 }
 type evaluator struct {
-	run   *runState
-	node  *node
-	ctx   context.Context
-	path  Position
-	depth int
+	run         *runState
+	node        *node
+	ctx         context.Context
+	path        Position
+	depth       int
+	closedCalls map[int]bool
 }
 
 func (v *evaluator) step(t token) error {
@@ -91,6 +92,9 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		return r, err
 	}
 	defer func() {
+		if err == nil {
+			v.completeCalls(e)
+		}
 		if err != nil && err != errorCut {
 			err = at(err, e.tok)
 			if d, ok := err.(*Diagnostic); ok && len(d.Position) == 0 && len(d.EvalPath) == 0 {
@@ -108,6 +112,12 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 			return evalResult{value: value}, failure
 		}
 		r.value, err = env.lookup(e.name)
+	case "native_receiver":
+		var receiver Value
+		receiver, err = get(e.x)
+		if err == nil {
+			r.value = nativeReceiver(receiver, e.name)
+		}
 	case "unary":
 		var x Value
 		x, err = get(e.x)
@@ -142,6 +152,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 				break
 			}
 			if e.name == "&&" && !a.b || e.name == "||" && a.b {
+				v.completeCalls(e.y)
 				r.value = a
 				break
 			}
@@ -247,7 +258,7 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		var captures *environment
 		captures, err = env.frozen(freeNames(e))
 		if err == nil {
-			r.value = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: captures, nativeResult: e.nativeResult}}
+			r.value = Value{k: Function, f: &function{params: e.params, typ: e.typ, body: e.body, captures: captures, nativeResult: e.nativeResult, nativeParams: e.nativeParams}}
 		}
 	case "block":
 		return v.block(e.body, newEnvironment(env), tail)
@@ -262,8 +273,10 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 			break
 		}
 		if g.b {
+			v.completeCalls(e.y)
 			return v.block(e.body, newEnvironment(env), tail)
 		}
+		v.completeBlockCalls(e.body)
 		return v.eval(e.y, env, tail)
 	case "match":
 		var x Value
@@ -279,6 +292,11 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		if a == nil {
 			err = diagnostic("E-MATCH-NO-ARM", "no matching arm")
 		} else {
+			for i := range e.arms {
+				if &e.arms[i] != a {
+					v.completeCalls(e.arms[i].result)
+				}
+			}
 			return v.eval(a.result, env, tail)
 		}
 	case "pipe":
@@ -320,19 +338,8 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 		if err != nil {
 			break
 		}
-		if e.state == "stage" {
-			for i := 1; i < len(e.args); i++ {
-				if !args[order[i]].IsData() {
-					err = diagnostic("E-SCHEMA", "pipeline named arguments must be Data")
-					break
-				}
-			}
-			if err != nil {
-				break
-			}
-		}
 		if fn.builtin != "" {
-			r.value, err = v.builtin(fn.builtin, args)
+			r.value, err = v.builtin(fn.builtin, args, e.tok)
 			break
 		}
 		for i, p := range fn.params {
@@ -553,8 +560,13 @@ func (v *evaluator) localStatement(s *statement, env *environment) (string, erro
 			return "", diagnostic("E-TYPE", "if requires bool")
 		}
 		if g.b {
+			v.completeBlockCalls(s.otherwise)
+			if s.other != nil {
+				v.completeBlockCalls(&block{items: []*statement{s.other}})
+			}
 			return v.localStatements(s.body, newEnvironment(env))
 		}
+		v.completeBlockCalls(s.body)
 		if s.other != nil {
 			return v.localStatement(s.other, newEnvironment(env))
 		}
@@ -569,6 +581,11 @@ func (v *evaluator) localStatement(s *statement, env *environment) (string, erro
 		a, err := v.selectArm(s.arms, x, env)
 		if err != nil {
 			return "", err
+		}
+		for i := range s.arms {
+			if &s.arms[i] != a {
+				v.completeBlockCalls(s.arms[i].body)
+			}
 		}
 		if a != nil {
 			return v.localStatements(a.body, newEnvironment(env))
@@ -609,6 +626,8 @@ func (v *evaluator) localStatement(s *statement, env *environment) (string, erro
 			}
 			i.Add(i, big.NewInt(1))
 		}
+		v.path = saved
+		v.completeBlockCalls(&block{items: []*statement{s}})
 	default:
 		return "", diagnostic("E-PURITY", "operation forbidden in a node-local block")
 	}
@@ -738,9 +757,29 @@ func argumentOrder(fn *function, args []argument) ([]int, error) {
 	}
 	return order, nil
 }
-func (v *evaluator) builtin(name string, xs []Value) (Value, error) {
+func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value, error) {
 	wrong := func() (Value, error) { return Value{}, diagnostic("E-TYPE", "invalid "+name+" arguments") }
 	switch name {
+	case "print", "log", "telemetry":
+		var tok token
+		if len(locations) != 0 {
+			tok = locations[0]
+		} else if v.node != nil {
+			tok = v.node.stmt.tok
+		}
+		if name == "print" {
+			v.emitTrace(name, "", "", xs[0], tok)
+		} else {
+			if xs[0].k != String || name == "telemetry" && xs[1].k != Object {
+				return wrong()
+			}
+			if name == "log" {
+				v.emitTrace(name, xs[0].s, "", xs[1], tok)
+			} else {
+				v.emitTrace(name, "", xs[0].s, xs[1], tok)
+			}
+		}
+		return NullValue(), nil
 	case "len":
 		switch xs[0].k {
 		case String:

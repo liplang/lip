@@ -1,0 +1,15 @@
+# Run: lipc run examples/advanced/28_flow_values.lip
+# A Flow is a static target. Its inputs and results may be ordinary values.
+flow Offset(delta:number)->function {
+    # The returned pure closure keeps delta after this child graph finishes.
+    return fn(value:number)->number {value+delta}
+}
+flow Apply(value:number, transform:function)->number {
+    return transform(value)
+}
+flow Main()->object {
+    # Nested calls finish in source order before the receiving child starts.
+    direct = Apply(3, Offset(2))
+    pipeline = 3 |> Apply(transform=Offset(4))
+    return {direct:direct, pipeline:pipeline}
+}

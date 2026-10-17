@@ -279,6 +279,7 @@ type expression struct {
 	arms                  []arm
 	info                  analysis
 	nativeResult          *nativeShape
+	nativeParams          []nativeParameter
 }
 type statement struct {
 	native          func(*evaluator, *environment) (string, error)
@@ -301,6 +302,8 @@ type importDecl struct {
 	tok                   token
 }
 type flowDecl struct {
+	nativeResult *nativeShape
+	nativeParams []nativeParameter
 	name, result string
 	params       []parameter
 	body         *block
@@ -351,6 +354,7 @@ type operationSummary struct {
 
 type function struct {
 	nativeResult *nativeShape
+	nativeParams []nativeParameter
 	params       []parameter
 	typ          string
 	body         *block

@@ -4,15 +4,15 @@
 
 Every example uses `Main` as its default entry; helper Flows have names describing their roles.
 
-These executable examples develop one LIP 1.0 model: pure functions compute values, Flows organize dependencies, Claims collect facts, and effect/perform executes external actions. `#` starts a line comment; each file explains its syntax in English. Run `make build` at the project root first. Examples are checked through interpretation and actual generated Go programs.
+These executable examples develop one LIP model (the working tree follows the [1.1 draft](../spec/LIP-1.1-SPEC.en.md)): pure functions compute values, Flows organize dependencies, Claims collect facts, and effect/perform executes external actions. `#` starts a line comment; each file explains its syntax in English. Run `make build` at the project root first. Examples are checked through interpretation and actual generated Go programs.
 
-Start with `./lipc learn` for 36 interactive lessons and 72 small examples or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
+Start with `./lipc learn` for 38 interactive lessons and 76 small examples or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
 
 ## Five rules to remember
 
 1. `flow Name(...) -> Type { ... }` declares a reusable graph. Root `Main` is the default entry; otherwise use the sole root Flow or choose with `-entry Name`. Explicit selection overrides the default, and names are case-sensitive. A valued Flow ends in return; void has no value.
 2. `name = value` creates an immutable binding; no same-scope reassignment.
-3. fn is pure. Its final expression, optionally prefixed by return, is its result. Flows are not function values; child calls/pipelines compose graphs with Data inputs/results.
+3. fn is pure. Its final expression, optionally prefixed by return, is its result. Flows are not function values; child calls/pipelines compose graphs with ordinary inputs/results, including functions and effects, within one run.
 4. `effect op(args)` only constructs a request. perform executes the registered operation.
 5. claim() creates a fact collection; `<+` appends contributions, and complete reads return identified records.
 
@@ -51,9 +51,11 @@ Run `./lipc run examples/structures/FILE.lip`.
 | [09_map_fold](structures/09_map_fold.lip) | Pure callbacks, finite transforms, ordered reduction | total=30 |
 | [10_comprehensions](structures/10_comprehensions.lip) | Filtering, guard before body | reciprocals=[0.5,0.25] |
 | [11_loops](structures/11_loops.lip) | for, break/continue, complete Claim reads | [1,3] |
-| [12_carry](structures/12_carry.lip) | Value iteration, next/break, exhaustion | early=6, complete=6 |
+| [12_carry](structures/12_carry.lip) | Value iteration, next/break, list append and object updates | early=6, complete=6; two tool batches and a name index; original list still has 1 item |
 
 Ordinary-loop bindings are independent each iteration. Use carry for previous results and Claims for independent contributions. Ordinary bare break and carry break value target their respective constructs.
+
+`with` supports incremental container construction: each round appends with `concat(s.tools, [tool])`, adds or replaces a field with `put(s.by_name, name, tool)`, and passes the whole new state through `next`. The result can seed another batch; empty input preserves the initial value, and old containers remain unchanged. Inside a Flow, first bind `value = perform request`, then add value to the state; `next` itself remains a pure computation.
 
 ## Advanced computation and concurrency
 
@@ -65,6 +67,7 @@ Ordinary-loop bindings are independent each iteration. Use carry for previous re
 | [16_snapshots](advanced/16_snapshots.lip) | Live versus complete observations | Complete count 3, live count 0–3 |
 | [21_business_failures](advanced/21_business_failures.lip) | Failures as Data, stop on third failure | failures=3, visited=4 |
 | [27_linear_model](advanced/27_linear_model.lip) | Centered least squares, training/prediction Flows, MSE, singular input | default Main; slope=2, intercept=1, predictions=[9,11] |
+| [29_diagnostics](advanced/29_diagnostics.lip) | print/log/telemetry inside fn; one-way diagnostic output | Result `6`; diagnostics on stderr, `-trace=false` disables delivery |
 | [refine](refine.lip) | Source-free carry until threshold | rounds=4, score=0.8 |
 | [evidence](evidence.lip) | Parallel evidence/complete reports | missing=["b","c"] |
 
@@ -88,7 +91,7 @@ Live snapshot variation is intentional. Read a Claim completely for final conclu
 # {"kind":"value","value":5}
 ```
 
-`x |> Adjust` fixes x before fully completing the child; named pure fn/core functions also work as stages. Explicit Flow arguments must be Pure Data; use prior bindings/pipelines for child results. Native/function values use ordinary calls. OFFSET:number=2 is a static literal; export exposes it. Duplicate JSON keys, invalid Unicode/shape/arguments fail pre-run E-SCHEMA.
+`x |> Adjust` fixes x before fully completing the child; named pure fn/core functions also work as stages. Explicit Flow arguments evaluate in source order, allowing nested calls and function/effect values. Native/function values use ordinary calls. OFFSET:number=2 is a static literal; export exposes it. Duplicate JSON keys, invalid Unicode/shape/arguments fail pre-run E-SCHEMA.
 
 Save reuse.lip at the project root:
 
@@ -124,14 +127,22 @@ Teaching contracts/schemas/byte encoding live in DemoHost in [adapters.go](../sc
 Keep three points in mind when reading the effect examples:
 
 1. `upper_request("hello")` creates a request without calling the library. `perform request` executes it and returns the Data specified by its contract.
-2. `forward(request:effect)->effect` in `18_proposals` shows that fn parameters and results can carry requests. Flow inputs/outputs, Host parameters/results, and Claims still require Data.
+2. `forward(request:effect)->effect` in `18_proposals` shows that fn parameters and results can carry requests. Prepare/Execute also show Flows returning/accepting requests. Host parameters/results, entry protocols, and Claims still require Data.
 3. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. A request returned through `forward`'s unknown parameter or a container projection can execute sequentially, but these paths cannot establish parallel safety.
 
 Project operations can accept ordinary `policy` parameters carrying token, money, and time options, with enforcement implemented by the Host. Contracts declare permission requirements and the Host grants access. See the short example and current boundaries in the [README effect explanation](../README.en.md#every-external-action-follows-one-protocol).
 
+[28_flow_values](advanced/28_flow_values.lip) is a small pure-core example: Offset returns a function capturing delta, and Apply accepts and calls it. It also shows nested arguments and pipeline named arguments. A Flow itself remains a non-value.
+
 ## Local Ollama chat, saved calculations, and reminders
 
 [tmp_ollama_chat.lip](tmp_ollama_chat.lip) implements multi-turn streaming chat, tool argument validation, saved calculations, and reminders in one LIP file. The model chooses tools, LIP dispatches by explicit name, and results return to the model for its next decision. It uses the official Python `ollama` client, `prompt_toolkit` for terminal editing, and standard libraries for storage and timers.
+
+The 1.1 rewrite captures the model and configuration in a pure request builder passed to `RunAgent`. Each round, `StreamReply(request(s.messages, tools), terminal)` receives and performs the effect. The model is selected at startup; a replacement builder can use another implementation of the Ollama chunk interface. `Query(request:effect)` returns rows; `Write(request:effect)` returns the affected-row count. Both require a request producing a SQLite cursor, which they close and release. SQL keeps separate bound arguments. Use `py.getattr(cursor, "rowcount")` for native attributes on dynamic request results and explicit `effect cursor.method(...)` for methods, without assuming known static provenance.
+
+Pure `Tool(name, description, properties, required)` standardizes tool definitions. This application chooses to call `BuildTools()` once at startup; append with `concat(base, [Tool(...)])` and carry the new list into the next round as in [12_carry](structures/12_carry.lip). A comprehension can also build entries conditionally. To update tools during a conversation, put the list alongside messages in the carry state. `Tool` only builds the model-facing schema; new tools still need business validation and `DispatchTool` dispatch. Top-level static declarations accept literals, so call builders inside fn/Flow.
+
+Business logic remains in one file: currently 848 lines, compared with the original 831. This round reduces `Main` from 80 lines to 15 and handles startup, the conversation, and shutdown. `OpenModel` returns an ordinary object containing a request closure; `Conversation` owns input, `RunCommand` handles commands, `ChatTurn` prepares context, and `RunTools` feeds back observations. Streaming separates native chunk decoding, pure `MergeChunk` accumulation, and terminal output; `StreamReply` falls from 42 lines to 17. Tool construction uses existing pure functions; passing request functions, effects, and nested containers across Flows uses 1.1. The refactor reduces each structure’s complexity while adding a few focused declarations. Validation, history trimming, streaming, reminders, and terminal editing are preserved. Dynamic request Ops remain Unknown and gain no concurrency permission.
 
 Install the client in the Python 3.9+ environment used by `lipc`, start local Ollama, and download a model that supports tool calls. Run these commands from the repository root; the default model is `llama3.1:8b`:
 

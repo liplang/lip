@@ -3,6 +3,7 @@ package tests
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	. "lip/script"
 	"math"
 	"strings"
@@ -240,7 +241,6 @@ CONFIG:object={values:[-0,+2,null,true],label:"fixed"}`
 		{"flow Main()->number {return 1}\nLIMIT:number=\"bad\"", "E-TYPE"},
 		{"flow Main()->number {return 1}\nLIMIT:function=null", "E-TYPE"},
 		{"flow Main()->number {return 1}\nflow Unused()->number {return missing}", "E-NAME"},
-		{"flow Main()->number {return 1}\nflow Unused(x:effect)->number {return 1}", "E-TYPE"},
 		{`flow Main()->any {return Main}`, "E-TYPE"},
 	} {
 		_, err := CompileWithOptions(test.source, Host{}, CompileOptions{Entry: "Main"})
@@ -807,7 +807,6 @@ func TestFlowBoundaries(t *testing.T) {
 		{`flow Main()->number {return Other()} flow Other()->number {return Main()}`, "E-FLOW-CYCLE"},
 		{`flow Main()->number {return 1} flow Other()->number {return Other()}`, "E-FLOW-CYCLE"},
 		{`fn bad()->number {Other()} flow Main()->number{return 1} flow Other()->number{return 1}`, "E-PURITY"},
-		{`flow Read(x:number)->number{return x} flow Main()->number{return Read(Read(1))}`, "E-PURITY"},
 		{`flow Read(x:number)->number{return x} flow Main()->number{return 1 |>Read(x=2)}`, "E-ARITY"},
 		{`flow Main()->number{return 1 |>map}`, "E-ARITY"},
 		{`fn f(x:number)->number{x} flow Main()->number{alias=f;return 1 |>alias}`, "E-TYPE"},
@@ -1099,5 +1098,205 @@ flow Main()->any{return [0][fail("stop"):perform effect w.read(1):perform effect
 		if _, err = Compile(source, host); err == nil || err.(*Diagnostic).Code != "E-PARALLEL" || len(calls) != 0 {
 			t.Fatal("projection strengthened Ops", expr, err, calls)
 		}
+	}
+}
+
+// Same-run interfaces carry ordinary values; serialized entries, Hosts, and
+// Claim contributions keep their recursive Data boundary.
+func TestFlowOrdinaryValues(t *testing.T) {
+	source := `fn twice(x:number)->number{x*2}
+flow Echo(value:any)->any{return value}
+flow Apply(value:number, transform:function)->number{return transform(value)}
+flow Capture(value:number)->function{return fn(delta:number)->number{value+delta}}
+flow Bundle(value:number)->object{return {call:Capture(value),items:[twice]}}
+flow Main()->object {
+ f=Capture(10)
+ bundle=Echo(Bundle(20))
+ return {direct:Apply(3,twice),named:3 |>Apply(transform=Echo(twice)),capture:Echo(f)(2),nested:bundle.call(4),item:bundle.items[0](5),nullable:Echo(null)}
+}`
+	p, err := Compile(source, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"capture":12,"direct":6,"item":10,"named":6,"nested":24,"nullable":null}`
+	for _, parallel := range []int{1, 2, 7} {
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil || display(t, report.Output) != want {
+			t.Fatal(parallel, report, err)
+		}
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable, "-parallel", "1")
+	if err != nil || strings.TrimSpace(stdout) != want {
+		t.Fatal(stdout, stderr, err)
+	}
+	session, err := NewSession(Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	nativeCell(t, session, source, "")
+	nativeCell(t, session, `saved=Capture(30)`, "")
+	nativeCell(t, session, `Echo(saved)(2)`, `32`)
+	nativeCell(t, session, `Main()`, want)
+	// A selected serialized entry still cannot export executable values.
+	external, err := Compile(`flow Main()->function{return fn()->number{1}}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := external.Run(context.Background(), nil, Options{})
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-SCHEMA" || report.EntryOutput != nil {
+		t.Fatal(report, err)
+	}
+}
+
+func TestFlowEffectValuesAndNestedArguments(t *testing.T) {
+	var calls atomic.Int64
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "steps", Member: "read"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true,
+		Invoke: func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) },
+	}}}
+	source := `import host "steps"
+flow Request(value:number)->effect{return effect steps.read(value)}
+flow Echo(request:effect)->effect{return request}
+flow Execute(request:effect)->any{return perform request}
+flow Add(value:number, delta:number)->number{return value+delta}
+fn plus(value:number,delta:number)->number{value+delta}
+flow Main()->object {
+ constructed=Request(9)
+ first=Execute(Echo(constructed))
+ second=Execute(Request(4))
+ nested=Add(Execute(Request(2)),delta=Execute(Request(3)))
+ piped=1 |>Add(delta=Execute(Request(5))) |>plus(delta=Execute(Request(6)))
+ facts=claim()
+ for x in [7,8] parallel {value=perform Request(x);facts <+ value}
+ return {first:first,second:second,nested:nested,piped:piped,rows:[r.value for r in facts]}
+}`
+	p, err := Compile(source, host)
+	if err != nil || calls.Load() != 0 {
+		t.Fatal(err, calls.Load())
+	}
+	const want = `{"first":9,"nested":5,"piped":12,"rows":[7,8],"second":4}`
+	for _, parallel := range []int{1, 2, 7} {
+		before := calls.Load()
+		report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil || display(t, report.Output) != want || calls.Load()-before != 8 {
+			t.Fatal(parallel, report, err, calls.Load()-before)
+		}
+	}
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import "context"
+func generatedHost()(Host,error){return Host{Contracts:[]Contract{{Operation:Operation{Language:"host",Path:"steps",Member:"read"},Version:"1",Params:[]Parameter{{Name:"value",Schema:Schema{Type:"number"}}},Result:Schema{Type:"number"},Effect:ReadOnlyEffect,Concurrent:true,Invoke:func(_ context.Context,r Request)Response{return Result(r.Positional[0])}}}},nil}`})
+	stdout, stderr, err := runNative(t, executable, "-parallel", "1")
+	if err != nil || strings.TrimSpace(stdout) != want {
+		t.Fatal(stdout, stderr, err)
+	}
+	session, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	before := calls.Load()
+	nativeCell(t, session, source, "")
+	nativeCell(t, session, `saved=Request(11)`, "")
+	if calls.Load() != before {
+		t.Fatal("constructing/transferring a request invoked provider")
+	}
+	nativeCell(t, session, `Execute(Echo(saved))`, `11`)
+	if calls.Load() != before+1 {
+		t.Fatal(calls.Load(), before)
+	}
+	// A request parameter has Unknown Ops, even if its caller passes a read.
+	_, err = Compile(`import host "steps";flow Execute(p:effect)->any{return perform p} flow Main()->void{for x in [1] parallel {Execute(effect steps.read(x))}}`, host)
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+		t.Fatal(err)
+	}
+}
+
+func TestFlowArgumentOrderAndBoundaries(t *testing.T) {
+	var seen []int
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "order", Member: "touch"}, Version: "1", Params: []Parameter{{Name: "x", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: WriteEffect,
+		Invoke: func(_ context.Context, r Request) Response {
+			seen = append(seen, int(num(r.Positional[0])))
+			return Result(r.Positional[0])
+		},
+	}}}
+	const prefix = `import host "order"
+flow Tap(x:number)->number{return perform effect order.touch(x)}
+flow Add(x:number,delta:number)->number{return x+delta}
+fn plus(x:number,delta:number)->number{x+delta}
+`
+	const source = prefix + `flow Main()->number{return Add(Tap(1),delta=Tap(2)) |> Add(delta=Tap(3)) |>plus(delta=Tap(4))}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, parallel := range []int{1, 2, 7} {
+		seen = nil
+		r, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+		if err != nil || num(r.Output) != 10 || fmt.Sprint(seen) != "[1 2 3 4]" {
+			t.Fatal(parallel, r, seen, err)
+		}
+	}
+	// The first failed argument stops the cursor before later arguments/body.
+	failed, err := Compile(prefix+`flow Main()->number{return Add(fail("stop"),delta=Tap(9))}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen = nil
+	r, err := failed.Run(context.Background(), nil, Options{Parallelism: 7})
+	if err == nil || r.Error.Message != "stop" || len(seen) != 0 {
+		t.Fatal(r, err, seen)
+	}
+	for _, body := range []string{
+		`Add(Tap(1),delta=2)`, `1 |>Add(delta=Tap(2))`, `1 |>plus(delta=Tap(2))`,
+		`perform (fn(x:number)->effect{effect order.touch(x)})(Tap(1))`,
+	} {
+		_, err := Compile(prefix+`flow Main()->void{for x in [1] parallel{`+body+`}}`, host)
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+			t.Fatal(body, err)
+		}
+	}
+	for _, body := range []string{`value=Tap;return 1`, `return [Tap]`, `return (fn()->any{Tap})()`} {
+		_, err := Compile(prefix+`flow Main()->any{`+body+`}`, host)
+		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-TYPE" {
+			t.Fatal(body, err)
+		}
+	}
+}
+
+func TestFlowValueDataAndSnapshotBoundaries(t *testing.T) {
+	var calls atomic.Int64
+	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "boundary", Member: "take"}, Version: "1", Params: []Parameter{{Name: "x", Schema: Schema{Type: "object"}}}, Result: Schema{Type: "number"}, Effect: WriteEffect,
+		Invoke: func(context.Context, Request) Response { calls.Add(1); return Result(number(1)) },
+	}}}
+	for _, test := range []struct{ name, body, code string }{
+		{"host_data", `flow Box()->object{return {f:fn()->number{1}}} flow Main()->number{return perform effect boundary.take(Box())}`, "E-PURITY"},
+		{"host_nested_data", `flow Box()->object{return {f:fn()->number{1}}} flow Main()->number{box=Box();return perform effect boundary.take(box)}`, "E-SCHEMA"},
+		{"claim_data", `flow Box()->object{return {f:fn()->number{1}}} flow Main()->list{facts=claim();box=Box();facts <+ box;return facts}`, "E-SCHEMA"},
+		{"parameter_annotation", `fn hidden()->any{"wrong"} flow Need(f:function)->number{perform effect boundary.take({});return f()} flow Main()->number{return Need(hidden())}`, "E-SCHEMA"},
+		{"return_annotation", `fn hidden()->any{fn()->number{1}} flow Wrong()->number{return hidden()} flow Main()->number{return Wrong()}`, "E-SCHEMA"},
+		{"snapshot_instance", `flow Snapshot()->effect{facts=claim();facts <+ 1;complete=facts;return {len(complete);effect claim.snapshot("facts")}} flow Use(p:effect)->any{return perform p} flow Main()->any{return Use(Snapshot())}`, "E-RESOURCE"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, err := Compile("import host \"boundary\"\n"+test.body, host)
+			if err == nil {
+				_, err = p.Run(context.Background(), nil, Options{Parallelism: 1})
+			}
+			if d, ok := err.(*Diagnostic); !ok || d.Code != test.code || calls.Load() != 0 {
+				t.Fatal(err, calls.Load())
+			}
+		})
+	}
+	const source = `import host "boundary"
+flow Maybe(p:effect?)->effect?{return p}
+flow Use(p:any)->any{return perform p}
+flow Main()->object{p=Maybe(effect boundary.take({}));return {absent:Maybe(null),present:Use(p)}}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != `{"absent":null,"present":1}` || calls.Load() != 1 {
+		t.Fatal(report, err, calls.Load())
 	}
 }

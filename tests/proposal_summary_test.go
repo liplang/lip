@@ -151,75 +151,82 @@ func generatedHost()(Host,error){
  }},
  }},nil
 }`
-	for _, body := range []string{
-		`facts=claim();for x in [1,2] parallel {value=perform requests.request(x);facts <+ value};return [row.value for row in facts]`,
-		`a=perform requests.request(1);b=perform requests.request(2);return [a,b]`,
-	} {
-		source := `import host "summary"
+	for _, flowBuilder := range []bool{false, true} {
+		for _, body := range []string{
+			`facts=claim();for x in [1,2] parallel {value=perform requests.request(x);facts <+ value};return [row.value for row in facts]`,
+			`a=perform requests.request(1);b=perform requests.request(2);return [a,b]`,
+		} {
+			source := `import host "summary"
 import lip "./requests.lip" as requests
 flow Main()->list {perform effect summary.write(0);` + strings.Replace(body, "return ", "perform effect summary.write(1);return ", 1) + `}`
-		set := SourceSet{Root: "main.lip", Sources: map[string]Source{
-			"main.lip": {Version: "local", Text: source},
-			"requests.lip": {Version: "local", Text: `import host "summary"
+			set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+				"main.lip": {Version: "local", Text: source},
+				"requests.lip": {Version: "local", Text: `import host "summary"
 export fn request(x:number)->effect {wrap(x)}
 fn wrap(x:number)->effect {effect summary.read(x)}`},
-		}}
-		// Runtime Host uses the same descriptor fingerprints as the generated fixture.
-		entered := make(chan struct{}, 2)
-		release := make(chan struct{})
-		var finished atomic.Int64
-		host := Host{Contracts: []Contract{
-			{Operation: Operation{Language: "host", Path: "summary", Member: "read"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true,
-				Invoke: func(ctx context.Context, r Request) Response {
-					entered <- struct{}{}
-					select {
-					case <-release:
-					case <-ctx.Done():
-						return Uncertain("no overlap")
-					}
-					finished.Add(1)
-					return Result(r.Positional[0])
-				}},
-			{Operation: Operation{Language: "host", Path: "summary", Member: "write"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: WriteEffect,
-				Invoke: func(_ context.Context, r Request) Response {
-					n, _ := r.Positional[0].Float()
-					if n == 1 && finished.Load() != 2 {
-						return Rejected("E-ORDER", "write preceded reads")
-					}
-					return Result(r.Positional[0])
-				}},
-		}}
-		p, err := CompileSourceSet(set, host, CompileOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		done := make(chan error, 1)
-		go func() {
-			r, err := p.Run(ctx, nil, Options{Parallelism: 2})
-			if err == nil && display(t, r.Output) != "[1,2]" {
-				err = fmt.Errorf("unexpected output")
+			}}
+			if flowBuilder {
+				module := set.Sources["requests.lip"]
+				module.Text = strings.Replace(module.Text, "export fn request(x:number)->effect {wrap(x)}", "export flow request(x:number)->effect {return wrap(x)}", 1)
+				set.Sources["requests.lip"] = module
 			}
-			done <- err
-		}()
-		for i := 0; i < 2; i++ {
-			select {
-			case <-entered:
-			case <-ctx.Done():
-				cancel()
-				t.Fatal("wrapped reads did not overlap")
+			// Runtime Host uses the same descriptor fingerprints as the generated fixture.
+			entered := make(chan struct{}, 2)
+			release := make(chan struct{})
+			var finished atomic.Int64
+			host := Host{Contracts: []Contract{
+				{Operation: Operation{Language: "host", Path: "summary", Member: "read"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true,
+					Invoke: func(ctx context.Context, r Request) Response {
+						entered <- struct{}{}
+						select {
+						case <-release:
+						case <-ctx.Done():
+							return Uncertain("no overlap")
+						}
+						finished.Add(1)
+						return Result(r.Positional[0])
+					}},
+				{Operation: Operation{Language: "host", Path: "summary", Member: "write"}, Version: "1", Params: []Parameter{{Name: "value", Schema: Schema{Type: "number"}}}, Result: Schema{Type: "number"}, Effect: WriteEffect,
+					Invoke: func(_ context.Context, r Request) Response {
+						n, _ := r.Positional[0].Float()
+						if n == 1 && finished.Load() != 2 {
+							return Rejected("E-ORDER", "write preceded reads")
+						}
+						return Result(r.Positional[0])
+					}},
+			}}
+			p, err := CompileSourceSet(set, host, CompileOptions{})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		close(release)
-		err = <-done
-		cancel()
-		if err != nil {
-			t.Fatal(err)
-		}
-		executable, _ := buildNative(t, p, GoOptions{HostSource: hostSource})
-		out, stderr, err := runNative(t, executable, "-parallel", "2")
-		if err != nil || strings.TrimSpace(out) != "[1,2]" {
-			t.Fatal(out, stderr, err)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			done := make(chan error, 1)
+			go func() {
+				r, err := p.Run(ctx, nil, Options{Parallelism: 2})
+				if err == nil && display(t, r.Output) != "[1,2]" {
+					err = fmt.Errorf("unexpected output")
+				}
+				done <- err
+			}()
+			for i := 0; i < 2; i++ {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					cancel()
+					t.Fatal("wrapped reads did not overlap")
+				}
+			}
+			close(release)
+			err = <-done
+			cancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable, _ := buildNative(t, p, GoOptions{HostSource: hostSource})
+			out, stderr, err := runNative(t, executable, "-parallel", "2")
+			if err != nil || strings.TrimSpace(out) != "[1,2]" {
+				t.Fatal(out, stderr, err)
+			}
 		}
 	}
 }

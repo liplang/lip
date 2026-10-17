@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -764,6 +765,35 @@ func TestInteractiveCLI(t *testing.T) {
 		}
 		return stdout.String(), stderr.String()
 	}
+	t.Run("diagnostics", func(t *testing.T) {
+		file := filepath.Join(dir, "diagnostics.lip")
+		declaration := `fn twice(x:number)->number{log("debug",x);x*2}`
+		if err := os.WriteFile(file, []byte(declaration+`flow Main()->number{return twice(3)}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run("", "run", file)
+		if stdout != "6\n" || stderr != "[debug] 3\n" {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run("", "run", "-trace=false", file)
+		if stdout != "6\n" || stderr != "" {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run(declaration+"\ntwice(3)\nprint(7)\n:quit\n", "repl")
+		if stdout != "6\nnull\n" || stderr != "[debug] 3\n7\n" {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run(declaration+"\ntwice(3)\n:run '"+file+"'\n:run -trace=true '"+file+"'\n:quit\n", "repl", "-trace=false")
+		if stdout != "6\n6\n6\n" || stderr != "[debug] 3\n" {
+			t.Fatal(stdout, stderr)
+		}
+		for _, enabled := range []string{"true", "false"} {
+			stdout, stderr = run("x*2\n:quit\n", "learn", "-lesson", "diagnostics", "-trace="+enabled)
+			if !strings.Contains(stdout, "Passed") || enabled == "false" && stderr != "" || enabled == "true" && stderr != "[learn] 3\n[learn] -1\n" {
+				t.Fatal(stdout, stderr)
+			}
+		}
+	})
 	t.Run("repl-index-and-slice", func(t *testing.T) {
 		stdout, stderr := run("a=range(6)\nb=range(3)\na[b]\na[-1]\na[::-1]\na[\n1:5:2\n]\nbad=a[::0]\na[-1]\nhelp(slice)\n:quit\n", "repl")
 		if !strings.HasPrefix(stdout, "[0,1,2,3,4,5]\n[0,1,2]\n[0,1,2]\n5\n[5,4,3,2,1,0]\n[1,3]\n5\n") || !strings.Contains(stdout, "null selects defaults") || !strings.Contains(stderr, "E-VALUE") {
@@ -1022,7 +1052,8 @@ flow Canceled()->number {return 0}
 		}
 		input.WriteString(":quit\n")
 		stdout, stderr = run(input.String(), "learn")
-		if lessons < 30 || stderr != "" || strings.Count(stdout, "Case 1 ✓") != lessons*3 || strings.Count(stdout, "Example 2\n") != lessons {
+		unexpected := regexp.MustCompile(`(?m)^\[learn\] (3|-1)\n`).ReplaceAllString(stderr, "")
+		if lessons < 30 || unexpected != "" || !strings.Contains(stderr, "[learn] 3\n") || strings.Count(stdout, "Case 1 ✓") != lessons*3 || strings.Count(stdout, "Example 2\n") != lessons {
 			t.Fatal("lesson examples and demos", lessons, stdout, stderr)
 		}
 	})
@@ -1075,7 +1106,7 @@ flow Canceled()->number {return 0}
 			t.Fatal(stdout, stderr)
 		}
 		stdout, stderr = run("perform request\nrequest\n:quit\n", "learn", "-lesson", "effect-values")
-		if !strings.Contains(stderr, "E-PURITY") || !strings.Contains(stderr, "fn only computes") || !strings.Contains(stdout, "Passed.") {
+		if !strings.Contains(stderr, "E-PURITY") || !strings.Contains(stderr, "fn computes values, builds requests") || !strings.Contains(stdout, "Passed.") {
 			t.Fatal(stdout, stderr)
 		}
 	})
@@ -1273,7 +1304,7 @@ try:
     t.send('\x1b[A\x1b[F\x7f3\r')             # revise an earlier line in the saved program
     t.wait(b'Passed'); t.ready()
     t.send(':lesson bindings\r'); t.ready()
-    t.send('pri\t * cou\t\r')                  # visible lesson parameters complete
+    t.send('pri\tce * cou\t\r')                # ambiguous price/print; finish parameter, then complete count
     t.wait(b'Passed'); t.ready()
     t.send(':lesson effect\r'); t.ready()
     t.send('perform upper_r\t(name)\r')           # visible request builder completes
@@ -1526,14 +1557,13 @@ func TestSessionFlowTransactionsAndClaims(t *testing.T) {
 		t.Fatal("Flow calls reused stores or replayed historical calls", display(t, first.Value), display(t, second.Value), calls.Load())
 	}
 	for source, code := range map[string]string{
-		`flow Bad()->number {return unknown}`:                                 "E-NAME",
-		`flow Recur()->number {return Recur()}`:                               "E-FLOW-CYCLE",
-		`flow Impure()->number {return Read(perform effect worker.read(99))}`: "E-PURITY",
-		`fn impure()->number {Read(1)}`:                                       "E-PURITY",
-		`Main()`:                                                              "E-ARITY",
-		`Main("wrong")`:                                                       "E-TYPE",
-		`flow Read()->null {return null}`:                                     "E-DUPLICATE",
-		`Read=1`:                                                              "E-DUPLICATE",
+		`flow Bad()->number {return unknown}`:   "E-NAME",
+		`flow Recur()->number {return Recur()}`: "E-FLOW-CYCLE",
+		`fn impure()->number {Read(1)}`:         "E-PURITY",
+		`Main()`:                                "E-ARITY",
+		`Main("wrong")`:                         "E-TYPE",
+		`flow Read()->null {return null}`:       "E-DUPLICATE",
+		`Read=1`:                                "E-DUPLICATE",
 	} {
 		_, err := s.Eval(ctx, source, Options{})
 		if d, ok := err.(*Diagnostic); !ok || d.Code != code {

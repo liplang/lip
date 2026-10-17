@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	. "lip/script"
 	"os"
 	"os/exec"
@@ -185,6 +186,61 @@ flow ToolChecks(calls:list)->list {
 	}
 }
 
+func TestOllamaChatRequestValues(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("Python unavailable")
+	}
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", filepath.Join(root, "tests", "fixtures"))
+	source, err := os.ReadFile(filepath.Join(root, "examples", "tmp_ollama_chat.lip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the actual streaming/agent Flows with another request builder.
+	// Constructing a request is cold; performing it twice is two operations.
+	source = append(source, []byte(`
+flow RequestChecks()->object {
+    probe = ollama.RequestProbe()
+    request = fn(messages:list,tools:list)->effect {effect probe.chat(messages,tools)}
+    prepared = request([{role:"user",content:"prepared"}],[])
+    before = probe.events
+    first = StreamReply(prepared,false)
+    second = StreamReply(prepared,false)
+    history = RunAgent(request,{},[{role:"user",content:"agent"}],[],false)
+    after = probe.events
+    native_release(probe)
+    return {before:before,after:after,first:first.thinking,second:second.thinking,agent:history[-1].thinking}
+}
+`)...)
+	host := NewNativeHost(Host{})
+	defer host.Close()
+	program, err := CompileWithOptions(string(source), host, CompileOptions{Entry: "RequestChecks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, program, GoOptions{})
+	const want = `{"after":["request:prepared","close","request:prepared","close","request:agent","close"],"agent":"agent","before":[],"first":"prepared","second":"prepared"}`
+	for _, parallel := range []int{1, 7} {
+		t.Run(fmt.Sprintf("interpreter/%d", parallel), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			report, err := program.Run(ctx, nil, Options{Parallelism: parallel})
+			if err != nil || display(t, report.Output) != want {
+				t.Fatal(report, err)
+			}
+		})
+		t.Run(fmt.Sprintf("generated/%d", parallel), func(t *testing.T) {
+			stdout, stderr, err := runNative(t, executable, "-parallel", fmt.Sprint(parallel))
+			if err != nil || strings.TrimSpace(stdout) != want {
+				t.Fatal(stdout, stderr, err)
+			}
+		})
+	}
+}
+
 // Capture background notifications while stdin remains open and blocked.
 type chatOutput struct {
 	mu       sync.Mutex
@@ -213,15 +269,16 @@ func TestOllamaChatInterpreterAndGo(t *testing.T) {
 	}
 	t.Setenv("PYTHONPATH", filepath.Join(root, "tests", "fixtures"))
 	t.Setenv("LIP_CHAT_TZ", "Asia/Taipei")
+	t.Setenv("LIP_CHAT_MODEL", "composition-test-model")
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "lipc")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancelBuild()
 	buildArgs := []string{"build", "-o", binary, "./cmd/lipc"}
 	if os.Getenv("LIP_NATIVE_RACE") == "1" {
 		buildArgs = append([]string{"build", "-race"}, buildArgs[1:]...)
 	}
-	build := exec.CommandContext(ctx, "go", buildArgs...)
+	build := exec.CommandContext(buildCtx, "go", buildArgs...)
 	build.Dir = root
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v\n%s", err, out)
@@ -245,6 +302,10 @@ func TestOllamaChatInterpreterAndGo(t *testing.T) {
 		{"generated", executable, []string{"-parallel", "4"}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
+			// Compilation and another mode must not consume this mode's PTY
+			// budget, especially when generated programs use the race runtime.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
 			t.Setenv("LIP_CHAT_DB", filepath.Join(dir, mode.name+".sqlite3"))
 			run := func(input string) string {
 				t.Helper()
@@ -259,7 +320,7 @@ func TestOllamaChatInterpreterAndGo(t *testing.T) {
 			}
 			input := "\n/help\nsetup\n" + strings.Repeat("chat\n", 14) + "loop\n/calculations\n/reminders\n/exit\n"
 			output := run(input)
-			for _, want := range []string{"验证完成", "56088", "采购预算", "cancelled", "8 轮模型请求上限", "会话结束"} {
+			for _, want := range []string{"Ollama agent · composition-test-model", "验证完成", "56088", "采购预算", "cancelled", "8 轮模型请求上限", "会话结束"} {
 				if !strings.Contains(output, want) {
 					t.Fatalf("missing %q in\n%s", want, output)
 				}

@@ -1,6 +1,16 @@
 # carry is a sequential iteration expression; with supplies the initial carried value.
 # Each iteration binds s to the preceding next result; the binding remains immutable.
 # next supplies the next carried value; break e returns e immediately.
+fn AddTools(names:list, initial:object)->object {
+    for name in names with s = initial {
+        tool = {name:name}
+        next {
+            tools: concat(s.tools, [tool]),
+            by_name: put(s.by_name, name, tool)
+        }
+    }
+}
+
 flow Main() -> object {
     answer = for x in [1, 2, 3, 4, 5] with s = 0 {
         updated = s + x
@@ -9,5 +19,8 @@ flow Main() -> object {
     }
     # Exhausting a finite source returns the last carried value.
     complete_sum = for x in [1, 2, 3] with s = 0 { next s + x }
-    return {early: answer, complete: complete_sum}
+    # A previous result can seed another pass. The old value remains unchanged.
+    first = AddTools(["read"], {tools:[], by_name:{}})
+    catalog = AddTools(["write"], first)
+    return {early:answer, complete:complete_sum, catalog:catalog, original_count:len(first.tools)}
 }

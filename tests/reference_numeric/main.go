@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	specPath := flag.String("spec", "spec/LIP-1.0-SPEC.en.md", "specification path (English or Chinese edition)")
+	specPath := flag.String("spec", "spec/LIP-1.1-SPEC.en.md", "specification path (English or Chinese edition)")
 	check := flag.Bool("check", false, "compare generated vectors with the specification")
 	flag.Parse()
 	if err := run(*specPath, *check); err != nil {

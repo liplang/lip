@@ -318,6 +318,21 @@ var course = []lesson{
 		cases: []lessonCase{{"{\"xs\":[1,2,3]}", "6"}, {"{\"xs\":[]}", "0"}},
 	},
 	{
+		id:       "diagnostics",
+		title:    "Log while computing a value",
+		section:  "Deciding and transforming",
+		explain:  "fn may print or log diagnostics without changing its calculation. log returns null; the final expression is still the result. Diagnostics go to stderr.",
+		task:     "The logging line is supplied. Fill the result with x * 2.",
+		template: "fn doubled(x:number)->number {\n    log(\"learn\", x)\n    __ANSWER__\n}\nflow Main(x:number)->number {return doubled(x)}",
+		solution: "x * 2",
+		hint:     "Write x * 2. Do not return log(...): it returns null, not the calculation.",
+		examples: []lessonExample{
+			{code: "doubled(3)", want: "6", setup: "fn doubled(x:number)->number {log(\"learn\",x);x*2}"},
+			{code: "doubled(-1)", want: "-2", setup: "fn doubled(x:number)->number {log(\"learn\",x);x*2}"},
+		},
+		cases: []lessonCase{{"{\"x\":3}", "6"}, {"{\"x\":-1}", "-2"}},
+	},
+	{
 		id:       "carry",
 		title:    "Update a loop result",
 		section:  "Deciding and transforming",
@@ -336,7 +351,7 @@ var course = []lesson{
 		id:       "flow-call",
 		title:    "Call a child Flow",
 		section:  "Organizing work",
-		explain:  "A Flow groups work and dependencies. A child Flow finishes its selected work before returning Data.",
+		explain:  "A Flow groups work and dependencies. A child Flow finishes its selected work before returning its result.",
 		task:     "Call Double with n to get twice n.",
 		template: "flow Double(value:number)->number {return value*2}\nflow Main(n:number)->number {return __ANSWER__}",
 		solution: "Double(n)",
@@ -344,6 +359,21 @@ var course = []lesson{
 		examples: []lessonExample{
 			{code: "Double(3)", want: "6", setup: "flow Double(value:number)->number {return value*2}"},
 			{code: "Double(-1)", want: "-2", setup: "flow Double(value:number)->number {return value*2}"},
+		},
+		cases: []lessonCase{{"{\"n\":3}", "6"}, {"{\"n\":-1}", "-2"}},
+	},
+	{
+		id:       "flow-values",
+		title:    "Pass a function to a Flow",
+		section:  "Organizing work",
+		explain:  "A Flow can receive an ordinary value, including a pure function. Pass the function name; Apply calls it with n.",
+		task:     "Pass doubled as the second argument to Apply.",
+		template: "fn doubled(x:number)->number {x*2}\nflow Apply(value:number, transform:function)->number {return transform(value)}\nflow Main(n:number)->number {return Apply(n, __ANSWER__)}",
+		solution: "doubled",
+		hint:     "Fill in doubled without parentheses. doubled is a function value; doubled(n) is its numeric result.",
+		examples: []lessonExample{
+			{code: "Apply(3, doubled)", want: "6", setup: "fn doubled(x:number)->number {x*2}\nflow Apply(value:number, transform:function)->number {return transform(value)}"},
+			{code: "Apply(-1, fn(x:number)->number{x+2})", want: "1", setup: "flow Apply(value:number, transform:function)->number {return transform(value)}"},
 		},
 		cases: []lessonCase{{"{\"n\":3}", "6"}, {"{\"n\":-1}", "-2"}},
 	},
@@ -491,7 +521,7 @@ var course = []lesson{
 		id:       "effect-values",
 		title:    "Pass a request through a function",
 		section:  "Making requests",
-		explain:  "Requests can travel through fn parameters and results. Flow inputs/outputs still require Data and cannot contain requests.",
+		explain:  "Requests can travel through fn and Flow parameters/results. Passing one never executes it; Host, entry JSON, and Claim boundaries still require Data.",
 		task:     "Return request from forward unchanged. Do not execute it inside fn.",
 		template: "import go \"strings\" as text\nfn forward(request:effect)->effect {__ANSWER__}\nflow Main(name:string)->string {\n    request = effect text.ToUpper(name)\n    return perform forward(request)\n}",
 		solution: "request",
@@ -649,7 +679,7 @@ func showLessonTests(l lesson) {
 	}
 }
 
-func showLessonExamples(ctx context.Context, l lesson) error {
+func showLessonExamples(ctx context.Context, l lesson, trace bool) error {
 	for i, example := range l.examples {
 		fmt.Printf("\nExample %d\n", i+1)
 		if example.setup != "" {
@@ -660,7 +690,7 @@ func showLessonExamples(ctx context.Context, l lesson) error {
 		sample.entry, sample.entryInput = "", false
 		sample.cases = []lessonCase{{"{}", example.want}}
 		source := example.setup + "\nflow Main()->any {return " + example.code + "}"
-		if err := checkLesson(ctx, sample, source); err != nil {
+		if err := checkLesson(ctx, sample, source, trace); err != nil {
 			return fmt.Errorf("example %d: %w", i+1, err)
 		}
 	}
@@ -771,7 +801,7 @@ func showLessonError(err error, source string, l lesson) {
 		case "E-TYPE", "E-SCHEMA":
 			fmt.Fprintln(os.Stderr, "Check the requested result type. Text needs quotes; numbers and true/false do not.")
 		case "E-PURITY":
-			fmt.Fprintln(os.Stderr, "fn only computes values or builds requests. Execute requests with perform inside a Flow.")
+			fmt.Fprintln(os.Stderr, "fn computes values, builds requests, and may use print/log/telemetry for diagnostics. Execute requests with perform inside a Flow.")
 		case "E-PARALLEL":
 			fmt.Fprintln(os.Stderr, "Each possible request operation must have a Host contract allowing concurrent reads.")
 		}
@@ -784,6 +814,7 @@ func learn(ctx context.Context, args []string) error {
 	list := flags.Bool("list", false, "list lessons in learning order")
 	start := flags.String("lesson", "", "start at a lesson ID or number (see -list)")
 	path := flags.String("progress", "", "save/resume progress at this JSON path (default: no files)")
+	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -942,7 +973,7 @@ func learn(ctx context.Context, args []string) error {
 		case text == ":tests":
 			showLessonTests(l)
 		case text == ":examples":
-			if err := showLessonExamples(ctx, l); err != nil {
+			if err := showLessonExamples(ctx, l, *trace); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 			}
 		case text == ":hint":
@@ -1071,7 +1102,7 @@ func learn(ctx context.Context, args []string) error {
 			if !demo {
 				attempts[l.id] = lessonAttempt{text: answer, full: full}
 			}
-			if err := checkLesson(ctx, l, source); err != nil {
+			if err := checkLesson(ctx, l, source, *trace); err != nil {
 				if demo {
 					fmt.Fprintln(os.Stderr, err)
 				} else {
@@ -1097,7 +1128,7 @@ func learn(ctx context.Context, args []string) error {
 	return ctx.Err()
 }
 
-func checkLesson(ctx context.Context, l lesson, source string) error {
+func checkLesson(ctx context.Context, l lesson, source string, trace bool) error {
 	host := script.Host{}
 	if l.demo {
 		var err error
@@ -1115,6 +1146,12 @@ func checkLesson(ctx context.Context, l lesson, source string) error {
 	if err != nil {
 		return err
 	}
+	options := interactiveOptions()
+	if trace {
+		var stop func()
+		options.Trace, stop = script.StartTraceOutput(os.Stderr)
+		defer stop()
+	}
 	for i, test := range l.cases {
 		value, err := script.DecodeData([]byte(test.input))
 		if err != nil {
@@ -1122,10 +1159,10 @@ func checkLesson(ctx context.Context, l lesson, source string) error {
 		}
 		var report script.Report
 		if l.entryInput {
-			report, err = program.RunEntry(ctx, value, interactiveOptions())
+			report, err = program.RunEntry(ctx, value, options)
 		} else {
 			inputs, _ := value.Fields()
-			report, err = program.Run(ctx, inputs, interactiveOptions())
+			report, err = program.Run(ctx, inputs, options)
 		}
 		if err != nil {
 			return fmt.Errorf("Case %d input %s: %w", i+1, test.input, err)

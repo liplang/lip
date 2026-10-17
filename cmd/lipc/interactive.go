@@ -84,6 +84,7 @@ func repl(ctx context.Context, args []string) error {
 	project := flags.String("project", "", "project root for static LIP imports (default: current directory)")
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget per cell and :run (0 uses default)")
 	parallel := flags.Int("parallel", 4, "maximum active leaf evaluations per cell and :run (0 uses one)")
+	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -127,7 +128,13 @@ func repl(ctx context.Context, args []string) error {
 	evaluate := func() {
 		if strings.TrimSpace(source) != "" {
 			history = append(history, source)
-			result, err := session.Eval(ctx, source, options)
+			cellOptions := options
+			stop := func() {}
+			if *trace {
+				cellOptions.Trace, stop = script.StartTraceOutput(os.Stderr)
+			}
+			result, err := session.Eval(ctx, source, cellOptions)
+			stop() // Drain diagnostics before entering terminal input again.
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 			} else if result.HasValue {
@@ -227,7 +234,7 @@ func repl(ctx context.Context, args []string) error {
 			case strings.HasPrefix(text, ":run "):
 				args, err := fileRunArgs(strings.TrimSpace(strings.TrimPrefix(text, ":run ")))
 				if err == nil {
-					err = run(ctx, append([]string{"run", "-host", *hostName, "-parallel", strconv.Itoa(*parallel), "-frames", strconv.Itoa(*frames)}, args...))
+					err = run(ctx, append([]string{"run", "-host", *hostName, "-parallel", strconv.Itoa(*parallel), "-frames", strconv.Itoa(*frames), "-trace=" + strconv.FormatBool(*trace)}, args...))
 				}
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)
