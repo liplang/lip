@@ -272,6 +272,8 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		return ""
 	}
 	foreign := map[*expression]nativeShape{}
+	requestReturns := map[*expression]nativeShape{}
+	refresh := false
 	var failure error
 	var lower func(*expression, map[string]nativeShape)
 	var blockLower func(*block, map[string]nativeShape)
@@ -424,191 +426,196 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			// bridge helper. Preserve its callee for the ordinary stage checker.
 			lower(e.x, scope)
 			foreign[e] = shape(e.x, scope)
+			if result := shape(e.y.x, scope).result; result != nil {
+				foreign[e] = mergeNativeShape(foreign[e], *result)
+			}
 			for _, arg := range e.y.args[1:] {
 				lower(arg.expr, scope)
 				foreign[e] = mergeNativeShape(foreign[e], shape(arg.expr, scope))
 			}
 			return
 		}
-		// Capture a module path before lowering its receiver. Namespace lookup is
-		// not an extra native call and must not invoke a function being referenced.
-		if im, member, ok := moduleTarget(e); ok && (e.tag == "field" || e.tag == "id") {
-			// A reserved source keyword separates adapter operations from real
-			// library paths such as Python's get.member or prepare.member.
-			op := Operation{im.language, im.path, "perform.get." + member}
-			if member == "" {
-				op.Member = "perform.get"
-			}
-			add(op, "get")
-			perform(e, im.alias+"."+op.Member, nil)
-			return
-		}
-		if e.tag == "proposal" {
-			resultShape := nativeShape{native: true}
-			parts := strings.SplitN(e.name, ".", 2)
-			im, ok := aliases[parts[0]]
-			if ok && len(parts) == 2 && (im.language == "go" || im.language == "python") {
-				op := Operation{im.language, im.path, parts[1]}
-				key := identityKey(op.Wire())
-				if c, ok := registered[key]; ok && c.Version != "lip-native-1" {
-					for _, a := range e.args {
-						lower(a.expr, scope)
-					}
-					e.nativeResult = nativeShapePointer(nativeSchemaShape(c.Result))
-					foreign[e] = nativeShape{result: e.nativeResult}
-					return
+		if !refresh {
+			// Capture a module path before lowering its receiver. Namespace lookup is
+			// not an extra native call and must not invoke a function being referenced.
+			if im, member, ok := moduleTarget(e); ok && (e.tag == "field" || e.tag == "id") {
+				// A reserved source keyword separates adapter operations from real
+				// library paths such as Python's get.member or prepare.member.
+				op := Operation{im.language, im.path, "perform.get." + member}
+				if member == "" {
+					op.Member = "perform.get"
 				}
-				if im.language == "go" {
-					pkg, err := host.Native.discover(ctx, im.path)
-					if err != nil {
-						failure = at(err, e.tok)
+				add(op, "get")
+				perform(e, im.alias+"."+op.Member, nil)
+				return
+			}
+			if e.tag == "proposal" {
+				resultShape := nativeShape{native: true}
+				parts := strings.SplitN(e.name, ".", 2)
+				im, ok := aliases[parts[0]]
+				if ok && len(parts) == 2 && (im.language == "go" || im.language == "python") {
+					op := Operation{im.language, im.path, parts[1]}
+					key := identityKey(op.Wire())
+					if c, ok := registered[key]; ok && c.Version != "lip-native-1" {
+						for _, a := range e.args {
+							lower(a.expr, scope)
+						}
+						e.nativeResult = nativeShapePointer(nativeSchemaShape(c.Result))
+						foreign[e] = nativeShape{result: e.nativeResult}
 						return
 					}
-					root := strings.Split(parts[1], ".")[0]
-					if _, ok := pkg.members[root]; !ok {
-						failure = at(diagnostic("E-OPERATION", "no exported Go symbol "+e.name), e.tok)
-						return
-					}
-					if sig := pkg.signatures[parts[1]]; sig != nil {
-						resultShape = nativeGoResultShape(sig)
-						var pos []any
-						named := map[string]any{}
-						for _, a := range e.args {
-							if a.name == "" {
-								pos = append(pos, nil)
-							} else {
-								named[a.name] = []any{}
-							}
-						}
-						if _, err := nativeGoArguments(sig, pos, named); err != nil {
-							failure = at(diagnostic("E-ARITY", err.Error()), e.tok)
-							return
-						}
-					} else if !strings.Contains(parts[1], ".") {
-						count, named := 0, false
-						for _, a := range e.args {
-							if a.name == "" {
-								count++
-							} else {
-								named = true
-							}
-						}
-						var err error
-						if pkg.manual {
-							err = host.Native.Go.checkPackageCall(im.path, parts[1], count, named)
-						} else if _, ok := pkg.pkg.Scope().Lookup(parts[1]).(*types.TypeName); ok {
-							if named || count > 1 {
-								err = diagnostic("E-ARITY", "type constructor accepts zero or one positional argument")
-							}
-						} else {
-							err = diagnostic("E-TYPE", "callee is not callable")
-						}
+					if im.language == "go" {
+						pkg, err := host.Native.discover(ctx, im.path)
 						if err != nil {
 							failure = at(err, e.tok)
 							return
 						}
-					}
-				}
-				for _, a := range e.args {
-					lower(a.expr, scope)
-				}
-				add(op, "call")
-				pos, named := pack(e.args, e.tok)
-				e.args = []argument{{expr: pos}, {expr: named}}
-				e.nativeResult = &resultShape
-				foreign[e] = nativeShape{result: e.nativeResult}
-				return
-			}
-			// Explicit effects may target any bound receiver, including Flow
-			// parameters whose native provenance is only known at runtime.
-			_, bound := scope[parts[0]]
-			if len(parts) == 2 && bound && !ok {
-				for _, a := range e.args {
-					lower(a.expr, scope)
-				}
-				op := Operation{"host", "lip.native", "call." + parts[1]}
-				name := add(op, "call")
-				args := append([]argument{{expr: &expression{tag: "id", tok: e.tok, name: parts[0]}}}, e.args...)
-				pos, named := pack(args, e.tok)
-				e.name = name
-				e.args = []argument{{expr: pos}, {expr: named}}
-				e.nativeResult = nativeShapePointer(nativeShape{native: true})
-				foreign[e] = nativeShape{result: e.nativeResult}
-				return
-			}
-		}
-		if e.tag == "call" {
-			if e.x.tag == "id" && len(e.args) == 1 {
-				action := ""
-				switch e.x.name {
-				case "$native_data":
-					action = "snapshot"
-				case "$native_release":
-					action = "release"
-				case "native_data", "native_release":
-					if _, bound := scope[e.x.name]; !bound {
-						action = "snapshot"
-						if e.x.name == "native_release" {
-							action = "release"
+						root := strings.Split(parts[1], ".")[0]
+						if _, ok := pkg.members[root]; !ok {
+							failure = at(diagnostic("E-OPERATION", "no exported Go symbol "+e.name), e.tok)
+							return
+						}
+						if sig := pkg.signatures[parts[1]]; sig != nil {
+							resultShape = nativeGoResultShape(sig)
+							var pos []any
+							named := map[string]any{}
+							for _, a := range e.args {
+								if a.name == "" {
+									pos = append(pos, nil)
+								} else {
+									named[a.name] = []any{}
+								}
+							}
+							if _, err := nativeGoArguments(sig, pos, named); err != nil {
+								failure = at(diagnostic("E-ARITY", err.Error()), e.tok)
+								return
+							}
+						} else if !strings.Contains(parts[1], ".") {
+							count, named := 0, false
+							for _, a := range e.args {
+								if a.name == "" {
+									count++
+								} else {
+									named = true
+								}
+							}
+							var err error
+							if pkg.manual {
+								err = host.Native.Go.checkPackageCall(im.path, parts[1], count, named)
+							} else if _, ok := pkg.pkg.Scope().Lookup(parts[1]).(*types.TypeName); ok {
+								if named || count > 1 {
+									err = diagnostic("E-ARITY", "type constructor accepts zero or one positional argument")
+								}
+							} else {
+								err = diagnostic("E-TYPE", "callee is not callable")
+							}
+							if err != nil {
+								failure = at(err, e.tok)
+								return
+							}
 						}
 					}
-				case "len":
-					action = "length"
-				case "str":
-					action = "string"
-				}
-				if action != "" {
-					lower(e.args[0].expr, scope)
-					if action == "snapshot" || action == "release" || isNative(e.args[0].expr, scope) {
-						perform(e, add(Operation{"host", "lip.native", action}, action), e.args)
-						foreign[e] = nativeShape{}
-						return
-					}
-				}
-			}
-			if im, member, ok := moduleTarget(e.x); ok && member != "" {
-				op := Operation{im.language, im.path, member}
-				if c, ok := registered[identityKey(op.Wire())]; ok && c.Version != "lip-native-1" {
-					for _, arg := range e.args {
-						lower(arg.expr, scope)
-					}
-					performCall(e, im.alias+"."+member, e.args, false)
-					foreign[e] = nativeSchemaShape(c.Result)
-					return
-				}
-				add(op, "call")
-				if im.language == "python" || strings.Contains(member, ".") {
-					for _, arg := range e.args {
-						lower(arg.expr, scope)
-					}
-					prep := Operation{im.language, im.path, "perform.prepare." + member}
-					add(prep, "prepare")
-					callee := prepare(e.x.tok, im.alias+"."+prep.Member, nil, e.args)
-					perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
-					return
-				}
-				probe := &expression{tag: "proposal", tok: e.x.tok, name: im.alias + "." + member, args: append([]argument(nil), e.args...)}
-				lower(probe, scope)
-				if failure != nil {
-					return
-				}
-				perform(e, im.alias+"."+member, e.args)
-				if result := foreign[probe].result; result != nil {
-					foreign[e] = *result
-				}
-				return
-			}
-			// A method is resolved by the provider, not by pure object projection.
-			if e.x.tag == "field" {
-				lower(e.x.x, scope)
-				if isNative(e.x.x, scope) {
 					for _, a := range e.args {
 						lower(a.expr, scope)
 					}
-					name := add(Operation{"host", "lip.native", "prepare." + e.x.name}, "prepare")
-					callee := prepare(e.x.tok, name, e.x.x, e.args)
-					perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
+					add(op, "call")
+					pos, named := pack(e.args, e.tok)
+					e.args = []argument{{expr: pos}, {expr: named}}
+					e.nativeResult = &resultShape
+					foreign[e] = nativeShape{result: e.nativeResult}
 					return
+				}
+				// Explicit effects may target any bound receiver, including Flow
+				// parameters whose native provenance is only known at runtime.
+				_, bound := scope[parts[0]]
+				if len(parts) == 2 && bound && !ok {
+					for _, a := range e.args {
+						lower(a.expr, scope)
+					}
+					op := Operation{"host", "lip.native", "call." + parts[1]}
+					name := add(op, "call")
+					args := append([]argument{{expr: &expression{tag: "id", tok: e.tok, name: parts[0]}}}, e.args...)
+					pos, named := pack(args, e.tok)
+					e.name = name
+					e.args = []argument{{expr: pos}, {expr: named}}
+					e.nativeResult = nativeShapePointer(nativeShape{native: true})
+					foreign[e] = nativeShape{result: e.nativeResult}
+					return
+				}
+			}
+			if e.tag == "call" {
+				if e.x.tag == "id" && len(e.args) == 1 {
+					action := ""
+					switch e.x.name {
+					case "$native_data":
+						action = "snapshot"
+					case "$native_release":
+						action = "release"
+					case "native_data", "native_release":
+						if _, bound := scope[e.x.name]; !bound {
+							action = "snapshot"
+							if e.x.name == "native_release" {
+								action = "release"
+							}
+						}
+					case "len":
+						action = "length"
+					case "str":
+						action = "string"
+					}
+					if action != "" {
+						lower(e.args[0].expr, scope)
+						if action == "snapshot" || action == "release" || isNative(e.args[0].expr, scope) {
+							perform(e, add(Operation{"host", "lip.native", action}, action), e.args)
+							foreign[e] = nativeShape{}
+							return
+						}
+					}
+				}
+				if im, member, ok := moduleTarget(e.x); ok && member != "" {
+					op := Operation{im.language, im.path, member}
+					if c, ok := registered[identityKey(op.Wire())]; ok && c.Version != "lip-native-1" {
+						for _, arg := range e.args {
+							lower(arg.expr, scope)
+						}
+						performCall(e, im.alias+"."+member, e.args, false)
+						foreign[e] = nativeSchemaShape(c.Result)
+						return
+					}
+					add(op, "call")
+					if im.language == "python" || strings.Contains(member, ".") {
+						for _, arg := range e.args {
+							lower(arg.expr, scope)
+						}
+						prep := Operation{im.language, im.path, "perform.prepare." + member}
+						add(prep, "prepare")
+						callee := prepare(e.x.tok, im.alias+"."+prep.Member, nil, e.args)
+						perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
+						return
+					}
+					probe := &expression{tag: "proposal", tok: e.x.tok, name: im.alias + "." + member, args: append([]argument(nil), e.args...)}
+					lower(probe, scope)
+					if failure != nil {
+						return
+					}
+					perform(e, im.alias+"."+member, e.args)
+					if result := foreign[probe].result; result != nil {
+						foreign[e] = *result
+					}
+					return
+				}
+				// A method is resolved by the provider, not by pure object projection.
+				if e.x.tag == "field" {
+					lower(e.x.x, scope)
+					if isNative(e.x.x, scope) {
+						for _, a := range e.args {
+							lower(a.expr, scope)
+						}
+						name := add(Operation{"host", "lip.native", "prepare." + e.x.name}, "prepare")
+						callee := prepare(e.x.tok, name, e.x.x, e.args)
+						perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
+						return
+					}
 				}
 			}
 		}
@@ -652,7 +659,11 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 		}
 		switch e.tag {
 		case "fn":
-			foreign[e] = nativeShape{result: nativeShapePointer(nativeRuntimeShape(shape(e.body.tail, bodyScope)))}
+			result := shape(e.body.tail, bodyScope)
+			if request, known := requestReturns[e]; known {
+				result = request
+			}
+			foreign[e] = nativeShape{result: nativeShapePointer(nativeRuntimeShape(result))}
 			e.nativeResult = foreign[e].result
 		case "perform":
 			if result := shape(e.x, local).result; result != nil {
@@ -691,7 +702,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 						return
 					}
 				}
-				if isNative(e.args[0].expr, local) {
+				if !refresh && isNative(e.args[0].expr, local) {
 					args := append([]argument(nil), e.args...)
 					if len(args) == 3 {
 						args = append(args, argument{expr: &expression{tag: "lit", tok: e.tok}})
@@ -700,7 +711,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				} else {
 					foreign[e] = nativeSliceShape(shape(e.args[0].expr, local), e.args[1:])
 				}
-			} else if isNative(e.x, local) {
+			} else if !refresh && isNative(e.x, local) {
 				callee := prepare(e.x.tok, add(Operation{"host", "lip.native", "prepare"}, "prepare"), e.x, e.args)
 				perform(e, add(Operation{"host", "lip.native", "call"}, "call"), append([]argument{{expr: callee}}, e.args...))
 			} else {
@@ -712,13 +723,13 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				}
 			}
 		case "field":
-			if isNative(e.x, local) {
+			if !refresh && isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "get." + e.name}, "get"), []argument{{expr: e.x}})
 			} else {
 				foreign[e] = shape(e.x, local).fields[e.name]
 			}
 		case "index":
-			if isNative(e.x, local) {
+			if !refresh && isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "index"}, "index"), []argument{{expr: e.x}, {expr: e.y}})
 			} else {
 				receiver := shape(e.x, local)
@@ -746,7 +757,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 				}
 			}
 		case "slice":
-			if isNative(e.x, local) {
+			if !refresh && isNative(e.x, local) {
 				perform(e, add(Operation{"host", "lip.native", "slice"}, "slice"), append([]argument{{expr: e.x}}, e.args...))
 			} else {
 				foreign[e] = nativeSliceShape(shape(e.x, local), e.args)
@@ -769,9 +780,89 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 	for name, value := range saved {
 		scope[name] = nativeValueShape(value)
 	}
-	for _, name := range sortedFunctionNames(s.functions) {
+	// Collect callee provenance before its callers. Alphabetical declaration
+	// order must not decide whether a returned native request/resource is known.
+	visiting, lowered := map[string]bool{}, map[string]bool{}
+	var declaration func(string)
+	declaration = func(name string) {
+		if visiting[name] || lowered[name] {
+			return
+		}
+		visiting[name] = true
+		dependencies := map[string]*expression{}
+		for dependency := range freeNames(s.functions[name]) {
+			if definition := s.functions[dependency]; definition != nil {
+				dependencies[dependency] = definition
+			}
+		}
+		for _, dependency := range sortedFunctionNames(dependencies) {
+			declaration(dependency)
+		}
 		lower(s.functions[name], scope)
 		scope[name] = shape(s.functions[name], scope)
+		delete(visiting, name)
+		lowered[name] = true
+	}
+	for _, name := range sortedFunctionNames(s.functions) {
+		declaration(name)
+	}
+	if failure == nil && len(s.functions) != 0 {
+		// The ordinary return-operation analysis also handles recursive request
+		// builders. Use its static candidates to preserve native result metadata;
+		// this does not strengthen Ops or infer concurrency from runtime values.
+		view := *s
+		view.body, view.params, view.result, view.cell = &block{}, nil, "void", false
+		if check, err := analyzeBindings(&view, host, s.initial); err == nil {
+			results := map[string]nativeShape{}
+			var functions []*expression
+			var collect func(*expression)
+			collect = func(e *expression) {
+				if e.tag == "fn" {
+					functions = append(functions, e)
+				}
+				if e.tag == "proposal" {
+					if contract, ok := check.resolve(e); ok {
+						key := identityKey(contract.Operation.Wire())
+						result := nativeShape{}
+						if e.nativeResult != nil {
+							result = *e.nativeResult
+						}
+						results[key] = mergeNativeShape(results[key], result)
+					}
+				}
+				walkExpression(e, collect)
+			}
+			for _, name := range sortedFunctionNames(s.functions) {
+				collect(s.functions[name])
+			}
+			for _, f := range functions {
+				if ops, known := resolvedOperations(f.info.returns); known {
+					result := nativeShape{}
+					complete := true
+					for _, op := range ops {
+						candidate, ok := results[op]
+						if !ok {
+							complete = false
+							break
+						}
+						result = mergeNativeShape(result, candidate)
+					}
+					if !complete {
+						continue
+					}
+					requestReturns[f] = nativeShape{result: nativeShapePointer(result)}
+				}
+			}
+			// Refresh pure return shapes after all recursive request summaries
+			// are known. This also updates enclosing closures and containers;
+			// already-lowered proposals must not be packed a second time.
+			refresh = true
+			visiting, lowered = map[string]bool{}, map[string]bool{}
+			for _, name := range sortedFunctionNames(s.functions) {
+				declaration(name)
+			}
+			refresh = false
+		}
 	}
 	if len(s.flows) == 0 || s.cell {
 		blockLower(s.body, scope)

@@ -6,7 +6,7 @@
 
 这些可执行示例逐步展开 LIP 1.0 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
 
-第一次接触可运行 `./lipc learn`，跟随 19 课填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
+第一次接触可运行 `./lipc learn`，跟随 36 课与 72 个小例子填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
 
 REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
@@ -37,7 +37,7 @@ REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道�
 
 `number` 不分整数和小数类型，`3` 与 `3.0` 相同，JSON 输出为 `3`。对数的真数和底数都要大于 0，底数不能为 1；负数底数只接受整数指数。幂和对数是固定算法的近似结果；溢出或定义域错误会报 `E-NUMBER`。
 
-`learn -lesson power` 与 `learn -lesson logarithm` 提供这两项练习。REPL 和 learn 都可用左右方向键修改输入，用上下方向键取回历史，Tab 补全、Ctrl-R 搜索历史；完整快捷键见 [README](../README.md#交互计算和学习)。
+`learn -lesson power` 与 `learn -lesson logarithm` 提供这两项练习。REPL 和 learn 都可用左右方向键修改输入，单行用上下键取回历史，多行用上下键移动；Ctrl-P/N 随时取回历史，Alt-Enter 换行，Tab 补全、Ctrl-R 搜索历史；完整快捷键见 [README](../README.md#交互计算和学习)。
 
 REPL 也会显示库函数的返回值。`fmt.Print/Printf/Println` 的返回值包含写入字节数，因此 `fmt.Print("hello")` 显示为 `hello5`；它不是额外的打印动作。完整说明见 [README](../README.md#为什么-fmtprint-后面会显示数字)。
 
@@ -110,17 +110,50 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 | 文件 | 学习内容 | 结果 |
 | --- | --- | --- |
 | [17_go_python](ecosystem/17_go_python.lip) | 在同一 Flow 中调用两个生态 | Python 均值为 2，Go 返回 SHA-256 字符串 |
-| [18_proposals](ecosystem/18_proposals.lip) | proposal 绑定、执行与请求链 | `first="HELLO", second="HELLO, LIP"` |
-| [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | 并行 ReadOnly、完整收集、顺序 Write | `["ADA","LIN","SAM"]`；日志写 stderr |
+| [18_proposals](ecosystem/18_proposals.lip) | 纯函数构造/传递请求、请求链、不同结果类型 | `first="HELLO", second="HELLO, LIP", average=2` |
+| [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | 保留函数返回摘要的并行 ReadOnly、完整收集、顺序 Write | `["ADA","LIN","SAM"]`；日志写 stderr |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | 记录结果进入下一轮外部请求 | `rounds=4, score=0.8` |
 
 ```sh
 ./lipc run -host demo examples/ecosystem/17_go_python.lip
+./lipc run -host demo examples/ecosystem/18_proposals.lip
 ./lipc run -host demo -parallel 4 examples/ecosystem/19_parallel_read_write.lip
 ./lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
 ```
 
 这些教学示例的显式操作合约、schema 和 bytes 编码集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中。CLI 默认还提供通用 Go/Python 桥接，可以直接调用导入库的函数、读取模块属性和操作原生对象，例如 `import go "strings"; strings.ToUpper("hello")` 或 `import python "math"; math.sqrt(3)`。直接调用和属性访问会降为 `perform effect`；数组等原生对象以资源引用保留，使用 `native_data(value)` 显式取得普通数据快照。通用配置、转换规则和运行条件见 [README](../README.md#接入-go--python)。
+
+读 effect 示例时，只需分清三件事：
+
+1. `upper_request("hello")` 得到请求，没有调用外部库。`perform request` 才执行，并返回合约规定的 Data。
+2. `18_proposals` 的 `forward(request:effect)->effect` 展示 fn 参数与返回值能传请求；Flow 输入/输出、Host 参数/结果和 Claim 仍只能传 Data。
+3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格。经 `forward` 的未知形参或容器投影取回请求，仍可顺序执行，但不能证明并行安全。
+
+项目自定义操作可用普通 `policy` 参数携带 token、金额与时限等选项，具体限制由 Host 实施；权限需求由合约声明并由 Host 授予。短例子与当前边界见 [README 的 effect 说明](../README.md#所有外部动作都走同一条边界)。
+
+## 本地 Ollama 聊天、记录与提醒
+
+[tmp_ollama_chat.lip](tmp_ollama_chat.lip) 在一个 LIP 文件内实现多轮流式聊天、工具参数检查、计算记录和提醒。模型选择工具，LIP 按明确的工具名执行，再把结果传回模型继续决策。模型接入使用官方 Python `ollama` 客户端，终端编辑使用 `prompt_toolkit`，存储与计时直接调用标准库。
+
+先在 `lipc` 使用的 Python 3.9+ 环境中安装客户端，并启动本地 Ollama、下载支持工具调用的模型。以下命令从项目根目录运行，默认模型为 `llama3.1:8b`：
+
+```sh
+python3 -m pip install 'ollama>=0.6.3' 'prompt_toolkit>=3.0'
+ollama pull llama3.1:8b
+make build
+LIP_CHAT_TZ=Asia/Taipei ./lipc run examples/tmp_ollama_chat.lip
+```
+
+已安装 `lipc` 时，也可以从上级目录运行 `~/go/bin/lipc run ./lipv1/examples/tmp_ollama_chat.lip`。程序直接使用这一个 `.lip` 文件，无需其他业务源码文件或 `PYTHONPATH` 配置。`LIP_CHAT_MODEL` 可覆盖默认模型；服务地址和超时在文件顶部配置。时间默认跟随系统本地时区，可通过 `LIP_CHAT_TZ` 指定 IANA 时区（例如 `Asia/Taipei`、`Asia/Shanghai`）；启动时显示实际日期和 UTC 偏移。
+
+可以输入“计算 123 * 456，备注采购预算”“查询采购预算的历史计算”“10 秒后提醒我喝水”“查看待办提醒”“取消编号为 1 的提醒”“从现在再过 31 小时 52 分钟是几点”。成功的计算自动保存操作数、结果、备注和时间；时间偏移使用专用工具，返回含日期、时区的本地时间。提醒支持倒计时或带时区的 RFC 3339 时间。
+
+- `/time`、`/after 31h52m`（也支持 `24m`、`-1h`、`30s`）直接计算时间，无需等待模型。
+- `/calculations`、`/reminders` 直接读取最近记录；`/new` 清空聊天上下文，保留计算和提醒；`/help` 显示帮助。
+- 终端支持中文退格、Delete、方向键、历史上下翻阅、Ctrl-R 搜索、Ctrl-A/E 行首/尾、Ctrl-U 删除至行首和整段粘贴。Ctrl-C 丢弃当前输入，Ctrl-D 或 `/exit` 退出；缺少 `prompt_toolkit` 时回退为逐行输入。管道输入仍按普通文本读取。
+- 工具默认输出简短结果，`LIP_CHAT_DEBUG=1` 显示完整参数和 JSON 结果。明确的身份询问和编辑/速度反馈不提供业务工具。
+
+SQLite 数据库默认保存在**当前工作目录**的 `.ollama_chat/state.sqlite3`，首次运行自动创建；环境变量 `LIP_CHAT_DB` 可指定路径。换目录运行时如需复用记录，应将它设为同一个绝对路径。提醒在等待输入或模型生成时也会主动显示，编辑中的草稿会保留；程序退出期间不会通知，重启读取同一个数据库时会补发到期提醒。聊天上下文保留最近 12 个完整用户轮次，并按约 24000 字符预算裁剪完整轮次，至少保留最新轮次；重启不恢复聊天，但可通过工具查询保存的记录。每次输入最多请求模型 8 轮，参数错误会反馈给模型修正。模型请求使用低温度、1024 token 输出上限和 30 分钟驻留设置，终端显示等待提示并流式输出正文；实际速度取决于模型和硬件。连接、数据库等运行错误仍会终止程序。
 
 ## 网站入口
 

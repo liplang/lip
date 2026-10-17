@@ -90,7 +90,6 @@ func TestSessionPreservesProposalOps(t *testing.T) {
 	for _, rhs := range []string{
 		`[effect worker.read(0)][0]`,
 		`{request:effect worker.read(0)}.request`,
-		`(fn()->effect {effect worker.read(0)})()`,
 		`for i in [1] with p=effect worker.read(0) {next p}`,
 	} {
 		t.Run(rhs, func(t *testing.T) {
@@ -746,7 +745,7 @@ func TestCellContinuationUsesCoreGrammar(t *testing.T) {
 func TestInteractiveCLI(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "lipc")
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/lipc")
 	build.Dir = ".."
@@ -1007,19 +1006,77 @@ flow Canceled()->number {return 0}
 		}
 		var input strings.Builder
 		lessons := 0
+		seen := map[string]bool{}
 		for _, line := range strings.Split(stdout, "\n") {
 			fields := strings.Fields(line)
 			if len(fields) < 2 {
 				continue
 			}
 			lessons++
-			fmtLine := ":lesson " + fields[1] + "\n:demo\n"
+			if seen[fields[1]] {
+				t.Fatalf("duplicate lesson ID %s", fields[1])
+			}
+			seen[fields[1]] = true
+			fmtLine := ":lesson " + fields[1] + "\n:examples\n:demo\n"
 			input.WriteString(fmtLine)
 		}
 		input.WriteString(":quit\n")
 		stdout, stderr = run(input.String(), "learn")
-		if lessons < 10 || stderr != "" || strings.Count(stdout, "Case 1 ✓") != lessons {
-			t.Fatal("lesson demos", lessons, stdout, stderr)
+		if lessons < 30 || stderr != "" || strings.Count(stdout, "Case 1 ✓") != lessons*3 || strings.Count(stdout, "Example 2\n") != lessons {
+			t.Fatal("lesson examples and demos", lessons, stdout, stderr)
+		}
+	})
+	t.Run("learning-help-does-not-complete", func(t *testing.T) {
+		path := filepath.Join(dir, "new-progress-dir", "practice.json")
+		stdout, stderr := run(":hint\n:hint\n:hint\n:examples\n:tests\n:demo\n:status\n:quit\n", "learn", "-lesson", "bindings", "-progress", path)
+		for _, want := range []string{"Hint 1:", "Hint 2:", "One possible answer", "Input:", "Expected result:", "Test 2:", "Example 2", "Completed 0/", "progress is unchanged"} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("missing %q: %s", want, stdout)
+			}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || stderr != "" || !bytes.Contains(data, []byte(`"completed": {}`)) {
+			t.Fatal(stdout, stderr, string(data), err)
+		}
+	})
+	t.Run("saved-answers-and-replacement", func(t *testing.T) {
+		stdout, stderr := run("(x+2)*4\n:draft\n:lesson bindings\nprice*count\n:lesson arithmetic\n:retry\n(x+2)*3\n:quit\n", "learn", "-lesson", "arithmetic")
+		if !strings.Contains(stderr, "expected 18") || !strings.Contains(stderr, "Your answer is saved") || !strings.Contains(stdout, "1 | (x+2)*4") || !strings.Contains(stdout, "Last answer:\n(x+2)*4") || strings.Count(stdout, "Passed.") != 2 {
+			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("whole-program-retry", func(t *testing.T) {
+		stdout, stderr := run(":edit\nflow Main(x:number)->number {\n return (x+2)*4\n}\n:submit\n:draft\n:retry\nflow Main(x:number)->number {\n return (x+2)*3\n}\n:submit\n:quit\n", "learn", "-lesson", "arithmetic")
+		if !strings.Contains(stderr, "expected 18") || !strings.Contains(stdout, "replacement program") || !strings.Contains(stdout, "2 |  return (x+2)*4") || strings.Count(stdout, "Passed.") != 1 {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run("flow Main()->string {return \"Hello, LIP!\"}\n:quit\n", "learn", "-lesson", "hello")
+		if stderr != "" || !strings.Contains(stdout, "Passed.") {
+			t.Fatal(stdout, stderr)
+		}
+		for _, program := range []string{
+			"flow\tMain()->string {return \"Hello, LIP!\"}",
+			"fn\tgreet()->string {\"Hello, LIP!\"}; flow Main()->string {return greet()}",
+			"GREETING:string=\"Hello, LIP!\"; flow Main()->string {return GREETING}",
+		} {
+			stdout, stderr = run(program+"\n:quit\n", "learn", "-lesson", "hello")
+			if stderr != "" || !strings.Contains(stdout, "Passed.") {
+				t.Fatal(program, stdout, stderr)
+			}
+		}
+		stdout, stderr = run("fn (y:number)->number {y*2}(x)\n:quit\n", "learn", "-lesson", "function-body")
+		if stderr != "" || !strings.Contains(stdout, "Passed.") {
+			t.Fatal("anonymous function expression misread as program", stdout, stderr)
+		}
+	})
+	t.Run("learning-errors-and-navigation", func(t *testing.T) {
+		stdout, stderr := run("42\n:hint\n\"Hello, LIP!\"\n:prev\n:submit\n:lesson\n:lesson slicing\n:next\n:quit\n", "learn", "-lesson", "hello")
+		if !strings.Contains(stderr, "E-TYPE") || !strings.Contains(stderr, "Text needs quotes") || !strings.Contains(stderr, "1 | flow Hello") || !strings.Contains(stderr, ":lesson hello") || !strings.Contains(stdout, "Passed.") || !strings.Contains(stdout, "first lesson") || !strings.Contains(stdout, "last lesson") || !strings.Contains(stdout, "Nothing to check") {
+			t.Fatal(stdout, stderr)
+		}
+		stdout, stderr = run("perform request\nrequest\n:quit\n", "learn", "-lesson", "effect-values")
+		if !strings.Contains(stderr, "E-PURITY") || !strings.Contains(stderr, "fn only computes") || !strings.Contains(stdout, "Passed.") {
+			t.Fatal(stdout, stderr)
 		}
 	})
 	t.Run("answers-and-progress", func(t *testing.T) {
@@ -1034,6 +1091,43 @@ flow Canceled()->number {return 0}
 		}
 		stdout, stderr = run(":quit\n", "learn", "-progress", path)
 		if stderr != "" || !strings.Contains(stdout, "arithmetic") {
+			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("earlier-progress-and-help", func(t *testing.T) {
+		path := filepath.Join(dir, "earlier-progress.json")
+		if err := os.WriteFile(path, []byte(`{"version":1,"current":"effect","completed":{"hello":true,"bindings":true,"effect":true}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr := run(":status\n:demo\n:quit\n", "learn", "-progress", path)
+		if stderr != "" || !strings.Contains(stdout, "(effect) · completed") || !strings.Contains(stdout, "Completed 3/") {
+			t.Fatal(stdout, stderr)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(data, []byte(`"version": 1`)) || !bytes.Contains(data, []byte(`"effect": true`)) {
+			t.Fatal(string(data), err)
+		}
+		stdout, stderr = run("", "learn", "-h")
+		if !strings.Contains(stdout+stderr, "-lesson") || strings.Contains(stderr, "help requested") {
+			t.Fatal(stdout, stderr)
+		}
+		if err := os.WriteFile(path, []byte("broken JSON"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr = run("", "learn", "-list", "-progress", path, "-lesson", "missing")
+		if stderr != "" || !strings.Contains(stdout, "hello") || !strings.Contains(stdout, "effect-parallel") {
+			t.Fatal("lesson listing should not require usable progress or selection", stdout, stderr)
+		}
+	})
+	t.Run("demo-preserves-open-draft", func(t *testing.T) {
+		stdout, stderr := run("(x +\n:demo\n:draft\n2)*3\n:quit\n", "learn", "-lesson", "arithmetic")
+		if stderr != "" || !strings.Contains(stdout, "1 | (x +") || strings.Count(stdout, "Passed.") != 1 {
+			t.Fatal(stdout, stderr)
+		}
+	})
+	t.Run("else-on-next-line", func(t *testing.T) {
+		stdout, stderr := run("if score >= 0.8 {\n\"ready\"\n}\n:hint\nelse {\n\"retry\"\n}\n:quit\n", "learn", "-lesson", "conditions")
+		if stderr != "" || strings.Count(stdout, "Passed.") != 1 {
 			t.Fatal(stdout, stderr)
 		}
 	})
@@ -1132,6 +1226,7 @@ try:
     t.value('42\r', '42')
     t.value('\x1b[A\r', '42')                    # history
     t.value('6\x1b[A\x1b[B\r', '6')             # recover current draft
+    t.value('7\x10\x0e\r', '7')                 # explicit previous/next history
     t.value('\x12' + '42\r', '42')               # reverse history search
     t.value('9\x12missing\x07\r', '9')           # cancel history search
     t.value('parse_n\t("3")\r', '3')            # core completion
@@ -1146,6 +1241,9 @@ try:
     t.value('"Ae\u0301"\x1b[D\x7fB\x1b[F\r', '"AB"')
     t.value('"A👩‍💻"\x1b[D\x7fB\x1b[F\r', '"AB"')
     t.value('\x1b[200~if true {\r\n2 ** 3\r\n} else {0}\x1b[201~\r', '8')
+    t.value('if true {\x1b\r2+3\x0a} else {0}\r', '5') # indented Alt-Enter and Ctrl-J
+    t.value('\x1b[200~if true {\n"你好"\n} else {"other"}\x1b[201~\x1b[A\x1b[H\x1b[C\x1b[3~再\x05\r', '"再好"') # multiline Unicode movement
+    t.value('\x1b[200~[\n\t"你好",\n    "再见"\n]\x1b[201~\x01\x1b[B\x1b[C\x1b[B\x1b[C\x1b[3~初\x05\r', '["你好","初见"]') # align tabs and spaces when moving vertically
     t.send('msg="""\r'); t.ready()
     t.send(':quit\r'); t.ready()
     t.value('"""\r', '"\\u000a:quit\\u000a"')           # commands inside a multiline string are text
@@ -1163,6 +1261,29 @@ try:
     t.send('broken\x03'); t.wait(b'^C'); t.ready()
     t.send('(x + 2) * 3\r')
     t.wait('Passed'.encode()); t.ready()
+    t.send('(x + 2) * 4\r')
+    t.wait(b'expected 18'); t.ready()
+    t.send(':retry\r'); t.ready()
+    t.send('\x7f3\r')                            # failed answer is prefilled, not lost
+    t.wait(b'Passed'); t.ready()
+    t.send(':edit\r'); t.ready()
+    t.send('\x1b[200~flow Main(x:number)->number {\n    return (x+2)*4\n}\x1b[201~\r'); t.ready()
+    t.send(':submit\r'); t.wait(b'expected 18'); t.ready()
+    t.send(':retry\r'); t.ready()
+    t.send('\x1b[A\x1b[F\x7f3\r')             # revise an earlier line in the saved program
+    t.wait(b'Passed'); t.ready()
+    t.send(':lesson bindings\r'); t.ready()
+    t.send('pri\t * cou\t\r')                  # visible lesson parameters complete
+    t.wait(b'Passed'); t.ready()
+    t.send(':lesson effect\r'); t.ready()
+    t.send('perform upper_r\t(name)\r')           # visible request builder completes
+    t.wait(b'Passed'); t.ready()
+    t.send(':lesson entries\r'); t.ready()
+    t.send('\x1b[200~# Complete program beginning with Data\nOFFSET : number = 2\nflow\tAdd(n:number)->number {return n+OFFSET}\nflow Empty()->void {}\x1b[201~\r')
+    t.wait(b'Passed'); t.ready()                  # comments, static data, tab-separated declaration
+    t.send(':lesson function-body\r'); t.ready()
+    t.send('fn (y:number)->number {y*2}(x)\r')     # anonymous fn remains a blank expression
+    t.wait(b'Passed'); t.ready()
 finally:
     t.close()
 

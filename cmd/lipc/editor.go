@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -15,7 +16,7 @@ import (
 
 var errInputCanceled = errors.New("input canceled")
 
-const editorHelp = "Terminal editing: arrows move/browse history; Ctrl-A/E start/end, Alt-B/F by word; Ctrl-U/K/W cut, Ctrl-Y yank, Ctrl-_ undo, Ctrl-R search, Tab complete; Ctrl-C discards input."
+const editorHelp = "Terminal editing: arrows move (up/down edit multiline text); Ctrl-P/N browse history; Home/End reach line ends, Ctrl-A/E input ends; Alt-Enter or Ctrl-J adds an indented line; Tab completes names/indents; Ctrl-R searches history; Ctrl-_ undoes; Ctrl-C clears input."
 
 func commandCompletions(prefix string, names []string, commands string) []string {
 	for _, command := range strings.Fields(commands) {
@@ -136,6 +137,76 @@ func wordRight(text []rune, cursor int) int {
 	return cursor
 }
 
+func inputLineStart(text []rune, cursor int) int {
+	for cursor > 0 && text[cursor-1] != '\n' {
+		cursor--
+	}
+	return cursor
+}
+
+func inputLineEnd(text []rune, cursor int) int {
+	for cursor < len(text) && text[cursor] != '\n' {
+		cursor++
+	}
+	return cursor
+}
+
+func inputColumn(text []rune, column int) int {
+	for i := 0; i < len(text); {
+		next := clusterNext(text, i)
+		if text[i] == '\t' {
+			column += 4 - column%4
+		} else {
+			column += displayWidth(string(text[i:next]))
+		}
+		i = next
+	}
+	return column
+}
+
+func inputVertical(text []rune, cursor, direction int) int {
+	start := inputLineStart(text, cursor)
+	column := inputColumn(text[start:cursor], 0)
+	target := start
+	if direction < 0 {
+		if start == 0 {
+			return cursor
+		}
+		target = inputLineStart(text, start-1)
+	} else {
+		end := inputLineEnd(text, cursor)
+		if end == len(text) {
+			return cursor
+		}
+		target = end + 1
+	}
+	width := 0
+	for target < len(text) && text[target] != '\n' {
+		next := clusterNext(text, target)
+		nextWidth := inputColumn(text[target:next], width)
+		if nextWidth > column {
+			break
+		}
+		width = nextWidth
+		target = next
+	}
+	return target
+}
+
+func inputNewline(text []rune, cursor int) ([]rune, int) {
+	start := inputLineStart(text, cursor)
+	end := start
+	for end < cursor && (text[end] == ' ' || text[end] == '\t') {
+		end++
+	}
+	indent := string(text[start:end])
+	prefix := strings.TrimSpace(string(text[start:cursor]))
+	if strings.HasSuffix(prefix, "{") || strings.HasSuffix(prefix, "[") || strings.HasSuffix(prefix, "(") {
+		indent += "    "
+	}
+	return insertInput(text, cursor, "\n"+indent)
+}
+
 func (e *lineEditor) paste(ctx context.Context) (string, error) {
 	var text strings.Builder
 	for text.Len() < 4<<20 {
@@ -159,7 +230,7 @@ func (e *lineEditor) paste(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("paste exceeds 4 MiB")
 }
 
-func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error) {
+func (e *lineEditor) readLine(ctx context.Context, prompt, initial string) (string, error) {
 	restore, err := rawTerminal(e.file)
 	if err != nil {
 		return "", err
@@ -171,8 +242,9 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 	}
 	fmt.Fprint(e.output, "\x1b[?2004h")
 	defer fmt.Fprint(e.output, "\x1b[?2004l")
-	var text, draft []rune
-	cursor, draftCursor, historyIndex := 0, 0, len(e.history)
+	text := []rune(initial)
+	var draft []rune
+	cursor, draftCursor, historyIndex := len(text), 0, len(e.history)
 	var undo []editState
 	searching, searchIndex := false, len(e.history)
 	var query []rune
@@ -192,6 +264,23 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 			shown = "(reverse-i-search) " + string(query) + ": "
 		}
 		e.redraw(shown, text, cursor)
+	}
+	historyMove := func(direction int) {
+		if historyIndex == len(e.history) {
+			draft, draftCursor = append([]rune(nil), text...), cursor
+		}
+		if direction < 0 && historyIndex > 0 {
+			historyIndex--
+		}
+		if direction > 0 && historyIndex < len(e.history) {
+			historyIndex++
+		}
+		if historyIndex == len(e.history) {
+			text, cursor = append([]rune(nil), draft...), draftCursor
+		} else {
+			text = []rune(e.history[historyIndex])
+			cursor = len(text)
+		}
 	}
 	draw()
 	for {
@@ -233,7 +322,7 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 			}
 		}
 		switch r {
-		case '\r', '\n':
+		case '\r':
 			e.finish(prompt, text)
 			result := string(text)
 			if result != "" && (len(e.history) == 0 || e.history[len(e.history)-1] != result) {
@@ -243,6 +332,8 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 				}
 			}
 			return result + "\n", nil
+		case '\n':
+			text, cursor = inputNewline(text, cursor)
 		case 3:
 			e.redraw(prompt, text, len(text))
 			fmt.Fprint(e.output, "^C\r\n")
@@ -270,11 +361,14 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 				cursor = previous
 			}
 		case 11:
-			e.killed = string(text[cursor:])
-			text = text[:cursor]
+			end := inputLineEnd(text, cursor)
+			e.killed = string(text[cursor:end])
+			text = append(text[:cursor], text[end:]...)
 		case 21:
-			e.killed = string(text[:cursor])
-			text, cursor = append([]rune(nil), text[cursor:]...), 0
+			start := inputLineStart(text, cursor)
+			e.killed = string(text[start:cursor])
+			text = append(text[:start], text[cursor:]...)
+			cursor = start
 		case 23:
 			previous := wordLeft(text, cursor)
 			e.killed = string(text[previous:cursor])
@@ -305,6 +399,10 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 		case 18:
 			searching, searchIndex, query, searchOrigin = true, len(e.history), nil, before
 			find(searchIndex)
+		case 16:
+			historyMove(-1)
+		case 14:
+			historyMove(1)
 		case 12:
 			fmt.Fprint(e.output, "\x1b[2J\x1b[H")
 			e.row = 0
@@ -314,8 +412,19 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 				start--
 			}
 			prefix := string(text[start:cursor])
+			if prefix == "" {
+				text, cursor = insertInput(text, cursor, "    ")
+			}
 			if prefix != "" && e.complete != nil {
-				candidates := e.complete(prefix)
+				var candidates []string
+				seen := map[string]bool{}
+				for _, name := range e.complete(prefix) {
+					if strings.HasPrefix(name, prefix) && !seen[name] {
+						seen[name] = true
+						candidates = append(candidates, name)
+					}
+				}
+				sort.Strings(candidates)
 				if len(candidates) > 0 {
 					common := []rune(candidates[0])
 					for _, candidate := range candidates[1:] {
@@ -340,14 +449,16 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 				return "", err
 			}
 			switch key {
+			case "alt-\r", "alt-\n":
+				text, cursor = inputNewline(text, cursor)
 			case "[D", "OD":
 				cursor = clusterPrevious(text, cursor)
 			case "[C", "OC":
 				cursor = clusterNext(text, cursor)
 			case "[H", "OH", "[1~", "[7~":
-				cursor = 0
+				cursor = inputLineStart(text, cursor)
 			case "[F", "OF", "[4~", "[8~":
-				cursor = len(text)
+				cursor = inputLineEnd(text, cursor)
 			case "[1;5D", "[1;3D", "alt-b":
 				cursor = wordLeft(text, cursor)
 			case "[1;5C", "[1;3C", "alt-f":
@@ -366,20 +477,14 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 					text = append(text[:cursor], text[clusterNext(text, cursor):]...)
 				}
 			case "[A", "OA", "[B", "OB":
-				if historyIndex == len(e.history) {
-					draft, draftCursor = append([]rune(nil), text...), cursor
+				direction := 1
+				if key == "[A" || key == "OA" {
+					direction = -1
 				}
-				if (key == "[A" || key == "OA") && historyIndex > 0 {
-					historyIndex--
-				}
-				if (key == "[B" || key == "OB") && historyIndex < len(e.history) {
-					historyIndex++
-				}
-				if historyIndex == len(e.history) {
-					text, cursor = append([]rune(nil), draft...), draftCursor
+				if strings.ContainsRune(string(text), '\n') {
+					cursor = inputVertical(text, cursor, direction)
 				} else {
-					text = []rune(e.history[historyIndex])
-					cursor = len(text)
+					historyMove(direction)
 				}
 			case "[200~":
 				pasted, err := e.paste(ctx)
@@ -405,8 +510,9 @@ func (e *lineEditor) readLine(ctx context.Context, prompt string) (string, error
 
 // Pipes retain plain line input, without prompts, raw mode or ANSI sequences.
 type interactiveInput struct {
-	editor *lineEditor
-	lines  <-chan inputLine
+	editor  *lineEditor
+	lines   <-chan inputLine
+	initial string
 }
 
 func newInteractiveInput(ctx context.Context, complete func(string) []string) *interactiveInput {
@@ -417,7 +523,9 @@ func newInteractiveInput(ctx context.Context, complete func(string) []string) *i
 }
 func (in *interactiveInput) read(ctx context.Context, prompt string) (string, error) {
 	if in.editor != nil {
-		return in.editor.readLine(ctx, prompt)
+		initial := in.initial
+		in.initial = ""
+		return in.editor.readLine(ctx, prompt, initial)
 	}
 	fmt.Fprint(os.Stdout, prompt)
 	return nextLine(ctx, in.lines)
@@ -446,6 +554,7 @@ func inputLayout(prompt string, text []rune, cursor, columns int) (display strin
 	for _, r := range prompt {
 		write(string(r))
 	}
+	contentColumn := 0
 	for i := 0; i < len(text); {
 		if i == cursor {
 			cursorRow, cursorColumn = row, column
@@ -456,16 +565,19 @@ func inputLayout(prompt string, text []rune, cursor, columns int) (display strin
 			rendered.WriteString("\r\n")
 			row++
 			column = 0
+			contentColumn = 0
 			for _, r := range "   ...: " {
 				write(string(r))
 			}
 		case '\t':
-			spaces := 4 - column%4
+			spaces := 4 - contentColumn%4
 			for j := 0; j < spaces; j++ {
 				write(" ")
 			}
+			contentColumn += spaces
 		default:
 			write(string(text[i:next]))
+			contentColumn = inputColumn(text[i:next], contentColumn)
 		}
 		i = next
 	}

@@ -430,6 +430,21 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (result
 	for name := range s.flows {
 		nativeValues[name] = NullValue()
 	}
+	initial := map[string]bindingInfo{}
+	for name, value := range s.values {
+		info := bindingInfo{info: pureInfo(value.k.String()), static: s.declared[name]}
+		if prior, ok := s.analysis[name]; ok {
+			info.info = prior
+		}
+		if value.k == Function {
+			info.builtin = value.f.builtin
+			if info.builtin == "" {
+				info.fn = &expression{params: value.f.params, typ: value.f.typ}
+			}
+		}
+		initial[name] = info
+	}
+	tree.initial = initial
 	host, err = lowerNative(ctx, tree, host, nativeValues, s.cellNames())
 	if err != nil {
 		return CellResult{}, err
@@ -467,21 +482,6 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (result
 		tree.flows[name] = f
 		rootFlows[name] = true
 	}
-	initial := map[string]bindingInfo{}
-	for name, value := range s.values {
-		info := bindingInfo{info: pureInfo(value.k.String()), static: s.declared[name]}
-		if prior, ok := s.analysis[name]; ok {
-			info.info = prior
-		}
-		if value.k == Function {
-			info.builtin = value.f.builtin
-			if info.builtin == "" {
-				info.fn = &expression{params: value.f.params, typ: value.f.typ}
-			}
-		}
-		initial[name] = info
-	}
-	tree.initial = initial
 	for _, name := range sortedFlowNames(tree.flows) {
 		if _, err := checkFlow(tree, host, name); err != nil {
 			return CellResult{}, err
@@ -504,6 +504,9 @@ func (s *Session) Eval(ctx context.Context, source string, opts Options) (result
 	s.values, s.imports, s.host = saved, imports, host
 	if s.analysis == nil {
 		s.analysis = map[string]analysis{}
+	}
+	for name, fn := range tree.functions {
+		s.analysis[name] = fn.info
 	}
 	for _, stmt := range tree.body.items {
 		if stmt.tag == "bind" {
@@ -660,6 +663,7 @@ import python "math"; math.sqrt(3) calls a Python library.
 import go "strings"; strings.ToUpper("hello") calls an exported Go function.
 native_data(value) takes a Data snapshot; native_release(value) releases a native reference.
 Direct library calls use the Host boundary; effect constructs a request, perform executes it.
+Known pure request builders preserve operation summaries across calls, aliases and cells. Parallel still requires all operations Concurrent ReadOnly; projections, dynamic calls and carry stay Unknown.
 The REPL displays expression and binding results. fmt.Print/Printf/Println return the byte count after the adapter handles error; this count is also displayed.
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
 

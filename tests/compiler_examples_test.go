@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ var examples = []exampleCase{
 	{path: "advanced/15_inputs.lip", input: `{"name":"Ada","scores":[0.6,0.9]}`, want: `{"accepted":[0.9],"message":"Hello, Ada"}`},
 	{path: "advanced/16_snapshots.lip", snapshot: true},
 	{path: "ecosystem/17_go_python.lip", demo: true, want: `{"digest":"a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4","mean":2}`},
-	{path: "ecosystem/18_proposals.lip", demo: true, want: `{"first":"HELLO","second":"HELLO, LIP"}`},
+	{path: "ecosystem/18_proposals.lip", demo: true, want: `{"average":2,"first":"HELLO","second":"HELLO, LIP"}`},
 	{path: "ecosystem/19_parallel_read_write.lip", demo: true, want: `["ADA","LIN","SAM"]`},
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
@@ -701,6 +702,230 @@ export fn scale(x:number)->number{x |>double}`},
 				} else if runErr == nil || report.Error == nil || report.Error.Code != test.code || nativeErr == nil || stdout != "" || !strings.Contains(stderr, runErr.Error()) {
 					t.Fatal("interpreter/generated boundary mismatch", report, runErr, stdout, stderr, nativeErr)
 				}
+			}
+		})
+	}
+}
+
+// A complete decision must wait for every child check before publishing. Equal
+// payloads from separate iterations remain separate facts, including on replay.
+func TestEvidenceDecisionComposition(t *testing.T) {
+	var mu sync.Mutex
+	completed := 0
+	var saved []string
+	host := Host{Contracts: []Contract{
+		{
+			Operation: Operation{Language: "host", Path: "audit", Member: "read"}, Version: "1",
+			Params: []Parameter{{Name: "item", Schema: Schema{Type: "number"}}, {Name: "mode", Schema: Schema{Type: "string"}}},
+			Result: Schema{Type: "object", Fields: map[string]Schema{"ok": {Type: "bool"}, "score": {Type: "number"}}, Required: []string{"ok", "score"}},
+			Effect: ReadOnlyEffect, Concurrent: true,
+			Invoke: func(ctx context.Context, r Request) Response {
+				item, _ := r.Positional[0].Float()
+				mode, _ := r.Positional[1].Text()
+				// Perturb completion order without requiring another worker to run.
+				select {
+				case <-time.After(time.Duration(4-item) * time.Millisecond):
+				case <-ctx.Done():
+					return Uncertain("check cancelled")
+				}
+				mu.Lock()
+				completed++
+				mu.Unlock()
+				if mode == "fault" {
+					return Result(textValue("malformed result"))
+				}
+				return Result(object(map[string]Value{"ok": BoolValue(mode != "business" || item != 2), "score": number(item / 10)}))
+			},
+		},
+		{
+			Operation: Operation{Language: "host", Path: "audit", Member: "save"}, Version: "1",
+			Params: []Parameter{{Name: "item", Schema: Schema{Type: "number"}}, {Name: "expected", Schema: Schema{Type: "number"}}},
+			Result: Schema{Type: "null"}, Effect: WriteEffect,
+			Invoke: func(_ context.Context, r Request) Response {
+				item, _ := r.Positional[0].Float()
+				expected, _ := r.Positional[1].Float()
+				mu.Lock()
+				defer mu.Unlock()
+				if completed != int(expected) {
+					return Rejected("E-EARLY", "publish preceded complete evidence")
+				}
+				saved = append(saved, fmt.Sprintf("saved %g\n", item))
+				return Result(NullValue())
+			},
+		},
+	}}
+	set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+		"main.lip": {Version: "1", Text: `import host "audit"
+import lip "./checks.lip" as checks
+fn summarize(rows:list)->object {
+ results=[row.value for row in rows]
+ rejected=[result.item for result in results if !result.accepted]
+ {allowed:len(results)>0 && len(rejected)==0, rejected:rejected, values:[result.item for result in results]}
+}
+flow Main(items:list,minimum:number,mode:string,publish:bool)->object {
+ facts=claim()
+ for item in items parallel {
+  checked=item |>checks.Inspect(minimum=minimum,mode=mode)
+  facts <+ checked
+ }
+ snapshot=facts
+ decision=snapshot |>summarize
+ if publish && decision.allowed {
+  for item in decision.values {perform effect audit.save(item,len(snapshot))}
+ }
+ return decision
+}`},
+		"checks.lip": {Version: "1", Text: `import host "audit"
+fn read_request(item:number,mode:string)->effect {effect audit.read(item,mode)}
+fn accepts(minimum:number)->function {fn(raw:object)->bool{raw.ok && raw.score>=minimum}}
+fn classify(raw:object,item:number,minimum:number)->object {
+ predicate=accepts(minimum)
+ {item:item,accepted:predicate(raw)}
+}
+export flow Inspect(item:number,minimum:number,mode:string)->object {
+ facts=claim()
+ request=read_request(item,mode)
+ raw=perform request
+ checked=raw |>classify(item=item,minimum=minimum)
+ facts <+ checked
+ snapshot=facts
+ return snapshot[0].value
+}`},
+	}}
+	for _, test := range []struct{ name, before, after string }{
+		{"child_write", "raw=perform request", "raw=perform request;perform effect audit.save(item,1)"},
+		{"child_unknown_request", "request=read_request(item,mode)", "request=[effect audit.read(item,mode)][0]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			child := set.Sources["checks.lip"]
+			child.Text = strings.Replace(child.Text, test.before, test.after, 1)
+			invalid := SourceSet{Root: set.Root, Sources: map[string]Source{"main.lip": set.Sources["main.lip"], "checks.lip": child}}
+			_, err := CompileSourceSet(invalid, host, CompileOptions{})
+			if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+				t.Fatal("child effects bypassed parallel admission", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if completed != 0 || len(saved) != 0 {
+				t.Fatal("rejected composition reached the Host", completed, saved)
+			}
+		})
+	}
+	p, err := CompileSourceSet(set, host, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import("context";"fmt";"os";"sync";"time")
+func generatedHost()(Host,error){
+ var mu sync.Mutex
+ completed:=0
+ return Host{Contracts:[]Contract{
+  {Operation:Operation{Language:"host",Path:"audit",Member:"read"},Version:"1",
+   Params:[]Parameter{{Name:"item",Schema:Schema{Type:"number"}},{Name:"mode",Schema:Schema{Type:"string"}}},
+   Result:Schema{Type:"object",Fields:map[string]Schema{"ok":{Type:"bool"},"score":{Type:"number"}},Required:[]string{"ok","score"}},
+   Effect:ReadOnlyEffect,Concurrent:true,
+   Invoke:func(ctx context.Context,r Request)Response{
+    item,_:=r.Positional[0].Float();mode,_:=r.Positional[1].Text()
+    select{case <-time.After(time.Duration(4-item)*time.Millisecond):case <-ctx.Done():return Uncertain("check cancelled")}
+    mu.Lock();completed++;mu.Unlock()
+    if mode=="fault"{return Result(textValue("malformed result"))}
+    return Result(object(map[string]Value{"ok":BoolValue(mode!="business"||item!=2),"score":number(item/10)}))
+   }},
+  {Operation:Operation{Language:"host",Path:"audit",Member:"save"},Version:"1",
+   Params:[]Parameter{{Name:"item",Schema:Schema{Type:"number"}},{Name:"expected",Schema:Schema{Type:"number"}}},
+   Result:Schema{Type:"null"},Effect:WriteEffect,
+   Invoke:func(_ context.Context,r Request)Response{
+    item,_:=r.Positional[0].Float();expected,_:=r.Positional[1].Float()
+    mu.Lock();defer mu.Unlock()
+    if completed!=int(expected){return Rejected("E-EARLY","publish preceded complete evidence")}
+    fmt.Fprintf(os.Stderr,"saved %g\n",item)
+    return Result(NullValue())
+   }},
+ }},nil
+}`})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "checks.lip"), []byte(set.Sources["checks.lip"].Text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reset := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		completed, saved = 0, nil
+	}
+	for _, test := range []struct {
+		name, items, mode, minimum, want, writes, code string
+		publish                                        bool
+		reads                                          int
+	}{
+		{"publish_duplicates", "[3,1,3]", "ok", "0.1", `{"allowed":true,"rejected":[],"values":[3,1,3]}`, "saved 3\nsaved 1\nsaved 3\n", "", true, 3},
+		{"low_score", "[3,1,3]", "ok", "0.2", `{"allowed":false,"rejected":[1],"values":[3,1,3]}`, "", "", true, 3},
+		{"business_failure", "[3,2,1]", "business", "0.1", `{"allowed":false,"rejected":[2],"values":[3,2,1]}`, "", "", true, 3},
+		{"inspect_only", "[3,1,3]", "ok", "0.1", `{"allowed":true,"rejected":[],"values":[3,1,3]}`, "", "", false, 3},
+		{"empty", "[]", "ok", "0.1", `{"allowed":false,"rejected":[],"values":[]}`, "", "", true, 0},
+		{"host_schema_fault", "[2]", "fault", "0.1", "", "", "E-SCHEMA", true, 1},
+		{"child_input_fault", `["bad"]`, "ok", "0.1", "", "", "E-SCHEMA", true, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"items":%s,"minimum":%s,"mode":%q,"publish":%t}`, test.items, test.minimum, test.mode, test.publish)
+			value, err := DecodeData([]byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fields, _ := value.Fields()
+			for _, parallel := range []int{1, 2, 7} {
+				reset()
+				journal := NewMemoryJournal()
+				var wantError error
+				for replay := 0; replay < 2; replay++ {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					report, runErr := p.Run(ctx, fields, Options{RunID: "decision-composition", Parallelism: parallel, Journal: journal})
+					cancel()
+					wantError = runErr
+					if test.code == "" {
+						if runErr != nil || display(t, report.Output) != test.want {
+							t.Fatal("interpreter", parallel, replay, report, runErr)
+						}
+					} else if runErr == nil || report.Error == nil || report.Error.Code != test.code || report.EntryOutput != nil {
+						t.Fatal("interpreter boundary", parallel, replay, report, runErr)
+					}
+					mu.Lock()
+					reads, writes := completed, strings.Join(saved, "")
+					mu.Unlock()
+					if reads != test.reads || writes != test.writes || len(journal.Records()) != test.reads+strings.Count(test.writes, "\n") {
+						t.Fatal("incomplete evidence, reordered writes, or repeated calls", parallel, replay, reads, writes, journal.Records())
+					}
+				}
+				stdout, stderr, nativeErr := runNative(t, executable, "-input", input, "-parallel", fmt.Sprint(parallel))
+				if test.code == "" {
+					if nativeErr != nil || strings.TrimSpace(stdout) != test.want || stderr != test.writes {
+						t.Fatal("generated", parallel, stdout, stderr, nativeErr)
+					}
+				} else if nativeErr == nil || stdout != "" || !strings.Contains(stderr, wantError.Error()) || strings.Contains(stderr, "saved ") {
+					t.Fatal("generated boundary", parallel, stdout, stderr, nativeErr)
+				}
+			}
+			reset()
+			session, err := NewSession(host, SessionOptions{ProjectRoot: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			nativeCell(t, session, set.Sources["main.lip"].Text, "")
+			call := fmt.Sprintf("Main(%s,%s,%q,%t)", test.items, test.minimum, test.mode, test.publish)
+			result, runErr := session.Eval(context.Background(), call, Options{Parallelism: 7})
+			if test.code == "" {
+				if runErr != nil || !result.HasValue || display(t, result.Value) != test.want {
+					t.Fatal("session", result, runErr)
+				}
+			} else if d, ok := runErr.(*Diagnostic); !ok || d.Code != test.code {
+				t.Fatal("session boundary", result, runErr)
+			}
+			mu.Lock()
+			reads, writes := completed, strings.Join(saved, "")
+			mu.Unlock()
+			if reads != test.reads || writes != test.writes {
+				t.Fatal("session action counts", reads, writes)
 			}
 		})
 	}

@@ -37,6 +37,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("run/repl/serve and generated executables accept -frames N (default 10000; 0 selects default). Tail calls reuse frames; exhaustion reports E-BUDGET.")
 		fmt.Println("-parallel N accepts any positive integer and limits active leaf evaluations; workers start on demand. REPL :run inherits the selected limit.")
 		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
+		fmt.Println("learn: 36 short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.")
 		return nil
 	case "run", "emit-go", "build":
 		args = args[1:]

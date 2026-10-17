@@ -6,7 +6,7 @@ Every example uses `Main` as its default entry; helper Flows have names describi
 
 These executable examples develop one LIP 1.0 model: pure functions compute values, Flows organize dependencies, Claims collect facts, and effect/perform executes external actions. `#` starts a line comment; each file explains its syntax in English. Run `make build` at the project root first. Examples are checked through interpretation and actual generated Go programs.
 
-Start with `./lipc learn` for 19 interactive lessons or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
+Start with `./lipc learn` for 36 interactive lessons and 72 small examples or `./lipc repl` for interactive expressions, statements, and declarations. To see composition first, read [26_flows](advanced/26_flows.lip), then return to the basics. REPL Flow declarations persist and support calls/pipelines. Use `:begin` / `:end` to enter a whole script or forward declarations in one cell, and `-project DIR` for static imports. REPL `:run path` executes independent files; select another entry with `-entry` and provide `-input` or `-entry-input`.
 
 ## Five rules to remember
 
@@ -35,7 +35,7 @@ Run `./lipc run examples/basics/FILE.lip`.
 
 number does not distinguish integer/fraction types: 3 equals 3.0 and displays as 3. Log arguments/base must be positive, base not 1; negative power bases require integral exponents. Fixed algorithms approximate power/log; domain/overflow errors are E-NUMBER.
 
-Try `learn -lesson power` / `logarithm`. REPL/learn support arrow editing/history, Tab completion, and Ctrl-R search; see [keyboard help](../README.en.md#interactive-computation-and-learning).
+Try `learn -lesson power` / `logarithm`. REPL/learn support arrows for editing/history (vertical movement in multiline input), Ctrl-P/N for history, Alt-Enter for a new line, Tab completion, and Ctrl-R search; see [keyboard help](../README.en.md#interactive-computation-and-learning).
 
 The REPL also displays library return values. Go fmt.Print/Printf/Println return `(bytesWritten,error)`; the adapter handles error and returns the count. Thus fmt.Print("hello") appears as `hello5`: text followed by the REPL's 5. UTF-8 byte counts differ from Unicode character counts; this does not add a second library print. See the [full explanation](../README.en.md#why-does-fmtprint-show-a-number).
 
@@ -108,17 +108,50 @@ These examples explicitly enable teaching contracts with -host demo. Python exam
 | File | Topics | Result |
 |---|---|---|
 | [17_go_python](ecosystem/17_go_python.lip) | Both ecosystems in one Flow | Python mean 2, Go SHA-256 string |
-| [18_proposals](ecosystem/18_proposals.lip) | Bound/executed requests/chains | first="HELLO", second="HELLO, LIP" |
-| [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | Parallel reads, complete collection, sequential writes | ["ADA","LIN","SAM"]; stderr logs |
+| [18_proposals](ecosystem/18_proposals.lip) | Pure request construction/passing, chains, different result types | `first="HELLO", second="HELLO, LIP", average=2` |
+| [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | Function-summary parallel reads, complete collection, sequential writes | ["ADA","LIN","SAM"]; stderr logs |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | Prior observation in next request | rounds=4, score=0.8 |
 
 ```sh
 ./lipc run -host demo examples/ecosystem/17_go_python.lip
+./lipc run -host demo examples/ecosystem/18_proposals.lip
 ./lipc run -host demo -parallel 4 examples/ecosystem/19_parallel_read_write.lip
 ./lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
 ```
 
 Teaching contracts/schemas/byte encoding live in DemoHost in [adapters.go](../script/adapters.go). The default CLI generic bridge also supports direct imported calls/properties/native objects, e.g. `import go "strings"; strings.ToUpper("hello")` or `import python "math"; math.sqrt(3)`. Calls/properties lower to perform effect. Arrays/native objects retain references; native_data(value) explicitly snapshots Data. See [configuration/conversions/prerequisites](../README.en.md#connecting-go--python).
+
+Keep three points in mind when reading the effect examples:
+
+1. `upper_request("hello")` creates a request without calling the library. `perform request` executes it and returns the Data specified by its contract.
+2. `forward(request:effect)->effect` in `18_proposals` shows that fn parameters and results can carry requests. Flow inputs/outputs, Host parameters/results, and Claims still require Data.
+3. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. A request returned through `forward`'s unknown parameter or a container projection can execute sequentially, but these paths cannot establish parallel safety.
+
+Project operations can accept ordinary `policy` parameters carrying token, money, and time options, with enforcement implemented by the Host. Contracts declare permission requirements and the Host grants access. See the short example and current boundaries in the [README effect explanation](../README.en.md#every-external-action-follows-one-protocol).
+
+## Local Ollama chat, saved calculations, and reminders
+
+[tmp_ollama_chat.lip](tmp_ollama_chat.lip) implements multi-turn streaming chat, tool argument validation, saved calculations, and reminders in one LIP file. The model chooses tools, LIP dispatches by explicit name, and results return to the model for its next decision. It uses the official Python `ollama` client, `prompt_toolkit` for terminal editing, and standard libraries for storage and timers.
+
+Install the client in the Python 3.9+ environment used by `lipc`, start local Ollama, and download a model that supports tool calls. Run these commands from the repository root; the default model is `llama3.1:8b`:
+
+```sh
+python3 -m pip install 'ollama>=0.6.3' 'prompt_toolkit>=3.0'
+ollama pull llama3.1:8b
+make build
+LIP_CHAT_TZ=Asia/Taipei ./lipc run examples/tmp_ollama_chat.lip
+```
+
+With `lipc` installed, you can also run `~/go/bin/lipc run ./lipv1/examples/tmp_ollama_chat.lip` from the parent directory. The program uses this single `.lip` file without other application source files or `PYTHONPATH` configuration. Set `LIP_CHAT_MODEL` to override the default model; configure the server address and timeout near the top of the file. Time follows the system timezone by default. Set `LIP_CHAT_TZ` to an IANA timezone such as `Asia/Taipei` or `America/New_York`; startup shows the local date and UTC offset.
+
+Try asking to calculate `123 * 456` with a budget label, find previous calculations, set a reminder in ten seconds, or find the time in 31 hours and 52 minutes. Calculations save their operands, result, label, and timestamp. A dedicated time-offset tool handles date arithmetic and local time. Reminders accept a delay or an RFC 3339 time with a timezone.
+
+- `/time` and `/after 31h52m` (also `24m`, `-1h`, `30s`) return time immediately without a model request.
+- `/calculations` and `/reminders` query recent records; `/new` clears chat context while keeping saved records and reminders; `/help` shows help.
+- Terminal editing supports Unicode deletion, arrows, Delete, history, Ctrl-R search, Ctrl-A/E, Ctrl-U, and bracketed paste. Ctrl-C discards the current input; Ctrl-D or `/exit` exits. Missing `prompt_toolkit` falls back to line input. Pipes remain plain text.
+- Tool output is concise; set `LIP_CHAT_DEBUG=1` for full arguments and JSON results. Explicit identity questions and editing/speed feedback receive no business tools.
+
+The SQLite database is created automatically at `.ollama_chat/state.sqlite3` relative to the **current working directory**; set `LIP_CHAT_DB` to choose a path. Use the same absolute path to share records when running from different directories. Reminders appear while waiting for input or model output, preserving the input draft. No notifications appear while stopped; restarting with the same database delivers overdue reminders. Context retains at most twelve complete user turns within an approximate 24000-character budget, always preserving the newest turn. Chat is not restored after restart; tools retrieve saved records. Each input allows up to eight model requests. Requests use low temperature, a 1024-token output limit, and a 30-minute model keep-alive; the terminal shows a waiting indicator and streams text. Actual speed depends on the model and hardware. Tool argument errors return to the model; connection and database failures still stop the program.
 
 ## Website entries
 

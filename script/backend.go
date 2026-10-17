@@ -763,7 +763,7 @@ func compiledRuntime() (string, map[string]string, map[string]*ast.FuncDecl, err
 	imports := map[string]string{}
 	templates := map[string]*ast.FuncDecl{}
 	allowed := map[string]bool{}
-	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl flowDecl dataDecl syntax analysis function proposal bindingInfo asciiDigit asciiLetter validID checker builtinArity error resolve") {
+	for _, n := range strings.Fields("token parameter argument field pattern arm expression statement block importDecl flowDecl dataDecl syntax analysis operationSummary function proposal bindingInfo asciiDigit asciiLetter validID checker builtinArity error resolve") {
 		allowed[n] = true
 	}
 	for _, name := range []string{"compiler.go", "checker.go", "values.go", "evaluator.go", "scheduler.go", "host.go", "adapters.go", "native.go", "native_workers.go", "go_adapter.go"} {

@@ -39,6 +39,44 @@ type checker struct {
 	top       int
 	local     int
 	voidOK    *expression
+	returns   map[*expression]*operationSummary
+}
+
+func unionOperations(a, b *operationSummary) *operationSummary {
+	if a == nil || b == nil {
+		return nil
+	}
+	return &operationSummary{sources: []*operationSummary{a, b}}
+}
+
+// Reachability computes the least union fixed point, including recursive
+// components. Empty intermediate cells are bottom, never an unknown leaf.
+// No function is evaluated and no operation is inferred from a runtime value.
+func resolvedOperations(root *operationSummary) ([]string, bool) {
+	seen := map[*operationSummary]bool{}
+	ops := map[string]bool{}
+	pending := []*operationSummary{root}
+	for len(pending) != 0 {
+		s := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if s == nil {
+			return nil, false
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		if s.operation != "" {
+			ops[s.operation] = true
+		}
+		pending = append(pending, s.sources...)
+	}
+	keys := make([]string, 0, len(ops))
+	for op := range ops {
+		keys = append(keys, op)
+	}
+	sort.Strings(keys)
+	return keys, len(keys) != 0
 }
 
 func pureInfo(typ string) analysis {
@@ -134,7 +172,7 @@ func checkFlow(s *syntax, host Host, name string) (*checker, error) {
 // Saved interactive values enter the same checker as ordinary source values.
 // This is a tooling entry point; Compile always starts with an empty scope.
 func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*checker, error) {
-	c := &checker{syntax: s, contracts: map[string]Contract{}, aliases: map[string]importDecl{}, stores: map[string]*statement{}, writers: map[string]int{}}
+	c := &checker{syntax: s, contracts: map[string]Contract{}, aliases: map[string]importDecl{}, stores: map[string]*statement{}, writers: map[string]int{}, returns: map[*expression]*operationSummary{}}
 	for _, contract := range host.Contracts {
 		if contract.Version == "" || contract.Result.Type == "" || contract.Invoke == nil || contract.Effect == PureEffect {
 			return nil, diagnostic("E-OPERATION", "invalid operation contract")
@@ -186,7 +224,11 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 	sort.Slice(functions, func(i, j int) bool { return s.functions[functions[i]].tok.site < s.functions[functions[j]].tok.site })
 	for _, name := range functions {
 		f := s.functions[name]
-		c.declare(env, name, bindingInfo{info: pureInfo("function"), fn: f, static: true}, f.tok)
+		cell := &operationSummary{}
+		c.returns[f] = cell
+		info := pureInfo("function")
+		info.returns = cell
+		c.declare(env, name, bindingInfo{info: info, fn: f, static: true}, f.tok)
 	}
 	for name, info := range initial {
 		if s.functions[name] != nil {
@@ -301,7 +343,13 @@ func (c *checker) function(e *expression, env *scope) analysis {
 	}
 	a := c.localBlock(e.body, local, true, false, 0)
 	c.assignType(e.tok, a.typ, e.typ)
+	cell := c.returns[e]
+	if cell == nil {
+		cell = &operationSummary{}
+	}
+	cell.sources = []*operationSummary{a.ops}
 	e.info = pureInfo("function")
+	e.info.returns = cell
 	return e.info
 }
 func (c *checker) localBlock(b *block, env *scope, pure, parallel bool, loops int) analysis {
@@ -313,7 +361,7 @@ func (c *checker) localBlock(b *block, env *scope, pure, parallel bool, loops in
 		tail := c.expression(b.tail, env, pure, parallel)
 		a = mergeEffect(a, tail)
 		a.typ = tail.typ
-		a.ops, a.unknown = tail.ops, tail.unknown
+		a.ops = tail.ops
 	}
 	if b.exit != nil {
 		a = mergeEffect(a, c.carryExit(b.exit, env, pure, parallel, loops))
@@ -579,7 +627,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				a.typ = "string"
 			}
 		}
-		a.unknown = true
+		a.ops = nil
 	case "slice":
 		x := sub(e.x)
 		if x.typ != "any" && x.typ != "list" && x.typ != "string" {
@@ -589,7 +637,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			y := sub(arg.expr)
 			c.assignType(arg.expr.tok, y.typ, "number?")
 		}
-		a.typ, a.unknown = x.typ, true
+		a.typ, a.ops = x.typ, nil
 	case "fn":
 		return c.function(e, env)
 	case "block":
@@ -605,18 +653,10 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		y := sub(e.y)
 		a = mergeEffect(a, x)
 		a.typ = unify(x.typ, y.typ)
-		a.ops = map[string]bool{}
-		for k := range x.ops {
-			a.ops[k] = true
-		}
-		for k := range y.ops {
-			a.ops[k] = true
-		}
-		a.unknown = x.unknown || y.unknown
+		a.ops = unionOperations(x.ops, y.ops)
 	case "match":
 		sub(e.x)
 		first := true
-		a.ops = map[string]bool{}
 		for _, arm := range e.arms {
 			c.patterns(arm)
 			if arm.guard != nil {
@@ -628,21 +668,18 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			}
 			x := sub(arm.result)
 			if first {
-				a.typ = x.typ
+				a.typ, a.ops = x.typ, x.ops
 				first = false
 			} else {
 				a.typ = unify(a.typ, x.typ)
+				a.ops = unionOperations(a.ops, x.ops)
 			}
-			for k := range x.ops {
-				a.ops[k] = true
-			}
-			a.unknown = a.unknown || x.unknown
 		}
 	case "proposal":
 		contract, ok := c.resolve(e)
 		a.typ = "effect"
 		if ok {
-			a.ops = map[string]bool{identityKey(contract.Operation.Wire()): true}
+			a.ops = &operationSummary{operation: identityKey(contract.Operation.Wire())}
 		}
 		for _, arg := range e.args {
 			x := sub(arg.expr)
@@ -681,12 +718,13 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		}
 		a.typ = "any"
 		a.ops = nil
-		if x.unknown || len(x.ops) == 0 {
+		ops, known := resolvedOperations(x.ops)
+		if !known {
 			a.effect = UnknownEffect
 			a.concurrent = false
 		} else {
 			a.typ = ""
-			for key := range x.ops {
+			for _, key := range ops {
 				contract, ok := c.contracts[key]
 				if !ok {
 					contract = Contract{Result: Schema{Type: "list"}, Effect: ReadOnlyEffect, Concurrent: true}
@@ -719,7 +757,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		stage := c.expression(e.y, local, pure, parallel)
 		c.voidOK = saved
 		a = mergeEffect(first, stage)
-		a.typ, a.ops, a.unknown = stage.typ, stage.ops, stage.unknown
+		a.typ, a.ops = stage.typ, stage.ops
 		for _, arg := range e.y.args[1:] {
 			if arg.expr.info.typ == "function" || arg.expr.info.typ == "effect" {
 				c.error(arg.expr.tok, "E-TYPE", "pipeline named arguments must be Data")
@@ -746,7 +784,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		for _, arg := range e.args {
 			sub(arg.expr)
 		}
-		a.unknown = true
+		a.ops = callee.returns
 		a.typ = "any"
 		if e.x.tag == "fn" {
 			c.checkArity(e, "", e.x, env)
@@ -808,7 +846,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		a = mergeEffect(a, c.localBlock(e.body, local, pure, parallel, 0))
 		c.local--
 		a.typ = "any"
-		a.unknown = true
+		a.ops = nil
 	}
 	if parallel && a.effect != PureEffect && (a.effect != ReadOnlyEffect || !a.concurrent) {
 		c.error(e.tok, "E-PARALLEL", "perform is not provably Concurrent ReadOnly")

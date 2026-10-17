@@ -3,10 +3,13 @@
 # Recommended structure: parallel computation -> complete read -> sequential writes.
 import go "strings" as text
 import host "console" as console
+# The demo Host registers text.ToUpper as Concurrent ReadOnly.
+# A wrapper preserves that operation summary; generic Unknown contracts stay Unknown.
+fn upper_request(name:string)->effect { effect text.ToUpper(name) }
 flow Main() -> list {
     facts = claim()
     for name in ["ada", "lin", "sam"] parallel {
-        upper = perform effect text.ToUpper(name)
+        upper = perform upper_request(name)
         facts <+ upper
     }
     results = [row.value for row in facts]

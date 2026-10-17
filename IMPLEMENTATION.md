@@ -22,8 +22,19 @@
 | §10.1–10.2 原生资源与生成程序（边界见下文） | run 清理 hook、原生 owner/generation 检查、Go 静态链接；原生辅助转换尊重词法名称与管道静态目标；真实 Go 求值；启动核对合约；编译后元数据并发只读 | `NativeHostAuthorizationAndRegisteredPrecedence`、`NativeModuleHelpers`、`NativeHelperLexicalScope`、`NativePipelineStagesRemainStatic`、`NativeLibrariesInterpreterAndGeneratedProgram`、`GoHostContractDriftRejectedBeforeCalls`、带 race 的 native fixture |
 | §12.1 可选 HTTP | 显式方法、HEAD 不回退、405/Allow；编码路径与 params；请求/响应预算、隔离、取消和不重试 | `HTTPExplicitMethodsAndEscapedPath`、`HTTPConcurrentRunsKeepIdentityAndClaimsSeparate`、`HTTPAdmissionCancellationAndUncertainNeverRetry`、`WebExamplesInterpreterAndGo` |
 | §14、16.3–16.5 组合与固定向量 | 同一冻结依赖经两条路径复用；闭包、carry、图循环、管道、void、未选分支及动态 Data 故障；固定 binary64 参考算法 | `CoreCompositionConformance` 在并发额度 1/2/4/7/1238/73295 下对照实际生成程序；`SpecNumericReference`、`GoBackendPowerLogarithm` |
+| §6.3、8–10、12.3 证据与决策组合 | 跨模块子 Flow、纯闭包、父子同名 Claim、完整汇聚与条件顺序写；业务拒绝、空输入、类型与 Host schema 故障；记录重放 | `EvidenceDecisionComposition` 对照解释器、实际生成程序与 REPL |
 
 模块/调用实现复用 compiler、checker、evaluator、scheduler 和 backend。源码加载与链接集中在 `script/modules.go`，没有第二套执行机。函数参数和全局数据按词法作用域解析；Claim 读取使用当前环境，不按执行节点的 store 名劫持模块函数里的同名值。`native_data` / `native_release` 仅转换未被声明、参数、binding、Claim 或 import alias 占用的辅助调用；依赖模块的辅助调用在链接时固定其来源。管道阶段保留静态目标供普通 checker 验证，原生调用不会把它转换成另一种 AST 后绕过检查。
+
+`EvidenceDecisionComposition` 使用显式 Host 合约验证“并行检查 → 子 Flow 内归类与 Claim → 父 Claim 完整读取 → 纯函数判断 → 条件写入”。检查结果的完成时间被扰动；并发额度 1、2、7 下，重复值仍按不同贡献保留，写入保持输入顺序，Host 在每次写入时核对全部检查已经完成。七种输入覆盖通过、分数不足、业务失败、只检查不发布、空集合、Host 返回不符 schema 和子 Flow 参数类型错误。解释器每次用同一 journal 重放，核对零新增读取/写入及稳定记录数；生成程序检查真实输出和写入轨迹；持久 REPL 加载同一模块并核对结果和调用数。该测试的 Host 是本地受控检查器，不依赖真实模型或网络服务。
+
+同一测试通过纯请求构造函数执行跨模块子 Flow 的并行读取，并检查 Write 和容器投影产生的 Unknown 请求在编译阶段拒绝并行，Host 零调用。Flow 不作为普通值传给 map/fold，活动 Claim 不跨子 Flow 传递，完整快照通过 Data 组合。静态已知函数返回请求的 Ops 按规范传播；通用原生操作的合约仍为 Unknown。业务 Result 由显式控制门解释；多步 Flow 不自动获得事务或崩溃恢复。
+
+纯函数返回请求的分析使用独立的有限 operation 联合依赖图，具名函数预先分配摘要节点，函数尾表达式连接返回来源；可达性计算得到递归联合方程的最小固定点。摘要不保留源码树、环境或业务值，不运行函数，也不按实参专门化。`FunctionProposalSummaries` 覆盖具名/匿名函数、简单别名、不可变捕获、管道、分支、多层前向调用与互递归；`FunctionProposalUnknownAndUnsafe` 保留容器、carry、动态函数和未知形参的保守边界，并检查写入、不可并发读取及实参效果不会被返回摘要掩盖。`FunctionProposalSchedulingAndGo` 用 provider 会合验证普通图及显式 parallel 的真实读取重叠和前后写入 barrier，对照解释器与实际生成的可执行文件。Go 后端携带检查后的效果/并发元数据，运行时不重新分析函数。
+
+`FunctionProposalRuntimeBoundaries` 检查构造函数封装后的授权拒绝仍为零 provider 调用，已完成 Write 的 schema fault 重放不重试，以及跨 cell 捕获的旧 snapshot 请求仍受原 run 的资源生命周期限制。
+
+`NativeRequestBuilderComposition` 交叉检查多层请求构造、模块、别名、闭包、管道、互递归、容器投影及普通参数转发。函数声明反序和内部重命名均得到相同结果；构造与编译零 provider 调用，执行后可继续调用原生对象方法。原生来源先按函数依赖收集，再用现有静态返回摘要补齐递归请求，并刷新外围闭包与容器；不重复转换 proposal，不用原生来源增强 Ops。测试对照并发额度 1/2/7 的解释执行、实际生成程序和跨 cell 保存的请求构造函数，同时确认普通 Host object 字段仍可并行纯读取。
 
 ## 并发与值保留
 
@@ -49,7 +60,9 @@ CLI `run/emit-go/build/serve` 都使用同一冻结 SourceSet；构建预算为 
 
 `DefaultMaxFrames` 为每个叶子求值器 10,000 个同时活跃的非尾函数帧。`Options.MaxFrames` 以及 run/repl/serve/生成程序的 `-frames` 接受正值覆盖；零使用默认值，负数报配置错误，不能绕过保护。直接、间接、互递归及 map/fold 回调共用调用检查；proper tail calls 复用帧。耗尽时报告带位置的 E-BUDGET，Report 没有 EntryOutput，CLI 不输出成功值，失败 cell 不提交绑定。HTTP 使用现有固定 500 错误响应。REPL 与 handler 可继续处理后续工作。这是提前生效的帧预算，不是按 run 统计内存或恢复原生运行时/操作系统致命资源耗尽；Host 仍应保留合适的指令、分配、并发与时间限制。
 
-REPL cell 保存成功值、fn/Flow 声明与纯闭包，不重跑历史动作；复用声明解析器、checker、linker、原生调用 lowering 和图执行器，支持静态 Data、export、LIP 导入、Claim，以及控制结构的语句和值形式。Flow 调用和管道每次创建独立子图与 store；顶层 Claim 在单个 cell 中完成，仅保留完成后的 Data 快照。`:begin/:end` 将完整脚本或前向声明作为一个 cell 提交；`-project` 指定导入根目录，来源闭包冻结至 reset。`:run` 可带 `-entry/-project/-input/-entry-input/-entry-output`，文件运行独立于会话绑定。`learn` 的 19 课使用同一 CompileSourceSet/Run 路径；入口课检查两种参数绑定，模块课使用内置冻结来源。README 中英文、示例教程、CLI 帮助与课程保持相同的入口和边界描述。
+REPL cell 保存成功值、fn/Flow 声明与纯闭包，不重跑历史动作；复用声明解析器、checker、linker、原生调用 lowering 和图执行器，支持静态 Data、export、LIP 导入、Claim，以及控制结构的语句和值形式。Flow 调用和管道每次创建独立子图与 store；顶层 Claim 在单个 cell 中完成，仅保留完成后的 Data 快照。`:begin/:end` 将完整脚本或前向声明作为一个 cell 提交；`-project` 指定导入根目录，来源闭包冻结至 reset。`:run` 可带 `-entry/-project/-input/-entry-input/-entry-output`，文件运行独立于会话绑定。`learn` 的 36 课与 72 个小例子使用同一 CompileSourceSet/Run 路径；入口课检查两种参数绑定，模块课使用内置冻结来源。README 中英文、示例教程、CLI 帮助与课程保持相同的入口和边界描述。
+
+课程与学习交互集中在 [learn.go](cmd/lipc/learn.go)，按单个操作、组合、额外练习逐步展开。每课显示输入与预期结果，提供三级提示、可执行小例子与完整演示；演示不标记完成。答案按课程暂存，`:retry` 通过共享编辑器载入原答案，完整程序失败后同样可修改；进度文件仍按原有版本和课程 ID 保存完成标记，不保存草稿。`InteractiveCLI/all-lessons` 执行全部 72 个例子及参考答案，其他学习用例覆盖多输入拒绝、草稿恢复、完整程序修改、提示不影响进度、旧进度恢复、完整程序与匿名函数表达式的区分，以及下一行的 else。课程列表不依赖进度文件有效。真实 PTY 验证多行上下移动、Home/End、缩进换行、混合 Tab/空格的列对齐、Unicode、参数/请求构造函数补全及预填答案修改；终端恢复和纯文本管道规则保持一致。
 
 会话命名空间将公开名字映射到各 cell 的不可变符号。`Session.Delete(names...)` 与 CLI 的 `:del name[,name...]` 先验证整批名字，再解除公开绑定，与绑定内容无关。后续 cell 可跨绑定种类复用名字，已有闭包与 Flow 保留原引用、导入含义和源码 token。根据公开绑定及保留 Flow 的依赖可达性，清理不再使用的保存值/定义；导入缓存和原生资源生命周期仍显式管理，解绑不重跑动作也不关闭资源。`SessionDeleteBindings`、`SessionDeleteModuleAlias` 和 `InteractiveCLI/delete-bindings` 覆盖跨种类复用、旧依赖/proposal、缺失或格式错误时整批不变、Claim 快照、别名替换、可见性及 reset。
 
@@ -57,11 +70,11 @@ HTTP 只接受显式 Host 合约，不提供请求级通用 Native bridge。普�
 
 ## 正确性与 Host 集成边界
 
-REPL 保存 proposal 原有的规范 Ops 分析。容器投影、函数返回与 carry 结果跨 cell、别名后仍为 Unknown；不能凭保存结果中实际 operation 的身份放行 parallel。`SessionPreservesProposalOps` 检查拒绝前 provider 零调用，同时确保直接保存的 proposal 仍可在符合条件的 parallel body 中执行。
+REPL 保存 proposal 原有的规范 Ops 和静态已知函数的返回摘要。容器投影、动态调用与 carry 结果跨 cell、别名后仍为 Unknown；不能凭保存值的实际函数或 operation 身份补强摘要。成功函数声明、别名和捕获保留摘要，失败 cell 不提交新摘要，删除或复用名字不改变旧闭包。`SessionPreservesProposalOps` 与 `SessionFunctionProposalSummaries` 检查上述边界和 provider 调用次数。
 
 list/string 单值索引支持负安全整数，list 的索引列表保留顺序与重复项。方括号切片与 `slice(v,start,stop[,step])` 共用精确整数归一化、边界裁剪、null 默认值和负步长；这取代此前只接受非负且严格边界的 slice 规则。核心求值与原生 Data 投影共用 helper，Go 资源支持单值/列表索引和切片，Python 资源收到原生 slice。新 list 在分配前检查预算，循环检查取消与指令预算；选出的 function/effect 保持原值，规范 Ops 仍为 Unknown。
 
-`IndexAndSliceConformance` 对照解释器和实际生成程序的成功结果、错误诊断及分配预算；`IndexAndSliceSyntaxAndComposition` 检查语法、Unicode 标量、闭包、carry、操作数顺序、未选操作数及保守 Ops；`NativeIndexAndSliceComposition` 覆盖 Go 资源、Python 数组、原生 Data 回退、容器纯成员和保存视图；`SessionIndexAndSlice` 复现多 cell 索引、错误恢复、帮助与补全。容器示例、19 节课程中的 `slicing`、REPL 帮助及中英文规范/README 同步说明这些规则。
+`IndexAndSliceConformance` 对照解释器和实际生成程序的成功结果、错误诊断及分配预算；`IndexAndSliceSyntaxAndComposition` 检查语法、Unicode 标量、闭包、carry、操作数顺序、未选操作数及保守 Ops；`NativeIndexAndSliceComposition` 覆盖 Go 资源、Python 数组、原生 Data 回退、容器纯成员和保存视图；`SessionIndexAndSlice` 复现多 cell 索引、错误恢复、帮助与补全。容器示例、36 节课程中的 `slice`、`reverse` 与 `slicing`、REPL 帮助及中英文规范/README 同步说明这些规则。
 
 `claim.snapshot` proposal 只保存构造时的 run 和 Flow 实例身份，不保留活动 store 或整个图。它可在同一实例内经过闭包、map、容器和 carry 后执行；进入后续 cell 或另一实例时，以运行时 `E-RESOURCE` 拒绝，早于 Host 授权，不会重新解析为新 store 或导致进程崩溃。`SessionSnapshotProposalLifetime` 检查错误后恢复、失败 cell 不提交与删除/复用 store 名；`SnapshotProposalComposition` 对照解释器、实际生成程序及同身份 journal 重放，检查两次子 Flow 调用的隔离。
 
@@ -96,8 +109,10 @@ make clean
 
 数值逐位表由 `go run ./tests/reference_numeric -check` 从规范参考算法独立核对，正常包含在 `make test`。`CoreCompositionConformance` 除成功输出还比较原始模块诊断；错误不会改写为调用方包装错误。After、barrier 和资源等待的专项测试继续检查完成集合及前置依赖，而非仅比较最终值。原生组合用例让 Go/Python 对象经过合法纯 fn 管道后继续调用方法/索引，再对照实际生成程序。
 
-README 中英文的三个完整程序块保持一致，已实际验证命名/位置输入、null/void 协议、模块复用与并发额度 1/2/4；命令验收还包括 emit-go/build 的可执行结果、Go/Python REPL、全部脚本示例的 session 执行、Flow 跨 cell 事务、模块来源冻结、多行语句、真实 PTY 下的 Flow 补全与粘贴、含空格路径的 :run、仓库外的内置模块课与 19 课目录。文档相对路径、章节链接和表中的测试名一并核对。
+README 中英文的对应程序块保持一致；入口、Claim 和模块示例已实际验证命名/位置输入、null/void 协议、模块复用与并发额度 1/2/4。`Examples/ecosystem/18_proposals.lip` 与 `SessionScriptExamples` 验证 effect 的纯函数构造、参数传递、请求链和不同结果类型，`19_parallel_read_write` 验证保留操作摘要后的并行读取与顺序写入。项目 policy 片段明确要求应用注册与实施限制，不作为 demo 内建能力。命令验收还包括 emit-go/build 的可执行结果、Go/Python REPL、全部脚本示例的 session 执行、Flow 跨 cell 事务、模块来源冻结、多行语句、真实 PTY 下的 Flow 补全与粘贴、含空格路径的 :run、仓库外的内置模块课与 36 课目录。文档相对路径、章节链接和表中的测试名一并核对。
 
 2026-10-15 在 Go 1.27、Python 3.13、Linux 环境完成 `make test`、`make race`、`make vet`，均通过。真实 TCP 监听在受限沙箱中不可用时，`InteractiveCLI/web-server` 明确跳过；内存 HTTP 请求/响应与 handler 用例继续执行。依赖平台 plugin、已安装第三方库的用例按前提标记跳过，不能将跳过算作通过。
+
+2026-10-17 本轮在同一 Go/Python/Linux 环境再次通过 `make test`、`make race`、`make vet`，包含请求构造函数组合回归。另通过两轮各 40 秒的编译/会话模糊测试、竞争检测版 CLI 的真实 PTY 与全部课程运行，以及 README 原生请求例子的实际输出检查。831 行 Ollama 示例成功构建为可执行文件；实际模型服务交互依赖本地运行环境。TCP 监听用例因沙箱限制跳过，内存 HTTP 检查通过。
 
 验收使用项目内缓存与临时目录。目录清理只删除项目生成物，不提交 `.build`、可执行文件或 Python 缓存。

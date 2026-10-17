@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1111,6 +1112,108 @@ export flow Append(receiver:object,text:string)->string {
 	nativeCell(t, s, `Main()`, `"hello"`)
 	nativeCell(t, s, `saved=io.StringIO();lib.Append(saved,"first")`, `"first"`)
 	nativeCell(t, s, `lib.Append(saved," second")`, `"first second"`)
+}
+
+func TestNativeRequestBuilderComposition(t *testing.T) {
+	const declarations = `export fn Build(text:string)->effect {z_leaf(text)}
+export fn Factory(text:string)->function {fn()->effect {Build(text)}}
+export fn Recur(n:number)->effect {z_recursive(n)}
+export fn RecursiveFactory(n:number)->function {fn()->effect {z_recursive(n)}}
+export fn Bundle(n:number)->object {{request:z_recursive(n)}}
+fn a_recursive(n:number)->effect {if n==0 {effect lib.New("four")} else {z_recursive(n-1)}}
+fn z_recursive(n:number)->effect {a_recursive(n)}
+fn z_leaf(text:string)->effect {effect lib.New(text)}`
+	const main = `import lip "./requests.lip" as requests
+import host "checks"
+fn local(text:string)->effect {requests.Build(text)}
+fn data_request()->effect {effect checks.read()}
+fn forward(request:effect)->effect {request}
+flow ReadData()->list {
+ facts=claim()
+ for x in [1,2] parallel {row=perform data_request();facts <+ row.count}
+ return [row.value for row in facts]
+}
+flow Main()->object {
+ direct=perform local("hi")
+ alias=requests.Build
+ aliased=perform alias("lip")
+ piped=perform ("hello" |>requests.Build)
+ closure=perform requests.Factory("sixsix")()
+ recursive=perform requests.Recur(2)
+ recursive_closure=perform requests.RecursiveFactory(2)()
+ projected=perform requests.Bundle(1).request
+ recursive_pipe=perform (2 |>requests.Recur)
+ forwarded=perform forward(requests.Recur(2))
+ return {sizes:[direct.Len(),aliased.Len(),piped.Len(),closure.Len(),recursive.Len(),recursive_closure.Len(),projected.Len(),recursive_pipe.Len(),forwarded.Len()],rows:ReadData()}
+}`
+	const want = `{"rows":[3,3],"sizes":[2,3,5,6,4,4,4,4,4]}`
+	const hostSource = `package main
+import("bytes";"context")
+func generatedHost()(Host,error){
+ host:=NewNativeHost(Host{Contracts:[]Contract{{Operation:Operation{Language:"host",Path:"checks",Member:"read"},Version:"1",Result:Schema{Type:"object"},Effect:ReadOnlyEffect,Concurrent:true,
+ Invoke:func(context.Context,Request)Response{n,_:=NumberValue(3);v,_:=ObjectValue(map[string]Value{"count":n});return Result(v)},
+ }}})
+ host.Native.Go.RegisterPackage("application/request-order",map[string]any{"New":bytes.NewBufferString})
+ return host,nil
+}`
+	var calls atomic.Int64
+	host := NewNativeHost(Host{Contracts: []Contract{{
+		Operation: Operation{Language: "host", Path: "checks", Member: "read"}, Version: "1", Result: Schema{Type: "object"}, Effect: ReadOnlyEffect, Concurrent: true,
+		Invoke: func(context.Context, Request) Response { return Result(object(map[string]Value{"count": number(3)})) },
+	}}})
+	defer host.Close()
+	host.Native.Go.RegisterPackage("application/request-order", map[string]any{"New": func(text string) *bytes.Buffer {
+		calls.Add(1)
+		return bytes.NewBufferString(text)
+	}})
+	variants := []string{declarations, strings.Join(func() []string {
+		lines := strings.Split(declarations, "\n")
+		for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+			lines[i], lines[j] = lines[j], lines[i]
+		}
+		return lines
+	}(), "\n"), strings.NewReplacer("a_recursive", "z_base", "z_recursive", "a_caller", "z_leaf", "a_leaf").Replace(declarations)}
+	for i, definitions := range variants {
+		module := "import go \"application/request-order\" as lib\n" + definitions
+		set := SourceSet{Root: "main.lip", Sources: map[string]Source{
+			"main.lip": {Version: "1", Text: main}, "requests.lip": {Version: "1", Text: module},
+		}}
+		before := calls.Load()
+		p, err := CompileSourceSet(set, host, CompileOptions{})
+		if err != nil || calls.Load() != before {
+			t.Fatal("checking request builders called provider", err, calls.Load(), before)
+		}
+		for _, parallel := range []int{1, 2, 7} {
+			report, err := p.Run(context.Background(), nil, Options{Parallelism: parallel})
+			if err != nil || display(t, report.Output) != want {
+				t.Fatal(i, parallel, report, err)
+			}
+		}
+		executable, _ := buildNative(t, p, GoOptions{HostSource: hostSource})
+		stdout, stderr, err := runNative(t, executable, "-parallel", "2")
+		if err != nil || strings.TrimSpace(stdout) != want {
+			t.Fatal(i, stdout, stderr, err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "requests.lip"), []byte(module), 0600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := NewSession(host, SessionOptions{ProjectRoot: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before = calls.Load()
+		nativeCell(t, s, main, "")
+		if calls.Load() != before {
+			t.Fatal("declarations constructed native resources")
+		}
+		nativeCell(t, s, `Main()`, want)
+		nativeCell(t, s, `saved=requests.Build`, "")
+		nativeCell(t, s, `buffer=perform saved("word");buffer.Len()`, "4")
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestNativeHelperLexicalScope(t *testing.T) {

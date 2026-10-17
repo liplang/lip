@@ -296,8 +296,7 @@ stage 不接受额外位置参数、占位符或隐式字段展开。没有第�
 一次，每阶段先取得上阶段的完整成功结果，再按源码顺序求值本阶段的命名参数，检查
 参数后执行该阶段。后续阶段的实参不提前求值。初始左侧按调用方表达式规则求值并
 固定，Flow 阶段接收其 Data 结果；额外命名参数须满足 Pure Data。fn 阶段保留普通
-函数的参数/结果规则；fn/核心调用返回 proposal 时 Ops 仍为 Unknown，不因管道增加
-更强推导。
+函数的参数/结果规则；fn 阶段返回 proposal 时沿用第 5 节的函数返回摘要；核心调用仍为 Unknown。管道本身不增加更强推导。
 
 对 `e |> S1 |> … |> Sn`，在所属节点的局部求值游标中依次执行如下描述步骤；t0…tn 是
 不可见的临时绑定，不属于源码名称空间：
@@ -376,8 +375,7 @@ binding、import 或 namespace。模块成员只通过显式 alias 访问，不�
 `pricing.Quote(args)` 若为已导出 Flow，是静态子 Flow 调用，管道亦可写
 `request |> pricing.Quote`。两者的声明、类型、Data 与纯性规则和本模块调用完全相同。
 `pricing.TAX_RATE` 为固定 Data 引用；object 投影和模块成员解析须在检查阶段区分。
-Flow 仍不是值，不能因跨模块导出而变成动态 function。跨模块 fn 返回 proposal 时
-Ops 仍为 Unknown，不能借导入提高 parallel 接受条件。
+Flow 仍不是值，不能因跨模块导出而变成动态 function。跨模块 fn 返回 proposal 时使用第 5 节同一返回摘要规则；摘要中的 operation 按定义模块解析，导入不改变其合约或 parallel 接受条件。
 
 被导入定义使用自己的 import alias、静态数据与私有声明。go/python/host alias 不直接
 导出；可通过纯 fn 构造 proposal 或 Flow 复用外部工作。operation 的规范名称仍按定义
@@ -721,8 +719,7 @@ RHS、子 Flow 显式实参）都不得包含结构化子 Flow 调用；纯 Flow
 
 parallel 的接受条件必须检查子 Flow 内全部传递 perform 的规范 Ops，而不是只看返回
 类型或 Flow 名。仅 Pure/join/已证明 Concurrent ReadOnly 的子图可以进入 parallel；
-Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要不增强原有 Ops：
-fn 返回的 proposal、容器投影和 carry 结果仍按原表为 Unknown。
+Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使用下述规范 Ops 和函数返回摘要；容器投影、动态函数调用和 carry 结果仍为 Unknown。
 
 下列规则中 op 是已解析 operation，args 是实参表达式集合，p 是 proposal 表达式。
 `args : Data ! Pure` 表示每个实参均纯求值且结果属于 Data。横线以上为前提，以下为
@@ -763,8 +760,59 @@ Ops 是 compiler 的辅助信息，不是 effect[Ops] 源类型，取非空有�
 | if/match 的结果 | 所有候选结果集合并；任一 Unknown 则 Unknown，不按常量条件删分支 |
 | value_block 的结果 | 在顺序局部环境中分析尾表达式 |
 | list/object 的索引、索引列表、切片或字段投影 | Unknown，包括字面量容器投影 |
-| fn/核心/高阶函数调用的返回值、carry 结果 | Unknown，不分析函数返回或跨轮状态 |
+| 静态已知语言 fn 的调用结果 | 使用下述 RetOps(f)，包括具名 fn、直接匿名 fn 和简单别名 |
+| 核心调用、动态/高阶调用和 carry 结果 | Unknown，不根据实际实参专门化或分析跨轮状态 |
 | 无以上信息的参数/输入/any 值 | Unknown；any 注解本身不抹去已有 binding 信息 |
+
+`RetOps(f)` 是纯语言函数 f 的返回值可能携带的 operation 集合或 Unknown，与执行 f
+本身的 Pure 效果分开。只分析函数体尾表达式的 Ops；前面构造但未返回的请求不进入
+摘要。返回注解不证明具体操作，`any` 注解也不抹去可证明的返回 Ops。普通参数不携带
+调用者实参的 Ops；如 `fn identity(p:effect)->effect {p}` 的摘要为 Unknown。
+
+静态已知函数来源仅包括具名 fn 声明、直接匿名 fn 表达式，以及由这些来源通过普通
+标识符引用、括号、简单别名或不可变捕获保留的函数。容器投影、if/match 选择的函数、
+返回函数的调用结果及裸 function/any 参数不建立这种来源；不得检查运行时闭包身份
+来补强信息。返回值为 proposal 的 if/match 仍按表中规则合并全部候选，不删除常量
+未选分支。value-block 可保存返回请求的 Ops，但不增加可调用函数的静态来源。
+
+先收集全部具名函数，再建立返回摘要方程；已知函数调用引用被调用者 RetOps，其他
+返回表达式按表求值。对联合方程取最小固定点：内部空集是最小元、Unknown 是顶元，
+已知操作集合按包含关系排序，合并为集合并。递归的中间空集不得提前转为 Unknown；
+如 `R = {worker.read} ∪ R` 得到 `{worker.read}`，`R = R` 收敛为空集后才在使用处
+按 Unknown 处理。遇到无法分析的返回来源，Unknown 吸收整个候选联合。此有限分析
+必须终止，结果不得依赖函数声明顺序、私有内联或经验性的迭代次数阈值。实现可用有限
+依赖图可达性求同一固定点，不求值函数、不展开递归、不调用 provider。
+
+RetOps 中保留规范 operation 身份，并通过当前固定 registry 解析版本、schema、效果
+及 Concurrent；不能把摘要简化为跨合约复用的“只读”标志。每个 perform 仍按实际
+proposal 完成动态类型、Data、授权、资源和结果检查。合并多个已知操作的结果类型时，
+按 operation 规范编码的字节序依次合并其裸返回注解，避免 map 遍历顺序影响诊断。
+
+交互会话保存请求的 Ops 和静态已知函数的返回摘要；失败 cell 不提交新摘要，已有
+闭包保留原捕获。不得重跑历史 cell、根据实际保存结果反推操作，或把原来 Unknown
+的容器/动态调用在后续 cell 中升级。编译后的摘要与图效果元数据只读共享。
+
+例如，注册 `worker.read(number)->number` 为 Concurrent ReadOnly 后：
+
+```lip
+import python "example.worker" as worker
+fn read_request(x:number)->effect { effect worker.read(x) }
+fn wrapped_request(x:number)->effect { read_request(x) }
+flow Main()->list {
+    facts=claim()
+    for x in [1,2] parallel {
+        value=perform wrapped_request(x)
+        facts <+ value
+    }
+    return [row.value for row in facts]
+}
+```
+
+上述两个函数均为 Pure，返回摘要均为 `{worker.read}`。若候选返回请求包含 Write、
+Unknown 或不可并发 ReadOnly，则 perform 仍不得进入 parallel。构造函数不增加图
+节点或外部调用身份；CallID 仍由实际 perform 的源码位置和动态路径产生。更精确的
+摘要也会减少普通图中不必要的 Unknown barrier，并可能提前拒绝已知结果类型错误。
+确定性继续遵守第 13 节的固定应答等前提，live snapshot 不获得额外保证。
 
 容器保存 proposal 不会执行它；但投影出的实际 proposal 仍须在 perform 处分析。
 例如令 x 为已绑定的 number，worker 是 `import python "example.worker" as worker`
@@ -1326,6 +1374,12 @@ Concurrent、capabilities 和资源需求。调用前验证，不能从名称推
 授权。命名参数在位置参数之后、每名一次，并按 schema 解析；固定 proposal 不保留原生
 对象本体；需要对象身份时只保留经声明的资源引用。构造 effect 不调用 provider、不写
 intent、不消耗调用预算。
+
+项目可在已注册 schema 中声明普通 Data 参数（例如 `policy:object`），携带 token、
+金额、时限或业务标记；其字段、单位和检查规则由 Host/adapter 定义。这些参数遵守
+相同的固定、身份与重放规则，不因命名为 policy 或 limits 就获得核心内建语义。
+权限需求仍由合约声明并由 Host 授权；第 10 节可释放的资源许可不等于累计花费账本。
+
 规范 operation 名由 `[language, import_path, member_path]` 唯一解析，其中 member_path
 是 alias 后以 `.` 连接的 ASCII 成员名。内建 snapshot 名为 `["lip","claim","snapshot"]`。
 这里 language 取 import 的 go/python/host 标记，import_path 是解码后的路径 string，
@@ -1851,7 +1905,7 @@ CallID/MemoryJournal 当作跨 run 消息去重或恰好一次业务执行的保
 | 数据库查询、写入、事务 | 已注册 operation 的 schema/效果/资源与事务合约；连接池由 application 管理，临时资源按 run 租约清理 |
 | 跨请求幂等与持久业务状态 | 显式业务键 + Host 存储/事务；不能仅按参数相同或 MemoryJournal 推断去重 |
 
-纯 fn 可构造 proposal 来复用单步请求，返回的 proposal 依原 Ops 表保持 Unknown；多步
+纯 fn 可构造 proposal 来复用单步请求，静态已知函数依第 5 节返回摘要保留 Ops；多步
 有外部操作的复用使用结构化 Flow。需要原子事务的多步操作可以由一个显式 Host
 operation 承接，结果必须声明为合法 Data；一串子 Flow 或管道不会自动成为数据库
 事务。原生异常只有经已声明 adapter 合约转换才成为业务 Result，否则沿原 Error
@@ -1908,7 +1962,7 @@ early 错误时，两个调用都已发生。两种调度的主错误均为 earl
 - concat/slice/keys/has/put/split/parse_number、string 顺序、带 guard 推导式及线性构造；
 - 普通/三引号字符串的相同转义、三引号的 LF/CRLF、缩进、引号正文、非法控制字符与后续诊断位置；
 - sum_to、fold 回调尾 if、尾 match/换行/分号、carry else-if；块局部 binding 与参数验证顺序；
-- 命名参数顺序、静态/动态 arity、保守 Ops 的容器/函数/分支路径与 parallel 判定；
+- 命名参数顺序、静态/动态 arity、返回 Ops 的函数链/别名/闭包/模块/递归固定点、容器与动态调用的 Unknown、分支联合与 parallel 判定；
 - 多 Flow 的签名收集、显式入口选择、Flow 非值性质、fn 纯性和调用环拒绝；
 - EntryInput 的位置/命名绑定、EntryOutput 的 null/void 区别、验证先于 run_id/begin、运行前拒绝零节点/零调用及 durable 输入固定；
 - 模块/导出/静态 Data、离线锁定解析、模块环拒绝、私有成员与同名隔离；
@@ -2201,6 +2255,11 @@ flow Main() -> number {
 | 声明 `fn known_fn(x:number)->number {x}`，调用 `known_fn(y=1)` / `len(value=[])` | 静态 E-ARITY | core 编译 |
 | `f(perform effect worker.read(0), perform effect worker.read(1))` | arity 先失败，两个实参的 provider 调用均为零 | core 动态调用 |
 | `f(perform effect worker.text())` | 实参调用一次，参数 E-TYPE，f body 不执行 | core 动态调用 |
+| `fn request(x:number)->effect {effect worker.read(x)}`；parallel 内 perform request(1) | RetOps 为 `{worker.read}`，允许；构造和检查零 provider 调用 | core Ops |
+| 多层/前向/互递归 fn 的返回联合只含 worker.read；简单别名或捕获请求 | 同一最小固定点，不依赖声明顺序；符合条件时允许 parallel | core Ops |
+| fn 返回的候选含 store.commit，即使在常量未选分支 | 不删除 Write 候选，parallel 静态 E-PARALLEL | core Ops |
+| identity(p:effect) 返回 p；动态 function 参数调用；容器取出的函数 | RetOps 为 Unknown；跨 REPL cell 保存后仍不增强 | core Ops |
+| fn 只有无基础返回的递归环 | 内部空集固定点在使用处按 Unknown，不据此允许 parallel | core Ops |
 | `p=[effect worker.read(0)]; q=p[0]; r=perform q` | 普通图允许，r 为 0，其 binding 节点按 Unknown barrier 调度；parallel body 静态 E-PARALLEL | core Ops |
 | `for item in [0] parallel { out=for x in [item] with s=0 { v=perform effect worker.read(x); break v } }` | 合法；carry 的 break v 不退出图循环 | core 编译/调度 |
 | `effect worker(0)` / `effect worker.unknown(0)` | 静态 E-OPERATION；provider 调用零次 | core 编译 |
@@ -2266,7 +2325,7 @@ flow Adjust(value:number, delta:number) -> number {
 | child 的 return 已有值，但已选审计节点仍未完成 | child 不发布成功结果，下游阶段及其额外参数不求值 | core 完成边界 |
 | child 返回合法 `{ok:false}`，后接下一阶段；另用 if 显式保护下一阶段 | 前者仍继续；后者只执行被选分支 | core 业务控制 |
 | child 内执行故障 store.commit，provider 已写入但返回 schema 不符 | 保留 known_fault/receipt，主错误定位内部 perform；下游失败跳过，不重跑写入 | core Host / durable replay |
-| child 传递执行 fn 返回的 proposal，放入 parallel body | Ops 保持 Unknown，静态 E-PARALLEL；只返回 Data 不改变效果 | core 摘要 |
+| child 传递执行静态已知 fn 返回的 proposal，放入 parallel body | 使用 RetOps；全部候选为 Concurrent ReadOnly 时允许，Write/Unknown/不可并发读取仍 E-PARALLEL | core 摘要 |
 | 同一 Claim 子 Flow 在两个调用点、两轮图循环和两轮 carry 中运行 | store 实例隔离，JoinID/CallID 不冲突；返回快照仍检查全部 producer | core 身份/Claim |
 | child 较早节点失败，较后无必要依赖的节点尚未启动 | 较后节点按 F/K 截断，容器前缀不强迫其执行；根错误不重新包装 | core 错误 |
 | 共享工作额度为 1；局部 value_block 中调用含多个节点的 child | 正常推进，无嵌套等待死锁；下一条局部语句等待 child 完整成功 | core 调度 |
@@ -2317,7 +2376,7 @@ selector Position 为 `[(10,0)]`，其 source 调用的 InvocationPrefix 为
 | 同一 source set 以不同文件发现/编译并行次序构建 | SourceTable、DependencyLock、StaticSite 与 revision 完全相同 | core 可重复构建 |
 | 根源码不变，只修改依赖注释、源码内容或锁定版本 | 多源 revision 改变；未完成旧 run 不得按新来源恢复 | core / durable |
 | 构建快照完成后修改磁盘文件；启动已编译 Program | 使用原冻结源码；不热加载、不重新求值模块；新源码须重新构建 | core 冻结 |
-| 导出 fn 返回 proposal；导入者 perform 其结果并放进 parallel | Ops 仍为 Unknown，静态 E-PARALLEL | core 效果 |
+| 导出 fn 返回 proposal；导入者 perform 其结果并放进 parallel | 按定义模块的 RetOps 与 registry 判定，符合 Concurrent ReadOnly 时允许 | core 效果 |
 | 两个 HTTP run 共享 application 池，各有 run 对象/worker 租约；取消一个请求 | 只撤销/清理该 run 的租约，不关闭共享池或取消另一个 run | core Host |
 | 请求结束后在另一 run 使用旧 run 引用，或重置 worker 后使用旧 generation | E-RESOURCE，provider 实际动作零次；不隐式重建对象 | core 资源 |
 | provider 写入 outcome 不明，run 取消并触发生命周期清理 | 保留 Uncertain，安全隔离/结算租约，不自动重启重试写入 | core / durable |

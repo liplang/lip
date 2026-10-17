@@ -334,11 +334,19 @@ type syntax struct {
 }
 type analysis struct {
 	typ        string
-	ops        map[string]bool
-	unknown    bool
+	ops        *operationSummary
+	returns    *operationSummary
 	effect     EffectClass
 	concurrent bool
 	hasFlow    bool
+}
+
+// A finite, compile-time graph of unions. Function return cells permit forward
+// references and recursion without retaining syntax, environments or values.
+// nil means Unknown; an empty resolved summary is also Unknown at use.
+type operationSummary struct {
+	operation string
+	sources   []*operationSummary
 }
 
 type function struct {

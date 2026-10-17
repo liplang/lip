@@ -2,10 +2,18 @@
 # A proposal is a value; constructing or binding it does not call the provider.
 # perform is the only execution boundary; ordinary fn cannot perform.
 import go "strings" as text
+import python "statistics" as stats
+# Pure construction retains the returned operation; it does not call Go.
+fn upper_request(value:string)->effect { effect text.ToUpper(value) }
+# Ordinary fn parameters/results can carry requests. This generic parameter has
+# Unknown Ops, so forwarding works sequentially but cannot establish parallel safety.
+fn forward(request:effect)->effect { request }
 flow Main() -> object {
-    request = effect text.ToUpper("hello")
+    request = upper_request("hello")
     result = perform request
     # A recorded external result can become an argument to the next request.
-    repeated = perform effect text.ToUpper(result + ", lip")
-    return {first: result, second: repeated}
+    repeated = perform forward(upper_request(result + ", lip"))
+    # The operation's result schema decides the type: string above, number here.
+    average = perform effect stats.mean([1, 2, 3])
+    return {first: result, second: repeated, average: average}
 }

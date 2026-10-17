@@ -177,7 +177,7 @@ Explicit Flow arguments MUST be Pure Data expressions. They may reference comple
 
 `|>` has lower precedence than `||` and runs stages left to right. A stage MUST resolve lexically to a named fn/Flow, an exported module fn/Flow, or a core pure function. It does not search past a shadowing local. Undeclared targets are E-NAME, private members E-EXPORT, and dynamic function values/object members/other nonstatic targets E-TYPE. Both `x |> F` and `x |> F()` bind x to the first declared parameter; `x |> F(limit=20)` also binds named arguments. Stages accept no extra positional arguments, placeholders, or implicit field spreading. Missing first parameter, duplicate first binding, missing/unknown arguments are E-ARITY. Core functions still reject names, receive exactly one positional argument, and MUST accept that arity: len/str/range work; map/fold need a named fn wrapper.
 
-Before execution, check all stage names, argument structure, and statically known types. Evaluate the initial left side exactly once. Each stage waits for complete success of the previous stage, then evaluates its named arguments in source order, validates arguments, and invokes. Later arguments cannot execute early. The initial expression obeys its caller context; a Flow stage accepts its fixed Data result and Pure Data extra arguments. fn stages retain ordinary parameter/result checks. Proposals returned by fn/core calls still have Unknown Ops.
+Before execution, check all stage names, argument structure, and statically known types. Evaluate the initial left side exactly once. Each stage waits for complete success of the previous stage, then evaluates its named arguments in source order, validates arguments, and invokes. Later arguments cannot execute early. The initial expression obeys its caller context; a Flow stage accepts its fixed Data result and Pure Data extra arguments. fn stages retain ordinary parameter/result checks. Proposals returned by statically known fn stages use the §5 return summaries; core results remain Unknown. Pipelines introduce no stronger inference.
 
 For `e |> S1 |> … |> Sn`, use these invisible sequential bindings within the owner cursor:
 
@@ -207,7 +207,7 @@ Declarations default to private. export modifies only top-level fn/Flow/static D
 
 `export TAX_RATE:number = 0.1` is immutable static Data. Initializers are only §2 static_data literal trees, with no names/calls/proposals/Flows/evaluation. Validate types, finiteness, Unicode, duplicate fields, and Data normally. After signature collection, module definitions may forward-reference static data; it cannot be reassigned. Parsing/validation/memory count toward build budgets without starting runs or invoking Hosts.
 
-An exported `pricing.total` fn evaluates in its defining module environment and may be used as a function value; it captures only that module's immutable data/closures. Exported `pricing.Quote(args)` is a static child call, also expressible as `request |> pricing.Quote`. Exported data is a fixed reference. Distinguish module resolution from object projection during checking. Flow export never creates a dynamic function value. Cross-module fn proposals retain Unknown Ops. Imported definitions use their own imports/data/private declarations. External aliases are not directly exported; use fn proposals or Flow wrappers. Canonical operation identity uses the defining module's original import, unaffected by caller aliases.
+An exported `pricing.total` fn evaluates in its defining module environment and may be used as a function value; it captures only that module's immutable data/closures. Exported `pricing.Quote(args)` is a static child call, also expressible as `request |> pricing.Quote`. Exported data is a fixed reference. Distinguish module resolution from object projection during checking. Flow export never creates a dynamic function value. Cross-module fn proposal results use the same §5 return summaries, with operation identities resolved in the defining module; importing never strengthens contracts. Imported definitions use their own imports/data/private declarations. External aliases are not directly exported; use fn proposals or Flow wrappers. Canonical operation identity uses the defining module's original import, unaffected by caller aliases.
 
 Before execution, freeze the root and entire dependency closure, including unused imports. Preserve each SourceID, nonempty version string (`local` is allowed), complete source bytes, and digest. Checking/interpreting/REPL/Go generation MUST use the same snapshot, never hash then reread for compilation. Changed sources require rebuilding; no live replacement. Missing versions/content or lock mismatch reject before external actions.
 
@@ -398,7 +398,7 @@ map/fold use the same callback rules. Proposals bind against operation schemas r
 
 Summary(F) conservatively combines all possible performs and child summaries across all paths/loops/nodes. The acyclic call graph permits callee-first computation; constant guards do not remove candidates. No performs means Pure; Unknown remains Unknown. Child execution contributes to its caller effect; reading an already completed Data result is Pure. Pure summaries never remove complete-read producer dependencies or permit child calls in Pure-only positions (fn, guards, proposal/join RHS, explicit child arguments).
 
-parallel checks all transitive normative Ops, not just result types/Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries do not strengthen Ops: fn results, projections, and carry results remain Unknown.
+parallel checks all transitive normative Ops, not just result types/Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries consume the normative Ops and function return summaries below. Projections, dynamic function calls, and carry results remain Unknown.
 
 In the rules below, op is a resolved operation, args are argument expressions, and p a proposal. `args : Data ! Pure` means every argument is pure and Data. Ops(p) is a nonempty finite set or Unknown; EffectOf takes the greatest registered effect, and ResultType conservatively merges schemas, yielding Unknown/any respectively for unknown Ops.
 
@@ -427,8 +427,37 @@ Ops is compiler information, not a writable effect[Ops] type. Implementations MU
 | if/match result | Union all candidates; any Unknown yields Unknown; no constant-guard pruning |
 | value block | Analyze tail in sequential local environment |
 | list/object index, gather, slice, or field projection | Unknown, including literal containers |
-| fn/core/higher-order result or carry result | Unknown; no function-return/cross-iteration analysis |
+| Statically known language fn call result | RetOps(f) below, including named fn, direct anonymous fn, and simple aliases |
+| Core/dynamic/higher-order call or carry result | Unknown; no actual-argument specialization or cross-iteration analysis |
 | Other parameter/input/any | Unknown; an any annotation alone does not erase existing binding information |
+
+RetOps(f) describes the operations possibly carried by pure language function f's return value, independently of the Pure effect of executing f. Analyze only the terminal expression's Ops; earlier constructed but unreturned requests do not enter the summary. A return annotation proves no operation identity, and any does not erase provable Ops. Ordinary formal parameters do not inherit caller-argument Ops: `fn identity(p:effect)->effect {p}` has Unknown RetOps.
+
+Known callable origins are named fn declarations, direct anonymous fn expressions, and those origins preserved by ordinary identifier references, parentheses, simple aliases, or immutable captures. Container projections, if/match-selected functions, function-returning call results, and bare function/any parameters establish no such origin. Never inspect runtime closures to strengthen it. Request-valued if/match expressions still union every candidate without constant-guard pruning. Value blocks preserve returned request Ops but establish no additional known callable origin.
+
+Collect all named functions before establishing return-summary equations. Known calls refer to callee RetOps; other return expressions follow the table. Solve the union equations by their least fixed point: internal empty sets are bottom, Unknown is top, known sets are ordered by inclusion, and joins are set unions. Do not convert intermediate recursive empty sets to Unknown: `R = {worker.read} ∪ R` yields `{worker.read}`, while `R = R` converges to empty and is treated as Unknown only at use. An unanalyzable return source absorbs its candidate union into Unknown. This finite analysis MUST terminate independently of declaration order, private inlining, or heuristic iteration limits. Finite dependency-graph reachability may compute the same fixed point, without evaluating functions, unfolding recursion, or invoking providers.
+
+Summaries retain canonical operation identities. Resolve versions/schemas/effects/Concurrent against the current fixed registry, never a readonly flag reused across contracts. Every perform still checks the actual proposal's dynamic type, Data, authorization, resources, and result. Merge multiple known operation result annotations in canonical operation-encoding byte order, independently of map traversal.
+
+Sessions preserve proposal Ops and known callable return summaries. Failed cells publish no new summaries; old closures retain their original captures. Never rerun history, reverse-infer operations from saved runtime values, or upgrade an Unknown projection/dynamic call in a later cell. Checked summaries and graph effect metadata remain read-only across runs.
+
+For registered Concurrent ReadOnly `worker.read(number)->number`:
+
+```lip
+import python "example.worker" as worker
+fn read_request(x:number)->effect { effect worker.read(x) }
+fn wrapped_request(x:number)->effect { read_request(x) }
+flow Main()->list {
+    facts=claim()
+    for x in [1,2] parallel {
+        value=perform wrapped_request(x)
+        facts <+ value
+    }
+    return [row.value for row in facts]
+}
+```
+
+Both functions execute purely and have RetOps `{worker.read}`. Any Write, Unknown, or nonconcurrent ReadOnly candidate still prevents parallel execution. Builders add no graph nodes or external identities: existing perform sites/dynamic paths determine CallID. Precise summaries may also remove unnecessary Unknown barriers in ordinary graphs and reject known result-type errors earlier. §13's fixed-response assumptions and live-snapshot exclusions still apply.
 
 Storing proposals does not perform them. Given a number x and registered version-1 Concurrent ReadOnly `worker.read(number)->number`, `p=[effect worker.read(x)]; q=p[0]; r=perform q` is legal sequentially, but q has Unknown Ops and its node is a barrier; parallel placement is E-PARALLEL. Merge effects of argument evaluation and every perform site separately, rather than masking them with result Ops. Returned proposals still carry resolved operation/version/arguments and undergo runtime contract checks. Every operation is authorized at perform; any never exempts Data/purity. Pure function parameters never become native callables. perform requires a proposal. Construction only resolves contracts/fixes arguments; construction/schema errors do not imply provider invocation.
 
@@ -667,6 +696,8 @@ Response = Result(Data) | Rejected(ErrorData) | Uncertain(ErrorData)
 ```
 
 Descriptors MUST declare name/version, parameter/result schemas, ReadOnly/Write/Unknown, Concurrent, capabilities, and resource requirements. Validate before invocation; never infer purity/concurrency/idempotence/authorization from names. Named arguments follow positional ones and bind once against schema. Proposals retain declared resource references rather than native objects. Construction invokes no provider, writes no intent, and consumes no call budget.
+
+Projects may declare ordinary Data parameters in registered schemas, such as `policy:object`, to carry token, money, time limits, or business annotations. The Host/adapter defines their fields, units, and checks. These parameters follow the same argument freezing, identity, and replay rules; names such as policy or limits carry no built-in core semantics. Contracts still declare permission requirements and the Host grants access. Reusable resource permits in this section are not a cumulative spending ledger.
 
 Canonical operation identity is `[language,import_path,member_path]`, with the decoded import path and dot-joined ASCII members after the alias. Ordinary operations require an imported external alias and at least one member; `effect worker(0)` is E-OPERATION. A module is not implicitly callable. Unknown aliases/members/versions/builtins are static E-OPERATION; dynamic proposals still validate complete identity. The reserved claim namespace provides only snapshot, resolving to `["lip","claim","snapshot"]`, without alias override/extension. Contract identity uses Data strings, never function addresses/repr. Schemas cover Data subtypes, named fields, positional order, required/optional parameters, and return shapes. Reject unregistered schemas. Unanalyzable native signatures may use explicit generic Data schemas with Unknown, never default Pure. Versions are nonempty and change whenever call/recovery semantics change. SDK/transport/package/schema-file formats are Host choices; protocol semantics/Data/identity are shared.
 
@@ -933,7 +964,7 @@ Validation, business Results, templates, and databases use §2.2 modules/existin
 | Database/query/write/transaction | Registered schemas/effects/resources/transactions; application pools and run leases |
 | Cross-request idempotence/state | Explicit business keys + Host storage/transactions, not equal arguments/MemoryJournal |
 
-Pure fn can construct reusable single-step proposals, whose results remain Unknown Ops. Multiple external steps use child Flows. Atomic multi-step transactions may be one explicit Host operation with legal Data results; child/pipeline sequences are not automatic transactions. Exceptions become business Results only under declared adapter conversion, otherwise normal errors. 401/403/ok:false still need explicit gates for later actions.
+Pure fn can construct reusable single-step proposals; statically known calls preserve Ops through §5 return summaries. Multiple external steps use child Flows. Atomic multi-step transactions may be one explicit Host operation with legal Data results; child/pipeline sequences are not automatic transactions. Exceptions become business Results only under declared adapter conversion, otherwise normal errors. 401/403/ok:false still need explicit gates for later actions.
 
 ## 13. Determinism and guarantee boundaries
 
@@ -962,7 +993,7 @@ Every provided interpreter/generated path MUST validate these rules with shared 
 - All §3.1 primitives, string order, guarded comprehension paths and linear construction overhead.
 - Ordinary/triple string escapes, LF/CRLF, indentation, quote text, invalid controls, later diagnostic positions.
 - Terminal if/match with newline/semicolon, fold callback tails, carry else-if, locals and argument-validation order.
-- Named ordering, static/dynamic arity, normative Ops through projections/calls/branches, parallel acceptance.
+- Named ordering, static/dynamic arity, return Ops through function chains/aliases/captures/modules/recursive fixed points, Unknown projections/dynamic calls, branch unions, and parallel acceptance.
 - Multi-Flow signature collection, explicit entries, non-value Flows, fn purity, Flow-cycle rejection.
 - EntryInput binding and validation before run_id/begin; zero nodes/calls on pre-run rejection; durable fixed input; EntryOutput null/void.
 - Modules/exports/static Data, offline locked resolution, cycles/private names/isolation; multi-source sites/source maps/revision changes/single-source compatibility independent of discovery order.
@@ -1175,6 +1206,11 @@ For each independent row below, reset bindings/journal. worker aliases `import p
 | `known_fn(y=1)` for declared x:number / `len(value=[])` | Static E-ARITY | core |
 | `f(perform effect worker.read(0),perform effect worker.read(1))` | Arity fails before arguments, zero providers | core dynamic call |
 | `f(perform effect worker.text())` | One argument call, E-TYPE before f body | core dynamic call |
+| `fn request(x:number)->effect {effect worker.read(x)}`; parallel perform request(1) | RetOps `{worker.read}`; accepted; checking/construction invoke no provider | core Ops |
+| Forward/multi-layer/mutually recursive fn unions contain only worker.read; simple aliases or captured requests | Same least fixed point independent of declaration order; eligible parallel accepted | core Ops |
+| A returned candidate is store.commit, even under a constant unselected guard | Retain Write candidate; static E-PARALLEL | core Ops |
+| identity(p:effect) returns p; dynamic function parameter or projected callable | Unknown RetOps remains Unknown across saved REPL cells | core Ops |
+| A recursive fn component has no base return | Internal empty fixed point becomes Unknown at use, never permits parallel | core Ops |
 | `p=[effect worker.read(0)];q=p[0];r=perform q` | r=0 with Unknown barrier normally; E-PARALLEL in parallel | core Ops |
 | `for item in [0] parallel {out=for x in [item] with s=0 {v=perform effect worker.read(x);break v}}` | Legal; carry break does not exit graph loop | core |
 | `effect worker(0)` / `effect worker.unknown(0)` | Static E-OPERATION, zero providers | core |
@@ -1236,7 +1272,7 @@ The next independent rows occur inside legal Flows, using Read/Adjust above; add
 | Child return ready but selected audit pending | No success publication/later stage arguments | core completion |
 | Child returns valid ok:false followed by next stage / guarded next stage | Continues normally / executes only selected branch | core business |
 | Child faulty commit after completed write | Preserve known_fault/receipt/internal perform error; skip downstream, no rerun | core / durable |
-| Child performs fn-returned proposal inside parallel | Unknown Ops remains E-PARALLEL regardless of Data output | core summary |
+| Child performs a known fn-returned proposal inside parallel | Use RetOps; accept only all-Concurrent-ReadOnly candidates, otherwise E-PARALLEL | core summary |
 | Same Claim child at two sites, graph iterations, carry iterations | Isolated stores/IDs, full producer checks | core identity |
 | Earlier child failure, unnecessary later unstarted node | F/K cuts later work; no wrapper root/forced descendants | core error |
 | Worker allowance 1, child in local value block | Progress without deadlock; later local statement waits | core scheduling |
@@ -1268,7 +1304,7 @@ Modules/resources use frozen build inputs and both interpreter/generated executi
 | Same source set discovered/compiled in different orders | Identical SourceTable/lock/sites/revision | core reproducibility |
 | Only dependency comment/content/version changes | New revision; no old-run resume with new sources | core / durable |
 | Disk changes after snapshot, then compiled Program runs | Frozen sources retained; rebuild for changes | core freeze |
-| Exported fn proposal performed in parallel | Unknown Ops, E-PARALLEL | core effect |
+| Exported fn proposal performed in parallel | Resolve defining-module RetOps against the registry; eligible Concurrent ReadOnly is accepted | core effect |
 | Two HTTP runs share application pool, own run objects/leases; cancel one | Clean only its leases, retain pool/other run | core Host |
 | Old run reference in another run / old worker generation | E-RESOURCE before provider actions, no implicit recreation | core resources |
 | Cancel unclear write then lifecycle cleanup | Preserve Uncertain, isolate/settle lease, no restart retry | core / durable |

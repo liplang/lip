@@ -21,10 +21,12 @@ Keep the core small: immutable values, pure functions, control flow, graph depen
 - `**` associates right, precedes left negation, and accepts signed exponents. `*/` uses its right operand as base, shares multiplication precedence, and associates left. Follow §16.5's fixed algorithm rather than platform pow/log, synchronizing reference code, errors, and interpreted/generated vectors.
 - `evaluator.go`/`scheduler.go` own pure functions, closures, proper tail calls, carry, gates, barriers, primary errors, and Claims. Unselected branches produce no dynamic errors/calls; preserve node positions/evaluation paths.
 - `host.go`/`adapters.go` are the only external boundary. Proposal construction calls no provider; validate arguments/authorization/resources before actions. Distinguish known completion with failed validation from Uncertain; retries cannot hide writes.
-- Ops propagates conservatively: container projections, call results, and carry results are Unknown. Stronger private inference cannot admit parallel work. Recording provenance is not a purity type.
+- Normative Ops uses separate RetOps summaries for known pure request builders through aliases, captures, modules, pipelines, and call chains. Forward/recursive calls use finite union equations' least fixed point, without unfolding functions or specializing arguments. Projections, dynamic calls, and carry results remain Unknown. Returned summaries cannot mask argument effects, and stronger private inference cannot admit parallel work.
+- Native result provenance stays separate from Ops. Process request builders by dependency, use existing return summaries to complete recursive request results, then refresh enclosing closure/container return shapes without lowering or packing proposals twice. Cross modules, recursion, closures, and pipelines in regressions; reverse declarations and rename functions. Ordinary Host Data field reads must remain pure.
+- An effect is an ordinary value outside Data: fn parameters/results, containers, and immutable captures may carry it. Flow inputs/outputs, Claim contributions, and Host arguments/results still require recursive Data. Actual operation schemas determine perform result shapes. Projects define request builders and register contracts, without introducing effect<T> or custom source types.
 - `backend.go` emits actual Go evaluation, never invokes an interpreter over bundled source. When adding helpers, check embedded-declaration filtering for missing generated symbols.
 - Generated static metadata initializes once and remains read-only. Concurrent Program construction/runs cannot rewrite active ASTs; native fixtures also use race detection.
-- `session.go` retains successful immutable results/closures with the same checker/graph engine. Never rerun history to reconstruct state. Failed cells commit no bindings, but performed actions remain. Complete Claim programs have explicit run lifecycles.
+- `session.go` retains successful immutable values, closures, and checker-produced Ops/RetOps with the same checker/graph engine. Never strengthen Unknown from saved runtime function/proposal identities or rerun history. Failed cells commit no bindings/summaries, but performed actions remain. Deleting/reusing names does not retarget old captures; complete Claim programs have explicit run lifecycles.
 - REPL/learn share `cmd/lipc/editor.go`. Raw mode covers input only and restores before evaluation/provider calls, including cancel/EOF/errors. No background terminal prefetch. Verify shortcuts, Unicode, and bracketed paste with real PTYs; pipes remain plain text. Completion executes no source/native calls.
 
 ## Call consistency
@@ -39,14 +41,22 @@ Claims append identified facts; complete reads wait for every producer, while li
 
 Use English as the primary language for normal prompts/help/diagnostics/lessons/example comments, optionally supplemented by Chinese. Prefer English when space is limited. Give every Chinese document a linked English version; synchronize contracts, examples, section numbers, and navigation. Keep public documentation in linked Chinese and English editions, and code, comments, and normal interactive text in English.
 
+When static acceptance changes, synchronize both specifications' main rules, module/pipeline rules, appendix vectors, and relevant guides, help, lessons, and examples. Keep bilingual example code blocks in corresponding sections and the same order: documentation consistency checks compare them sequentially.
+
 Explain what graph concurrency, Claims, and effects solve before usage. Explain ReAct as think → call a tool → observe → decide again. Separate within-run graph dependencies from Host-managed long-lived events. State the small-core/Go-Python scope and unimplemented optional durable recovery accurately.
 
 `examples/` contains commented executable `.lip` programs progressing from Hello World/bindings/arithmetic/branches/functions to carry/Claims/external work. Teaching registrations belong in `script/adapters.go`, explicitly enabled by DemoHost. `backend.go` derives DemoHostGoSource from the same registration function. Tests live in `tests/`. Group code by semantics; new files should own complete responsibilities rather than tiny helpers.
+
+During example refactoring, use pure fn for single-step request construction and child Flows for multiple external steps; Flow targets stay static. Compare both entry-file size and total implementation size. Avoid mechanically wrapping one-off calls or shortening code by deleting validation, resource cleanup, or terminal/streaming behavior.
+
+Keep each learn blank focused on one idea. Show concrete examples and input/output before increasing composition difficulty; execute examples and reference answers. Reveal hints gradually, exclude demos from completion, and retain failed answers for revision. Store progress by stable lesson IDs so inserted lessons preserve earlier completion marks. Check editor changes through the REPL, learning mode, real PTYs, and pipes; completion must not execute examples or external code.
 
 Minimum Go is 1.25; allow higher versions without pinning patch/toolchain. Adjust versions according to user requirements and real dependencies.
 
 ## Validation and delivery
 
 Add regressions for real semantic risks rather than restating implementation. Useful checks include numeric/encoding vectors; terminal if/match/value blocks and malformed arguments/source; actual generated binaries/diagnostic locations; legal schedule variations, closed-gate zero calls, prerequisite closure/barriers/Claims; identical Go/Python Data boundaries, pre-authorization zero calls, known-fault replay without reruns; REPL multiline/error recovery/closures/non-repeated historical actions; every lesson with multiple inputs.
+
+Request-summary regressions also prove actual provider-read overlap and surrounding Write barriers in ordinary graphs/parallel loops, plus imported child-Flow composition, rather than checking compilation alone.
 
 Run `make test`, `make race`, `make vet`. race also builds/runs generated binaries with race detection. Makefile caches/temp files stay in `.build` for restricted workspaces. After validation run `make clean`; deliver no lipc, `.build`, Python caches, or other generated products. Restrict cleanup to project products. Report changes, actual checks, and limitations without claiming optional profiles are implemented.

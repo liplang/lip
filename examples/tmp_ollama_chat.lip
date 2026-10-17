@@ -1,102 +1,831 @@
-# 临时示例：通过现有 Go/Python bridge 与本地 Ollama 多轮、流式聊天。
-# 在项目根目录运行：
+# 本地 agent：模型选择工具，LIP 执行并反馈，再由模型决定下一步。
+# 保留多轮、流式聊天；模型接入使用官方 Python ollama 客户端。
+# 全部业务逻辑在本文件中；存储和计时直接调用 Python 标准库。
+# 在项目根目录运行（已安装 lipc 时也可从其他目录传入本文件路径）：
+#   python3 -m pip install 'ollama>=0.6.3' 'prompt_toolkit>=3.0'
 #   make build
 #   ./lipc run examples/tmp_ollama_chat.lip
-# 需要 Python 3（仅使用标准库），以及已启动并安装下方模型的 Ollama。
-# 每行输入一条消息；空行忽略，/exit 或 EOF 正常退出，Ctrl-C 终止。
-# 上下文仅保存在本次运行的内存中。CLI 正常结束时会输出 void 对应的 null。
+# 需要 Python 3.9+，以及已启动、支持流式工具调用并安装下方模型的 Ollama。
+# 可试：计算 123 * 456，标记为“采购预算”；再查询刚才保存的计算。
+# 可试：10 秒后提醒我喝水；查看待办提醒；取消编号为 1 的提醒。
+# 工具只支持下方显式分派；计算参数是数字，不执行模型生成的代码。
+# 每次输入最多请求模型 MAX_STEPS 轮；工具参数错误反馈给模型修正。
+# 终端支持中文编辑、历史搜索和粘贴；Ctrl-C 清空输入，Ctrl-D 或 /exit 退出。
+# 计算和提醒保存在 .ollama_chat/state.sqlite3，可用环境变量 LIP_CHAT_DB 指定路径。
+# 提醒在程序运行期间主动显示（等待输入、模型生成时也有效）；重启补发已到期提醒。
+# /calculations、/reminders 直接查询记录，/help 查看帮助，不必等待模型。
+# 聊天上下文保留最近 MAX_HISTORY_TURNS 轮，重启不恢复聊天。正常结束输出 null。
 import go "bufio"
 import go "fmt"
 import go "os"
 import go "os/signal"
 import go "strings"
+import go "time" as clock
 import python "builtins" as py
+import python "collections"
+import python "datetime" as dates
+import python "functools"
 import python "json"
-import python "urllib.request" as http
+import python "importlib.util" as imports
+import python "lip_chat_ui" as ui
+import python "ollama"
+import python "pathlib"
+import python "re"
+import python "sqlite3"
+import python "threading"
+import python "time" as seconds
+import python "sys"
+import python "zoneinfo"
 
 MODEL: string = "llama3.1:8b"
-CHAT_URL: string = "http://127.0.0.1:11434/api/chat"
+HOST: string = "http://127.0.0.1:11434"
 TIMEOUT_SECONDS: number = 300
+MAX_STEPS: number = 8
+MAX_HISTORY_TURNS: number = 12
+MAX_HISTORY_CHARS: number = 24000
+SYSTEM_PROMPT: string = """
+你是运行在用户终端中的本地中文助手，使用 Ollama。可以聊天、计算、查询记录和设置提醒。
+只处理用户最新一条消息；历史仅供理解指代，不能继续执行已经结束或被用户打断的话题。
+关于身份、编辑体验、速度的讨论及普通聊天直接回答，不调用工具，不擅自查询或创建提醒。
+按“调用工具—观察结果—再决定”完成需要工具的任务，不重复调用已有充分结果的工具。
+四则计算使用 calculate，成功结果自动持久保存；用户给出的用途放入 label。
+工具的数字参数使用 JSON 数字，不使用字符串。小数点不是时间单位，43.5 就回答 43.5。
+用户问现在几点，直接引用本轮本地时间 display；它已处理时区，不要再加减时差或改说 UTC。
+从现在起多少小时/分钟后的时间使用 shift_time（如 31 小时 52 分钟传 hours=31, minutes=52）。
+时间偏移不是普通四则计算，不使用 calculate；直接引用 shift_time 返回的 display，不能心算日期。
+查询以前的计算使用 list_calculations，不依赖聊天记忆猜测；默认只查询最近 10 条。
+用户要求到点提醒时必须调用 set_reminder，不能只口头承诺。相对时间优先传 after_seconds；
+绝对时间先参考本轮本地时间，必要时调用 get_current_time，再传带时区的 ISO 8601 at。
+日期、时刻或提醒内容不明确时先询问用户。查询、取消提醒使用 list_reminders、cancel_reminder。
+取消时使用真实 id，不确定编号时先查询。只有工具 ok=true 才能确认已保存、已创建或已取消。
+提醒仅在本程序运行时显示，退出期间不会通知，重启会补发。普通聊天直接回答。
+尽量在同一轮提出互不依赖的工具调用；有依赖的调用等待工具结果后再发起。避免重复写入。
+"""
+
+# 这是给模型看的工具说明；下方 LIP Flow 负责参数检查和显式分派。
+TOOLS: list = [
+    {type: "function", function: {
+        name: "calculate",
+        description: "仅用于普通数字四则计算，返回数值结果 value 和记录 id，自动保存。小数不是时刻；时间偏移使用 shift_time。a、b 必须是 JSON 数字。",
+        parameters: {
+            type: "object",
+            properties: {
+                operation: {type: "string", enum: ["add", "subtract", "multiply", "divide"]},
+                a: {type: "number", description: "左操作数"},
+                b: {type: "number", description: "右操作数"},
+                label: {type: "string", description: "可选用途或备注，最多 500 字"}
+            },
+            required: ["operation", "a", "b"], additionalProperties: false
+        }
+    }},
+    {type: "function", function: {
+        name: "get_current_time",
+        description: "读取当前本地时间。display 可直接回答用户，value 是带时区偏移的 ISO 8601；无需再次转换时区。本轮系统消息已有当前时间时不必重复读取。",
+        parameters: {type: "object", properties: {}, additionalProperties: false}
+    }},
+    {type: "function", function: {
+        name: "shift_time",
+        description: "计算从现在起指定小时、分钟、秒后的本地日期和时刻，可跨日；负数表示之前。直接引用 display。例：31小时52分钟传 hours=31, minutes=52；无需先读取时间或做四则计算。",
+        parameters: {type: "object", properties: {
+            hours: {type: "number", description: "可选，小时数，默认 0"},
+            minutes: {type: "number", description: "可选，分钟数，默认 0"},
+            seconds: {type: "number", description: "可选，秒数，默认 0"}
+        }, additionalProperties: false}
+    }},
+    {type: "function", function: {
+        name: "list_calculations",
+        description: "从本地数据库查询历史计算，跨会话有效，按最新在前返回操作数、结果、备注、时间和 id。",
+        parameters: {type: "object", properties: {
+            query: {type: "string", description: "可选，按 label 包含的文字筛选"},
+            limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
+        }, additionalProperties: false}
+    }},
+    {type: "function", function: {
+        name: "set_reminder",
+        description: "保存一次性提醒，到点在终端主动提示。after_seconds 与 at 必须且只能提供一个。程序需保持运行，重启补发到期提醒。",
+        parameters: {type: "object", properties: {
+            message: {type: "string", description: "提醒内容，1–500 字"},
+            after_seconds: {type: "number", description: "从现在起多少秒后提醒，大于 0，最多 366 天"},
+            at: {type: "string", description: "带时区的未来 RFC 3339 时间，例如 2026-10-16T18:30:00+08:00"}
+        }, required: ["message"], additionalProperties: false}
+    }},
+    {type: "function", function: {
+        name: "list_reminders",
+        description: "查询已保存的提醒，返回 id、内容、到期时间、状态；默认仅列待触发的提醒。",
+        parameters: {type: "object", properties: {
+            status: {type: "string", enum: ["pending", "delivered", "cancelled", "all"]},
+            limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
+        }, additionalProperties: false}
+    }},
+    {type: "function", function: {
+        name: "cancel_reminder",
+        description: "按查询工具返回的 id 取消一条尚未触发的提醒。",
+        parameters: {type: "object", properties: {
+            id: {type: "string", description: "提醒 id，例如 1，以字符串传入"}
+        }, required: ["id"], additionalProperties: false}
+    }}
+]
+
+# 只按完整用户轮次裁剪，保留 assistant 工具调用与对应的全部观察。
+fn TrimHistory(messages: list) -> list {
+    starts = [i for i in range(len(messages)) if messages[i].role == "user"]
+    if len(starts) == 0 { messages } else {
+        eligible = if len(starts) > MAX_HISTORY_TURNS { starts[-MAX_HISTORY_TURNS:] } else { starts }
+        # 总字符预算也按完整轮次裁剪；至少保留最新用户轮次及其工具观察。
+        kept = for start in eligible with selected = starts[-1] {
+            size = fold(messages[start:], 0, fn(total: number, message: object) -> number {
+                total + len(Get(message, "content", "")) + len(Get(message, "thinking", "")) + len(str(Get(message, "tool_calls", [])))
+            })
+            if size <= MAX_HISTORY_CHARS { break start } else { next selected }
+        }
+        concat([messages[0]], messages[kept:])
+    }
+}
+
+fn Get(args: object, key: string, fallback: any) -> any {
+    if has(args, key) { args[key] } else { fallback }
+}
+
+fn Includes(values: list, value: any) -> bool {
+    len([item for item in values if item == value]) > 0
+}
+
+fn ValidFields(args: object, required: list, optional: list) -> bool {
+    allowed = concat(required, optional)
+    (len([key for key in required if !has(args, key)]) == 0 &&
+        len([key for key in keys(args) if !Includes(allowed, key)]) == 0)
+}
+
+fn IsNumber(value: any) -> bool { match value { number => true, _ => false } }
+fn ValidLimit(value: any) -> bool {
+    match value { number => value >= 1 && value <= 100 && value % 1 == 0, _ => false }
+}
+
+# 先校验日历和时区，避免无效模型参数触发标准库解析异常。
+fn IsDigits(value: string) -> bool {
+    len(value) > 0 && len([i for i in range(len(value)) if value[i] < "0" || value[i] > "9"]) == 0
+}
+
+fn Digits(value: string) -> number {
+    fold(range(len(value)), 0, fn(total: number, i: number) -> number {
+        total * 10 + parse_number(value[i])
+    })
+}
+
+fn ValidDateTime(value: any) -> bool {
+    match value {
+        string if len(value) >= 20 && len(value) <= 35 => {
+            utc = value[-1] == "Z"
+            zone = if utc { len(value) - 1 } else { len(value) - 6 }
+            offset_ok = utc || (len(value) >= 25 && Includes(["+", "-"], value[zone]) &&
+                value[zone+3] == ":" && IsDigits(value[zone+1:zone+3]) && IsDigits(value[zone+4:]) &&
+                Digits(value[zone+1:zone+3]) <= 23 && Digits(value[zone+4:]) <= 59)
+            shape_ok = (value[4] == "-" && value[7] == "-" && value[10] == "T" &&
+                value[13] == ":" && value[16] == ":" && IsDigits(value[:4]) &&
+                IsDigits(value[5:7]) && IsDigits(value[8:10]) && IsDigits(value[11:13]) &&
+                IsDigits(value[14:16]) && IsDigits(value[17:19]))
+            fraction_ok = zone == 19 || (zone > 20 && value[19] == "." && IsDigits(value[20:zone]))
+            if !offset_ok || !shape_ok || !fraction_ok { false } else {
+                year = Digits(value[:4])
+                month = Digits(value[5:7])
+                day = Digits(value[8:10])
+                leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+                days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                (month >= 1 && month <= 12 && day >= 1 && day <= days[month-1] &&
+                    Digits(value[11:13]) <= 23 && Digits(value[14:16]) <= 59 && Digits(value[17:19]) <= 59)
+            }
+        },
+        _ => false
+    }
+}
+
+flow ValidText(value: any, allow_empty: bool) -> bool {
+    result = match value {
+        string if len(value) <= 500 => {
+            trimmed = strings.TrimSpace(value)
+            control = re.search("[\\x00-\\x1f\\x7f-\\x9f]", value)
+            clean = control == null
+            if control != null { native_release(control) }
+            clean && (allow_empty || trimmed != "")
+        },
+        _ => false
+    }
+    return result
+}
+
+flow Timestamp(stamp: number) -> string {
+    value = dates.datetime.fromtimestamp(stamp, dates.timezone.utc)
+    configured = os.Getenv("LIP_CHAT_TZ")
+    local = if configured == "" { value.astimezone() } else {
+        zone = zoneinfo.ZoneInfo(configured)
+        converted = value.astimezone(zone)
+        native_release(zone)
+        converted
+    }
+    text = perform effect local.isoformat()
+    native_release(local)
+    native_release(value)
+    return text
+}
+
+flow LocalTime(stamp: number) -> object {
+    text = Timestamp(stamp)
+    value = dates.datetime.fromisoformat(text)
+    display = value.strftime("%Y-%m-%d %H:%M:%S (UTC%z)")
+    configured = os.Getenv("LIP_CHAT_TZ")
+    system_zone = os.Getenv("TZ")
+    zone = if configured != "" { configured } else if system_zone != "" { system_zone } else { "系统本地时区" }
+    native_release(value)
+    return {ok: true, value: text, display: display, timezone: zone, unix_seconds: stamp}
+}
+
+flow ShiftTime(args: object) -> object {
+    hours = Get(args, "hours", 0)
+    minutes = Get(args, "minutes", 0)
+    secs = Get(args, "seconds", 0)
+    result = if (!ValidFields(args, [], ["hours", "minutes", "seconds"]) || len(args) == 0 ||
+        !IsNumber(hours) || !IsNumber(minutes) || !IsNumber(secs)) {
+        {ok: false, error: "至少提供 hours、minutes、seconds 之一，参数必须是数字"}
+    } else if hours < -8784 || hours > 8784 || minutes < -527040 || minutes > 527040 || secs < -31622400 || secs > 31622400 {
+        {ok: false, error: "时间偏移最多前后 366 天"}
+    } else {
+        delta = hours * 3600 + minutes * 60 + secs
+        if delta < -31622400 || delta > 31622400 { {ok: false, error: "时间偏移最多前后 366 天"} } else {
+            now = seconds.time()
+            base = LocalTime(now)
+            shifted = LocalTime(now + delta)
+            {ok: true, value: shifted.value, display: shifted.display, timezone: shifted.timezone,
+                base: base.value, offset_seconds: delta}
+        }
+    }
+    return result
+}
+
+# SQL 参数始终单独传入；关闭游标，不在聊天历史中保存数据库资源。
+flow Query(db: object, sql: string, args: list) -> list {
+    cursor = perform effect db.execute(sql, args)
+    rows = perform effect cursor.fetchall()
+    perform effect cursor.close()
+    native_release(cursor)
+    return rows
+}
+
+flow Write(db: object, sql: string, args: list) -> number {
+    cursor = perform effect db.execute(sql, args)
+    changed = cursor.rowcount
+    perform effect cursor.close()
+    native_release(cursor)
+    return changed
+}
+
+# Timer 只执行固定 SQL。状态更新与打印由同一个 SQLite 事务完成；
+# 取消先更新 pending 状态，因此取消成功后不会再打印该提醒。
+flow StartTimer(runtime: object, id: string, due: number) -> void {
+    now = seconds.time()
+    delay = if due > now { due - now } else { 0 }
+    update = py.getattr(runtime.db, "execute")
+    timer = threading.Timer(delay, update, args=[
+        "UPDATE reminders SET status='delivered' WHERE id=? AND status='pending'", [id]
+    ])
+    py.setattr(timer, "daemon", true)
+    perform effect runtime.timers.append({id: id, timer: timer})
+    perform effect timer.start()
+    native_release(timer)
+    native_release(update)
+}
+
+# 回收已完成定时器，也用于取消指定提醒和正常退出。
+flow ReapTimers(runtime: object, cancel_id: string) -> void {
+    count = py.len(runtime.timers)
+    for _ in range(count) {
+        item = perform effect runtime.timers.popleft()
+        cancel = cancel_id == "*" || cancel_id == item.id
+        if cancel { perform effect item.timer.cancel() }
+        alive = perform effect item.timer.is_alive()
+        if cancel || !alive {
+            perform effect item.timer.join()
+        } else {
+            perform effect runtime.timers.append(item)
+        }
+        native_release(item.timer)
+    }
+}
+
+flow OpenStore() -> object {
+    configured = os.Getenv("LIP_CHAT_DB")
+    location = if configured == "" { ".ollama_chat/state.sqlite3" } else { configured }
+    path = pathlib.Path(location)
+    parent = path.parent
+    perform effect parent.mkdir(parents=true, exist_ok=true)
+    native_release(parent)
+    native_release(path)
+    db = sqlite3.connect(location, check_same_thread=false, isolation_level=null)
+    notify = functools.partial(py.print, flush=true)
+    perform effect db.create_function("lip_notify", 1, notify)
+    native_release(notify)
+    schema = perform effect db.executescript("""
+CREATE TABLE IF NOT EXISTS calculations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation TEXT NOT NULL, a REAL NOT NULL, b REAL NOT NULL,
+    value REAL NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL, due_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
+);
+CREATE TEMP TRIGGER notify_reminder AFTER UPDATE OF status ON reminders
+WHEN OLD.status='pending' AND NEW.status='delivered'
+BEGIN
+    SELECT lip_notify(char(10) || '提醒 #' || NEW.id || '> ' || NEW.message || char(10));
+END;
+""")
+    perform effect schema.close()
+    native_release(schema)
+    timers = collections.deque()
+    runtime = {db: db, timers: timers, path: location}
+    # 重启时补发到期提醒；未来提醒恢复为标准库 Timer。
+    now = seconds.time()
+    Write(db, "UPDATE reminders SET status='delivered' WHERE status='pending' AND due_at<=?", [now])
+    pending = Query(db, "SELECT CAST(id AS TEXT), due_at FROM reminders WHERE status='pending'", [])
+    for row in pending {
+        id = row[0]
+        due = row[1]
+        StartTimer(runtime, id, due)
+    }
+    return runtime
+}
+
+# 先检查算术范围，让模型的除零/溢出请求成为可修正的工具结果。
+fn Arithmetic(operation: string, a: number, b: number) -> object {
+    limit = 1.7976931348623157e308
+    aa = if a < 0 { -a } else { a }
+    bb = if b < 0 { -b } else { b }
+    right = if operation == "subtract" { -b } else { b }
+    result = match operation {
+        "add", "subtract" => {
+            if (right > 0 && a > limit - right) || (right < 0 && a < -limit - right) {
+                {ok: false, error: "计算结果超出有限数值范围"}
+            } else { {ok: true, value: a + right} }
+        },
+        "multiply" => {
+            if bb > 1 && aa > limit / bb {
+                {ok: false, error: "计算结果超出有限数值范围"}
+            } else { {ok: true, value: a * b} }
+        },
+        "divide" => {
+            if b == 0 { {ok: false, error: "除数不能为零"} } else if bb < 1 && aa > limit * bb {
+                {ok: false, error: "计算结果超出有限数值范围"}
+            } else { {ok: true, value: a / b} }
+        },
+        _ => {ok: false, error: "operation 必须为 add/subtract/multiply/divide"}
+    }
+    result
+}
+
+flow Calculate(runtime: object, args: object) -> object {
+    label = Get(args, "label", "")
+    valid_label = ValidText(label, true)
+    result = if !ValidFields(args, ["operation", "a", "b"], ["label"]) || !valid_label {
+        {ok: false, error: "计算需要 operation、a、b；可选 label 最多 500 字"}
+    } else if !IsNumber(args.a) || !IsNumber(args.b) {
+        {ok: false, error: "a 和 b 必须是数字"}
+    } else {
+        match args.operation {
+            string => {
+                calculated = Arithmetic(args.operation, args.a, args.b)
+                if !calculated.ok { calculated } else {
+                    stamp = seconds.time()
+                    created = Timestamp(stamp)
+                    Write(runtime.db, "INSERT INTO calculations(operation,a,b,value,label,created_at) VALUES(?,?,?,?,?,?)",
+                        [args.operation, args.a, args.b, calculated.value, label, created])
+                    rows = Query(runtime.db, "SELECT CAST(last_insert_rowid() AS TEXT)", [])
+                    {ok: true, saved: true, id: rows[0][0], value: calculated.value}
+                }
+            },
+            _ => {ok: false, error: "operation 必须是字符串"}
+        }
+    }
+    return result
+}
+
+flow ListCalculations(runtime: object, args: object) -> object {
+    query = Get(args, "query", "")
+    limit = Get(args, "limit", 10)
+    valid_query = ValidText(query, true)
+    result = if !ValidFields(args, [], ["query", "limit"]) || !valid_query || !ValidLimit(limit) {
+        {ok: false, error: "query 为文本，limit 为 1–100 的整数"}
+    } else {
+        rows = Query(runtime.db,
+            "SELECT CAST(id AS TEXT),operation,a,b,value,label,created_at FROM calculations WHERE instr(label,?)>0 ORDER BY id DESC LIMIT ?",
+            [query, limit])
+        {ok: true, calculations: [{id: row[0], operation: row[1], a: row[2], b: row[3],
+            value: row[4], label: row[5], created_at: row[6]} for row in rows]}
+    }
+    return result
+}
+
+flow SetReminder(runtime: object, args: object) -> object {
+    message = Get(args, "message", "")
+    valid_message = ValidText(message, false)
+    now = seconds.time()
+    deadline = if !ValidFields(args, ["message"], ["after_seconds", "at"]) || !valid_message {
+        {ok: false, error: "message 必须为 1–500 字的非空文本"}
+    } else if has(args, "after_seconds") == has(args, "at") {
+        {ok: false, error: "after_seconds 与 at 必须且只能提供一个"}
+    } else if has(args, "after_seconds") {
+        delay = args.after_seconds
+        if !IsNumber(delay) { {ok: false, error: "after_seconds 必须是数字"} } else if delay <= 0 || delay > 31622400 {
+            {ok: false, error: "提醒时间必须在未来 366 天内"}
+        } else { {ok: true, due: now + delay} }
+    } else if !ValidDateTime(args.at) {
+        {ok: false, error: "at 必须为有效且带时区的 RFC 3339 时间"}
+    } else {
+        value = clock.Parse(clock.RFC3339, args.at)
+        millis = perform effect value.UnixMilli()
+        native_release(value)
+        due = millis / 1000
+        if due <= now || due - now > 31622400 {
+            {ok: false, error: "提醒时间必须在未来 366 天内"}
+        } else { {ok: true, due: due} }
+    }
+    result = if !deadline.ok { deadline } else {
+        created = Timestamp(now)
+        due_text = Timestamp(deadline.due)
+        Write(runtime.db, "INSERT INTO reminders(message,due_at,status,created_at) VALUES(?,?,'pending',?)",
+            [message, deadline.due, created])
+        rows = Query(runtime.db, "SELECT CAST(last_insert_rowid() AS TEXT)", [])
+        id = rows[0][0]
+        StartTimer(runtime, id, deadline.due)
+        {ok: true, id: id, message: message, due_at: due_text, status: "pending"}
+    }
+    return result
+}
+
+flow ListReminders(runtime: object, args: object) -> object {
+    status = Get(args, "status", "pending")
+    limit = Get(args, "limit", 10)
+    result = if (!ValidFields(args, [], ["status", "limit"]) ||
+        !Includes(["pending", "delivered", "cancelled", "all"], status) || !ValidLimit(limit)) {
+        {ok: false, error: "status 必须为 pending/delivered/cancelled/all，limit 为 1–100 的整数"}
+    } else {
+        rows = Query(runtime.db,
+            "SELECT CAST(id AS TEXT),message,due_at,status,created_at FROM reminders WHERE (?='all' OR status=?) ORDER BY due_at,id LIMIT ?",
+            [status, status, limit])
+        reminders = for row in rows with items = [] {
+            due_text = Timestamp(row[2])
+            next concat(items, [{id: row[0], message: row[1], due_at: due_text, status: row[3], created_at: row[4]}])
+        }
+        {ok: true, reminders: reminders}
+    }
+    return result
+}
+
+flow CancelReminder(runtime: object, args: object) -> object {
+    id = Get(args, "id", null)
+    valid_id = match id {
+        string => len(id) <= 19 && IsDigits(id) && id[0] != "0",
+        _ => false
+    }
+    result = if !ValidFields(args, ["id"], []) || !valid_id {
+        {ok: false, error: "id 必须是查询返回的提醒编号字符串"}
+    } else {
+        changed = Write(runtime.db, "UPDATE reminders SET status='cancelled' WHERE CAST(id AS TEXT)=? AND status='pending'", [id])
+        if changed == 0 { {ok: false, error: "找不到尚未触发的提醒"} } else {
+            ReapTimers(runtime, id)
+            {ok: true, id: id, status: "cancelled"}
+        }
+    }
+    return result
+}
+
+# 模型只能选择这些工具；业务逻辑均在本文件，不执行模型提供的代码。
+flow DispatchTool(runtime: object, name: string, args: any) -> object {
+    ReapTimers(runtime, "")
+    result = match args {
+        object => match name {
+            "calculate" => Calculate(runtime, args),
+            "get_current_time" => {
+                if len(args) != 0 { {ok: false, error: "get_current_time 不接受参数"} } else {
+                    now = seconds.time()
+                    LocalTime(now)
+                }
+            },
+            "shift_time" => ShiftTime(args),
+            "list_calculations" => ListCalculations(runtime, args),
+            "set_reminder" => SetReminder(runtime, args),
+            "list_reminders" => ListReminders(runtime, args),
+            "cancel_reminder" => CancelReminder(runtime, args),
+            _ => {ok: false, error: "未知工具，请使用已声明的工具"}
+        },
+        _ => {ok: false, error: "工具参数必须是对象"}
+    }
+    return result
+}
+
+# 小模型偶尔把 JSON 数字包成字符串，只兼容有界十进制文本；不执行表达式。
+# 其余类型/未知字段继续由严格的工具检查拒绝。
+flow NormalizeArgs(name: string, args: any) -> any {
+    fields = match name {
+        "calculate" => ["a", "b"],
+        "shift_time" => ["hours", "minutes", "seconds"],
+        "set_reminder" => ["after_seconds"],
+        "list_calculations", "list_reminders" => ["limit"],
+        _ => []
+    }
+    result = match args {
+        object => for field in fields with normalized = args {
+            value = Get(normalized, field, null)
+            converted = match value {
+                string if len(value) <= 62 => {
+                    found = re.fullmatch("-?(?:0|[1-9][0-9]{0,39})(?:\\.[0-9]{1,20})?", value)
+                    if found == null { value } else {
+                        native_release(found)
+                        parse_number(value)
+                    }
+                },
+                _ => value
+            }
+            next if has(normalized, field) { put(normalized, field, converted) } else { normalized }
+        },
+        _ => args
+    }
+    return result
+}
+
+flow RunTool(runtime: object, call: object, tools: list) -> object {
+    name = call.function.name
+    args = NormalizeArgs(name, call.function.arguments)
+    allowed = [tool.function.name for tool in tools]
+    result = if Includes(allowed, name) { DispatchTool(runtime, name, args) } else {
+        {ok: false, error: "当前消息未提供此工具；请直接回答用户最新的问题"}
+    }
+    result_json = json.dumps(result, ensure_ascii=false)
+    debug = os.Getenv("LIP_CHAT_DEBUG")
+    if debug == "1" {
+        arguments_json = json.dumps(args, ensure_ascii=false)
+        fmt.Println("工具> " + name + " " + arguments_json + " => " + result_json)
+    } else {
+        summary = if !result.ok { result.error } else if has(result, "display") { result.display
+        } else if has(result, "value") { str(result.value)
+        } else if has(result, "id") { "#" + result.id + " " + Get(result, "status", "已保存")
+        } else if has(result, "calculations") { str(len(result.calculations)) + " 条计算记录"
+        } else if has(result, "reminders") { str(len(result.reminders)) + " 条提醒" } else { "完成" }
+        fmt.Println("工具> " + name + " → " + summary)
+    }
+    return {role: "tool", tool_name: name, content: result_json}
+}
+
+# 固定的 Python UI 胶水只负责终端读写和 EOF/Ctrl-C 转 Data，不执行用户或模型代码。
+# Python worker 的 stdin 是协议；create_input 改从同一终端的 stdout FD 读取。
+# 非终端输入继续使用 Go Scanner，不抢读 /dev/tty，也不启动后台输入线程。
+flow OpenInput() -> object {
+    stdin_info = os.Stdin.Stat()
+    stdout_info = os.Stdout.Stat()
+    same = os.SameFile(stdin_info, stdout_info)
+    native_release(stdin_info)
+    native_release(stdout_info)
+    tty = sys.stdout.isatty()
+    terminal = same && tty
+    available = if terminal { imports.find_spec("prompt_toolkit") } else { null }
+    input = if available == null {
+        if terminal { fmt.Println("安装 prompt_toolkit 可启用中文编辑和历史搜索：python3 -m pip install 'prompt_toolkit>=3.0'") }
+        scanner = bufio.NewScanner(os.Stdin)
+        perform effect scanner.Buffer("", 1048576)
+        {terminal: false, reader: scanner}
+    } else {
+        native_release(available)
+        # 定义在独立模块命名空间中；不修改 bridge 或 builtins 的全局状态。
+        py.exec("""
+import sys, types
+from prompt_toolkit import PromptSession
+from prompt_toolkit.input import create_input
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.patch_stdout import patch_stdout
+
+class Terminal:
+    def __init__(self):
+        self.input = create_input(always_prefer_tty=True)
+        self.session = PromptSession(
+            input=self.input, enable_history_search=True,
+            completer=WordCompleter(['/help', '/exit', '/new', '/time', '/after', '/calculations', '/reminders']),
+            complete_while_typing=False,
+        )
+
+    def read(self):
+        try:
+            # Timer 通知安全重绘输入，保留用户已编辑的文字和光标。
+            with patch_stdout(raw=True):
+                text = self.session.prompt('\\n你> ')
+            return {'kind': 'message', 'text': text}
+        except KeyboardInterrupt:
+            return {'kind': 'empty', 'text': ''}
+        except EOFError:
+            return {'kind': 'exit', 'text': ''}
+
+    def close(self):
+        self.input.close()
+
+module = types.ModuleType(__name__)
+module.Terminal = Terminal
+sys.modules[__name__] = module
+""", {__name__: "lip_chat_ui"})
+        reader = ui.Terminal()
+        {terminal: true, reader: reader}
+    }
+    return input
+}
 
 # 把终端输入归一为 message / empty / exit，让主循环只处理会话决策。
 flow ReadPrompt(input: object) -> object {
-    fmt.Print("\n你> ")
-    ready = perform effect input.Scan()
-    result = if ready {
-        raw = perform effect input.Text()
-        text = strings.TrimSpace(raw)
-        kind = if text == "/exit" { "exit" } else if text == "" { "empty" } else { "message" }
-        {kind: kind, text: text}
+    result = if input.terminal {
+        perform effect input.reader.read()
     } else {
-        read_error = perform effect input.Err()
-        if read_error != null {
-            detail = str(read_error)
-            fail("读取输入失败：" + detail)
-        } else { {kind: "exit", text: ""} }
+        fmt.Print("\n你> ")
+        ready = perform effect input.reader.Scan()
+        if ready {
+            raw = perform effect input.reader.Text()
+            {kind: "message", text: raw}
+        } else {
+            read_error = perform effect input.reader.Err()
+            if read_error != null {
+                detail = str(read_error)
+                fail("读取输入失败：" + detail)
+            } else { {kind: "exit", text: ""} }
+        }
+    }
+    text = strings.TrimSpace(result.text)
+    kind = if result.kind == "exit" || text == "/exit" { "exit" } else if text == "" { "empty" } else { "message" }
+    return {kind: kind, text: text}
+}
+
+# 明确的闲聊/使用反馈不提供工具；其余消息仍由模型选择工具，保留指代能力。
+flow ToolsFor(text: string) -> list {
+    task = re.search("提醒|计算|记录|几点|时间|小时|分钟|秒|[0-9]", text)
+    chat = re.search("你是什么|你是.*助手|你.*agent|编辑体验|响应速度|删除不掉|退格|输入体验|^你好[！!。 ]*$|^谢谢", text)
+    tools = if task == null && chat != null { [] } else { TOOLS }
+    if task != null { native_release(task) }
+    if chat != null { native_release(chat) }
+    return tools
+}
+
+flow AfterCommand(text: string) -> object {
+    found = re.fullmatch("/after\\s+(?:(-?[0-9]{1,5}(?:\\.[0-9]{1,6})?)h)?(?:(-?[0-9]{1,7}(?:\\.[0-9]{1,6})?)m)?(?:(-?[0-9]{1,8}(?:\\.[0-9]{1,6})?)s)?", text)
+    result = if found == null {
+        {ok: false, error: "用法：/after 31h52m（h 小时，m 分钟，s 秒；最多前后 366 天）"}
+    } else {
+        groups = perform effect found.groups()
+        native_release(found)
+        values = [if value == null { 0 } else { parse_number(value) } for value in groups]
+        ShiftTime({hours: values[0], minutes: values[1], seconds: values[2]})
     }
     return result
 }
 
-# Ollama 每行发送一个 JSON 对象；将协议细节归一为文本片段和完成标记。
-flow ReadChunk(response: object) -> object {
-    raw = perform effect response.readline()
-    line = py.str(raw, "utf-8")
-    chunk = if line == "" {
-        perform effect response.close()
-        fail("Ollama 响应提前结束：尚未收到 done=true")
-    } else { json.loads(line) }
-    result = if has(chunk, "error") {
-        perform effect response.close()
-        detail = str(chunk.error)
-        fail("Ollama：" + detail)
-    } else {
-        content = if has(chunk, "message") { chunk.message.content } else { "" }
-        {content: content, done: has(chunk, "done") && chunk.done}
+# 发起一轮模型请求。正文流式显示；thinking 与工具调用也完整保留到历史。
+# SDK 负责协议解析和响应校验；连接、HTTP、超时等异常沿 bridge 报错。
+flow StreamReply(client: object, messages: list, tools: list, terminal: bool) -> object {
+    if terminal { fmt.Print("助手> 等待模型…") }
+    setting = os.Getenv("LIP_CHAT_MODEL")
+    model = if setting == "" { MODEL } else { setting }
+    stream = perform effect client.chat(model=model, messages=messages, tools=tools, stream=true,
+        keep_alive="30m", options={temperature: 0.2, num_predict: 1024})
+    # next 是 LIP 关键字，通过 getattr 取得 Python 的迭代函数。
+    read_next = py.getattr(py, "next")
+    answer = for with s = {content: "", thinking: "", tool_calls: [], started: false} {
+        raw = read_next(stream, null)
+        chunk = if raw == null {
+            perform effect stream.close()
+            fail("Ollama 响应提前结束：尚未收到 done=true")
+        } else {
+            snapshot = perform effect raw.model_dump(mode="json")
+            # 转成 Data 后即释放分块对象，长时间流式聊天不积累原生引用。
+            native_release(raw)
+            snapshot
+        }
+        # SDK 对象转为普通 Data，历史中不保留 Python 对象引用。
+        message = chunk.message
+        content = if message.content != null { message.content } else { "" }
+        thinking = if message.thinking != null { message.thinking } else { "" }
+        calls = if message.tool_calls != null { message.tool_calls } else { [] }
+        if content != "" {
+            if !s.started {
+                if terminal { fmt.Print("\r\u{1b}[2K") }
+                fmt.Print("助手> ")
+            }
+            fmt.Print(content)
+        }
+        updated = {
+            content: s.content + content,
+            thinking: s.thinking + thinking,
+            tool_calls: concat(s.tool_calls, calls),
+            started: s.started || content != ""
+        }
+        if chunk.done == true { break updated } else { next updated }
     }
-    return result
+    perform effect stream.close()
+    native_release(stream)
+    native_release(read_next)
+    if answer.started { fmt.Println() } else if terminal { fmt.Print("\r\u{1b}[2K") }
+    return {role: "assistant", content: answer.content, thinking: answer.thinking, tool_calls: answer.tool_calls}
 }
 
-# 发起一轮请求，边接收边显示，完成后返回拼接好的助手消息。
-# 连接失败、HTTP 错误和超时由 bridge 报错，不自动重试。
-flow StreamReply(messages: list) -> string {
-    payload = json.dumps({model: MODEL, messages: messages, stream: true})
-    request = http.Request(
-        CHAT_URL,
-        data=py.bytes(payload, "utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
-    response = http.urlopen(request, timeout=TIMEOUT_SECONDS)
-    fmt.Print("助手> ")
-    answer = for with text = "" {
-        chunk = ReadChunk(response)
-        fmt.Print(chunk.content)
-        updated = text + chunk.content
-        if chunk.done { break updated } else { next updated }
+# agent 的核心：模型决策 → 执行本轮全部工具 → 反馈结果 → 再次决策。
+# 一轮可以提出多个调用；原型按返回顺序执行。没有工具调用就完成当前输入。
+flow RunAgent(client: object, runtime: object, messages: list, tools: list, terminal: bool) -> list {
+    result = for step in range(MAX_STEPS) with s = {messages: messages, done: false} {
+        reply = StreamReply(client, s.messages, tools, terminal)
+        pending = concat(s.messages, [reply])
+        if len(reply.tool_calls) == 0 {
+            break {messages: pending, done: true}
+        } else {
+            updated = for call in reply.tool_calls with history = pending {
+                observation = RunTool(runtime, call, tools)
+                next concat(history, [observation])
+            }
+            next {messages: updated, done: false}
+        }
     }
-    response.close()
-    fmt.Println()
-    return answer
+    if !result.done {
+        fmt.Println("已达到本次输入的 " + str(MAX_STEPS) + " 轮模型请求上限，任务尚未完成；工具结果已保留，可以继续输入。")
+    }
+    return result.messages
 }
 
-# 主 Flow 只负责退出、忽略空行和推进对话历史。
+# 外层只处理用户会话；一条输入可以触发 agent 内的多次模型/工具往返。
 flow Main() -> void {
-    # 阻塞读取终端时，让 Ctrl-C 使用系统默认的终止行为。
+    # 普通行输入/模型执行期间使用系统 Ctrl-C；编辑期间由 prompt_toolkit 处理按键。
     signal.Reset()
-    # Python worker 的 stdin 用于 bridge 协议，终端输入交给 Go 读取。
-    input = bufio.NewScanner(os.Stdin)
-    fmt.Println("Ollama · " + MODEL + "（/exit 退出）")
-    history = for with messages = [] {
+    input = OpenInput()
+    model_setting = os.Getenv("LIP_CHAT_MODEL")
+    model = if model_setting == "" { MODEL } else { model_setting }
+    client = ollama.Client(host=HOST, timeout=TIMEOUT_SECONDS)
+    runtime = OpenStore()
+    fmt.Println("Ollama agent · " + model + "（/help 帮助，/exit 退出）")
+    database_path = runtime.path
+    fmt.Println("计算和提醒保存至：" + database_path + "；提醒需要保持程序运行。")
+    now = seconds.time()
+    local = LocalTime(now)
+    fmt.Println("本地时间：" + local.display + " · " + local.timezone)
+    if input.terminal { fmt.Println("方向键编辑/历史；Ctrl-A/E 行首/尾；Ctrl-U 删至行首；Ctrl-R 搜索；Ctrl-C 取消输入；Ctrl-D 退出。") }
+    history = for with messages = [{role: "system", content: SYSTEM_PROMPT}] {
         prompt = ReadPrompt(input)
         match prompt.kind {
             "exit" => { break messages }
             "empty" => { next messages }
             _ => {
-                pending = concat(messages, [{role: "user", content: prompt.text}])
-                answer = StreamReply(pending)
-                next concat(pending, [{role: "assistant", content: answer}])
+                match prompt.text {
+                    "/help" => {
+                        fmt.Println("/time 本地时间；/after 31h52m 时间偏移；/new 清空聊天；/calculations 最近计算；/reminders 待办提醒；/exit 退出。可直接说：10 秒后提醒我喝水；计算 123*456 并标记为采购预算。")
+                        next messages
+                    },
+                    "/new" => {
+                        fmt.Println("已清空聊天上下文。")
+                        next [{role: "system", content: SYSTEM_PROMPT}]
+                    },
+                    "/time" => {
+                        current = DispatchTool(runtime, "get_current_time", {})
+                        fmt.Println("助手> " + current.display + " · " + current.timezone)
+                        next messages
+                    },
+                    "/calculations" => {
+                        records = DispatchTool(runtime, "list_calculations", {})
+                        text = json.dumps(records, ensure_ascii=false)
+                        fmt.Println(text)
+                        next messages
+                    },
+                    "/reminders" => {
+                        records = DispatchTool(runtime, "list_reminders", {})
+                        text = json.dumps(records, ensure_ascii=false)
+                        fmt.Println(text)
+                        next messages
+                    },
+                    _ => {
+                        after = strings.HasPrefix(prompt.text, "/after")
+                        if after {
+                            shifted = AfterCommand(prompt.text)
+                            text = if shifted.ok { shifted.display } else { shifted.error }
+                            fmt.Println("助手> " + text)
+                            next messages
+                        } else {
+                            current_time = DispatchTool(runtime, "get_current_time", {})
+                            time_json = json.dumps(current_time, ensure_ascii=false)
+                            context = {role: "system", content: SYSTEM_PROMPT + "\n本轮当前时间：" + time_json}
+                            recent = TrimHistory(concat(messages, [{role: "user", content: prompt.text}]))
+                            pending = concat([context], recent[1:])
+                            tools = ToolsFor(prompt.text)
+                            updated = RunAgent(client, runtime, pending, tools, input.terminal)
+                            next updated
+                        }
+                    }
+                }
             }
         }
     }
+    ReapTimers(runtime, "*")
+    perform effect runtime.db.close()
+    perform effect client.close()
+    if input.terminal { perform effect input.reader.close() }
+    native_release(input.reader)
     fmt.Println("\n会话结束。")
 }

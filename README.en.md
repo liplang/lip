@@ -14,6 +14,23 @@ The focus is a solid computational core. Math, files, networking, databases, and
 
 Practical checks cover a CRUD website, SQLite queries, pandas ETL, scikit-learn regression/classification, NumPy linear algebra, and SciPy integration/optimization. The [linear model example](examples/advanced/27_linear_model.lip) demonstrates training, prediction, and error measurement with the pure core. Websites use explicit Host contracts for storage and templates; scientific libraries use the Go/Python bridge in scripts and the REPL. See the implementation guide for tested paths and current limits.
 
+## Suitable workflows and composition boundaries
+
+LIP fits **tool workflows with an explicit completion condition that combine results from several sources and explain the basis for a decision**. A typical structure is concurrent reads or checks → complete Claim collection → a pure decision → conditional external actions.
+
+| Scenario | LIP's role | Existing examples or checks |
+|---|---|---|
+| Multiple-source checks and evidence reports | Child Flows collect results, Claims retain contribution provenance, and pure functions identify missing, conflicting, or unsatisfactory evidence | [Evidence collection](examples/evidence.lip), `CoreCompositionConformance` |
+| Evaluation, batch quality checks, and publication decisions | Run checks concurrently, wait for all results, decide whether they pass, and explicitly choose whether to save or publish | `EvidenceDecisionComposition` checks complete evidence, duplicate values, withheld publication, and error boundaries |
+| Staged data processing | Go/Python libraries handle queries and computation; LIP connects dependencies, collects results, and orders writes | [Concurrent reads and ordered writes](examples/ecosystem/19_parallel_read_write.lip), SQLite/pandas application checks |
+| Tool collaboration with bounded rounds | Carry loops express “think—call a tool—observe—decide again”; child Flows reuse the steps | [Recorded iteration](examples/ecosystem/20_recorded_iteration.lip), [refine](examples/refine.lip) |
+
+Composition retains four roles: pure `fn` processes immutable values and complete snapshots; `flow` reuses multiple steps with external actions; Claims collect contributions; the Host supplies external capabilities with explicit contracts. A child Flow returns Data for its parent to append to the parent's Claim; an active Claim is not passed as a shared mutable object. Flow targets are static. Use `for` or comprehensions for repeated Flow calls, and pure callbacks for `map`/`fold`. Claim provenance identifies the work that contributed a fact; business Data must still carry document addresses, checker versions, and evidence content.
+
+Concurrent calls require contracts explicitly declaring Concurrent ReadOnly; generic Go/Python bridge operations remain Unknown. Pure functions can wrap single-step requests: known functions, simple aliases, direct anonymous functions, and imported functions preserve return-operation summaries through multiple calls and recursion. Each `perform` checks all candidate operation contracts for parallel eligibility. Container projections, dynamic calls, and carry results remain Unknown. Business `{ok:false}` values are ordinary data; subsequent actions need explicit `if`/`match` gates.
+
+These workflows operate on complete work within one run. The Host manages long-lived events and starts runs; its contracts supply transactions, cross-request idempotency, and persistent state. Crash recovery is currently unavailable, and complete Claim reads do not return early when a threshold is reached. Large numerical computations stay in native libraries, avoiding a language crossing for each element. See the [implementation guide](IMPLEMENTATION.en.md) for composition evidence and actual limits.
+
 ## One program, the whole model
 
 This is the core of [26_flows.lip](examples/advanced/26_flows.lip):
@@ -115,6 +132,49 @@ Counts, missing evidence, rankings, scores, and final reports are ordinary pure 
 
 `effect` fixes an operation and its arguments into a request value. `perform` handles admission, invocation, and recording. Host contracts declare schemas, versions, permissions, effects, concurrency, and resource requirements. The runtime uses them to overlap eligible reads and preserve ordering around writes.
 
+A minimal program, run with `-host demo`, returns `"HELLO"`:
+
+```lip
+import go "strings" as text
+fn upper_request(name:string)->effect { effect text.ToUpper(name) }
+flow Main()->string {
+    request = upper_request("hello")
+    result = perform request
+    return result
+}
+```
+
+`upper_request` constructs a reusable request value; `perform` calls the library. The operation contract determines the result type: string, number, list, object, or other Data. Results do not require a common wrapper object. [Requests and execution](examples/ecosystem/18_proposals.lip) also demonstrates passing a request through a fn parameter, chaining requests, and receiving both string and number results.
+
+A request does not cache its result: performing the same request at two `perform` sites means two calls. Reusing the bound `result` does not call again. A request is an ordinary value but is not Data; Data recursively excludes fn and effect values.
+
+| Where can a request value go? | Current rule |
+|---|---|
+| Local bindings, list/object, closures, fn parameters and results | Allowed; storing and passing never execute it |
+| Flow parameters and results, including program entry/exit | Data required; effect values are excluded |
+| Host parameters and results, Claim contributions, JSON | Data required; effect values are excluded |
+
+Pure wrappers preserve known operation summaries. [Parallel reads with ordered writes](examples/ecosystem/19_parallel_read_write.lip) demonstrates parallel `perform upper_request(name)` calls. Parallel execution requires an operation explicitly registered as Concurrent ReadOnly; wrapping an Unknown bridge operation cannot upgrade it. Requests passed through an unknown fn parameter or retrieved from a container can still execute sequentially, but these paths cannot establish parallel safety.
+
+Projects can register their own operations. If the application Host registers `ai.generate(prompt:string, policy:object)->object`, a request can carry project options like this:
+
+```lip
+import host "project/ai" as ai
+fn answer_request(prompt:string, policy:object)->effect {
+    effect ai.generate(prompt, policy=policy)
+}
+flow Main()->object {
+    request = answer_request("Explain Claim briefly", {
+        max_output_tokens: 128, max_cost_microusd: 1000, timeout_ms: 2000
+    })
+    return perform request
+}
+```
+
+This is an application integration sketch requiring a registered Host; `-host demo` does not supply this operation. `policy` is an ordinary Data parameter whose field names, units, and behavior belong to the project. This example uses integer micro-US dollars: 1000 microdollars equals USD 0.001. The Host/adapter must enforce token, money, and time limits; accepting fields alone does not enforce them. Calls such as `numpy.sqrt` that need no options stay unchanged.
+
+Contract `Capabilities` declare required permissions, the Host grants them, and `Authorize` checks finer scopes; requests cannot grant themselves access. `Resources` are reusable concurrency permits, not cumulative spending. Estimates, hard limits, and actual usage need separate treatment. The Host can record actual usage in `Response.Receipt` while returning business data through `Response.Value`; include usage in the result schema when LIP code needs it. There is currently no built-in shared token/money ledger, and timeout cancellation does not guarantee reversal of external actions already taken.
+
 Direct Go/Python library calls lower to this protocol too. Interactive convenience, explicit operation contracts, and generated programs share the same external call path. Argument and authorization checks precede actual operations.
 
 ### Dynamic work has stable structural identity
@@ -125,7 +185,7 @@ Under the specification's conditions—fixed inputs and external responses, fair
 
 ### One program, from exploration to a Go executable
 
-The REPL, 19 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
+The REPL, 36 bundled lessons, file execution, and Go generation use one core. The generator compiles expressions into dedicated Go evaluation functions and includes the scheduler and Host runtime. Generated programs execute those functions directly, without parsing LIP source again or reading the source directory.
 
 These LIP 1.0 mechanisms are implemented in an executable compiler and runtime. Tests build and run generated programs, comparing outputs, errors, identities, and call boundaries. Composition tests combine modules, closures, loops, child graphs, and pipelines at worker limits 1, 2, 4, 7, 1238, and 73295. [Implementation and validation](IMPLEMENTATION.en.md) maps specification sections to concrete tests.
 
@@ -248,6 +308,19 @@ flow Predict(model:object,rows:list)->list {
 
 `effect receiver.method(...)` uses the receiver's lexical binding, including saved REPL values and parameters in imported LIP modules. Nested members such as `effect library.linalg.solve(matrix,rhs)` also work. Constructing the request performs no member lookup or native call; `perform` applies the normal authorization and resource checks. Deleting or rebinding the public name preserves the receiver already captured by a saved request.
 
+Pure functions can also construct requests returning native objects. With the default library bridge, this program returns `5`:
+
+```lip
+import go "bytes"
+fn buffer_request(text:string)->effect { effect bytes.NewBufferString(text) }
+flow Main()->number {
+    buffer = perform buffer_request("hello")
+    return buffer.Len()
+}
+```
+
+Statically known request builders preserve native result information so methods can follow `perform`, including through wrapper chains, modules, and pipelines. This information supports library syntax conversion separately from Ops and parallel eligibility; generic operations remain Unknown. When static provenance is insufficient, use explicit `effect receiver.method(...)`.
+
 The [teaching Host](script/adapters.go) demonstrates parallel reads and sequential writes through explicit contracts:
 
 ```sh
@@ -258,6 +331,8 @@ The [teaching Host](script/adapters.go) demonstrates parallel reads and sequenti
 ```
 
 Multi-round tool programs progress through “think → call → observe → decide again.” [recorded_iteration](examples/ecosystem/20_recorded_iteration.lip) passes recorded responses into the next iteration; [evidence](examples/evidence.lip) collects complete evidence; [refine](examples/refine.lip) carries values through iterative improvement. Models and business tools can use the same Host contracts. The Host receives ongoing events and starts independent runs for them.
+
+The [local Ollama chat example](examples/tmp_ollama_chat.lip) keeps streaming chat, dispatch and argument validation for seven tools, SQLite calculation records, and active reminders in one `.lip` file. Model requests use the official Python `ollama` client; storage and timers call standard libraries directly. See the [example instructions](examples/README.en.md#local-ollama-chat-saved-calculations-and-reminders) for setup and commands. The database defaults to `.ollama_chat/state.sqlite3` under the current working directory; set `LIP_CHAT_DB` to choose a path.
 
 ### Third-party libraries and runtime environment
 
@@ -380,13 +455,14 @@ The REPL and learn share an editor:
 
 | Keys | Action |
 |---|---|
-| ← / →, Ctrl-B / F; Home / End, Ctrl-A / E | Move or reach line boundaries |
+| ← / →, Ctrl-B / F; Home / End; Ctrl-A / E | Move; reach current line boundaries; reach whole-input boundaries |
 | Alt-B / F, Ctrl-← / → | Move by word |
 | Backspace / Delete, Ctrl-D | Delete; Ctrl-D exits on empty input |
 | Ctrl-U / K / W, Alt-D; Ctrl-Y | Cut to start/end, previous/next word; paste back |
 | Ctrl-_ (often Ctrl-/); Ctrl-T | Undo; transpose nearby characters |
-| ↑ / ↓, Ctrl-R | History and search; Ctrl-G cancels search, Enter submits |
-| Tab; Ctrl-L; Ctrl-C | Complete; clear screen; discard input and draft |
+| ↑ / ↓; Ctrl-P / N; Ctrl-R | Browse history on one line, move vertically in multiline input; browse history anytime; search, Ctrl-G cancels |
+| Alt-Enter or Ctrl-J; Tab | Insert an indented line; complete names, or indent with no prefix |
+| Ctrl-L; Ctrl-C | Clear screen; discard input and draft |
 
 Open brackets, braces, and triple-quoted strings support multiline input; otherwise use a trailing `\`. The editor supports bracketed paste, Chinese text, and common combining characters. Raw mode applies only during editing and is restored before provider calls; pipes use plain text. Terminal interfaces support Linux, macOS/BSD, and VT-enabled Windows consoles; current platform validation is Linux.
 
@@ -407,7 +483,20 @@ Scalar/gather indices reject out-of-bounds access. Slices clip bounds, exclude s
 Omitted bounds and null are equivalent; with negative step, omitted stop differs from explicit -1.
 Index lists preserve order and duplicates. Try `./lipc learn -lesson slicing` or `help(slice)` in the REPL.
 
-The 19 lessons cover values and arithmetic, functions, entries, child Flows/pipelines, modules, control structures, Claims, and tools. Enter an answer to validate it; `:hint` gives guidance, `:demo` runs the example, and `:next` advances. `:edit` / `:submit` edits and submits a complete program. Lessons check multiple inputs; module sources are bundled for learning away from the repository. Progress is saved only when requested:
+The 36 lessons include 72 runnable examples. Start by reading one list item, one object field, or calling one function, then gradually combine Flows, Claims, and external requests. Combined slices, powers, and logarithms come last as extra practice. Each lesson shows an example, concrete input, and expected result. Usually, fill only `__ANSWER__` and press Enter; there is no need to rewrite the program. Every lesson except the first checks multiple inputs.
+
+| Learning command | Use |
+|---|---|
+| `:examples`, `:tests` | Run two small examples; show all acceptance inputs and expected results |
+| `:hint` | Reveal an idea, a worked example, then one possible answer |
+| `:draft`, `:retry` | Review current/last code; load the last answer for editing in a terminal, or type its replacement in a pipe |
+| `:demo` | Run a complete reference program without marking completion or replacing your draft |
+| `:edit`, `:submit`, `:cancel` | Enter a whole program, check it, or return to the blank; complete programs can also be pasted directly in a terminal |
+| `:next`, `:prev`, `:lesson ID`, `:status` | Move freely, jump to a lesson, or review progress; passing is optional before continuing |
+
+Errors include the diagnostic, relevant source line, and a suggestion. Answers stay in the current process by lesson, so return later and use `:retry` to revise them. Tab completes parameters and function names from the template. Alt-Enter adds a line, arrows move through multiline text, and failed complete programs can be loaded for editing too. Module dependencies are bundled for learning away from the repository. External-call lessons use the teaching Host automatically and show the `-host demo` option needed for file execution. An `else` may start on the next line; for multiline complete programs in pipes, start with `:edit` and finish with `:submit`.
+
+The progress file stores only the current lesson and completion marks, using stable IDs compatible with earlier progress. Drafts stay in memory. Save progress explicitly:
 
 ```sh
 ./lipc learn -progress /path/to/progress.json
