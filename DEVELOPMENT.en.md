@@ -2,7 +2,7 @@
 
 [English](DEVELOPMENT.en.md) | [简体中文](DEVELOPMENT.md)
 
-Project guidance accompanying the [development skill](.agents/skills/lip-development/SKILL.md).
+This guide is the repository's development guidance for LIP 1.2.
 
 Use this guide when developing/reviewing LIP 1.2 draft specifications, compiler, Go backend, Go/Python Host boundary, examples, or interactive tools. Locate the user-selected root containing `spec/LIP-1.2-SPEC.md`, `script/`, and `go.mod`. If it cannot be written in a restricted environment, use an already authorized local copy. Paths below are relative to that root.
 
@@ -58,18 +58,28 @@ During example refactoring, use pure fn for single-step request construction and
 
 Keep each learn blank focused on one idea. Show concrete examples and input/output before increasing composition difficulty; execute examples and reference answers. Reveal hints gradually, exclude demos from completion, and retain failed answers for revision. Store progress by stable lesson IDs so inserted lessons preserve earlier completion marks. Check editor changes through the REPL, learning mode, real PTYs, and pipes; completion must not execute examples or external code.
 
-Retain 1.0 and 1.1 as historical specifications. Design and regression work follow the independent complete 1.2 editions. Explain semantic reasons for constraints rather than presenting accidental analyzer limits as architectural benefits. Regressions cover wrapping, modules, names, declaration order, and interpreter/generated/REPL agreement. If the skill directory is read-only, record experience here without bypassing permissions.
+Retain 1.0 and 1.1 as historical specifications. Design and regression work follow the independent complete 1.2 editions. Explain semantic reasons for constraints rather than presenting accidental analyzer limits as architectural benefits. Regressions cover wrapping, modules, names, declaration order, and interpreter/generated/REPL agreement. If the worktree is restricted, record experience here without bypassing permissions.
 
 Minimum Go is 1.25; allow higher versions without pinning patch/toolchain. Adjust versions according to user requirements and real dependencies.
 
 Explicit native receiver requests fix only ordinary wrapper fields along the actual member path, keeping unrelated fn/effect fields outside the Host Data boundary. Native lookup remains deferred to perform and actual arguments retain Data validation. `NativeExplicitReceiverMixedContainers` covers request builders, mixed containers across children, dynamic aliases, unselected missing paths, original-object preservation, and invalid arguments through interpretation, generated programs, and sessions. The chat Agent’s OpenModel return object supplies the application regression.
 
+## Composition review
+
+When a deep composition review is needed, follow this section directly; no separate skill is required. Read the relevant Chinese and English 1.2 sections first, separating target rules, historical implementation baselines, conservative analysis boundaries, implementation defects, and misleading documentation. Do not turn review priorities, issue numbers, or chat labels into specification text. Select intersections with real semantic risk instead of performing purposeless full cross-products.
+
+Prioritize values and channels (Data, functions, effects, nullable values, and mixed containers through arguments, returns, projections, captures, pipelines, loops, modules, and session cells); control and calls (direct, dynamic, higher-order, named arguments, short-circuiting, if/match, empty loops, carry, tail calls, and mutual recursion); scheduling and identity (dependencies, ReadOnly overlap, Write/Unknown barriers, parent/child graphs, After, cancellation, failed prerequisites, Claim identity, and replay); and lifetime and analysis boundaries (released child graphs, frozen captures, snapshots, failed cells, RetOps, execution Summary, and native return provenance). Unselected paths produce no dynamic error or external action; unknown provenance cannot be promoted to parallel permission by private optimizations.
+
+Check recursive analysis for termination, monotonicity, declaration-order independence, and private-name independence. Pure fields, fixed projections, and overwritten fields in mixed containers must not inherit neighboring resources. Metadata must not keep business values or ASTs alive. An explicit native receiver fixes only ordinary wrapper fields needed by the member path; it must not send an entire fn/effect-bearing object across the Data boundary or waive validation of actual arguments. Native lookup and missing-member errors remain deferred until perform.
+
+Start with a minimal reproduction and retain observable regressions: output, diagnostic code/ownership, call counts, and required ordering. The call-failure order is callee, callable/arity/names, source-order arguments, parameter types, body, and result annotation. Arity or parameter failures must not run an unintended perform or body. Use declaration swaps, private-name renames, parallelism changes, and equivalent wrappers as metamorphic checks, requiring unchanged results only where the specification guarantees equivalence.
+
+Compare successful and failing combinations across the interpreter, an actually built Go program, and applicable session/cross-module paths. Prove concurrency overlap with provider rendezvous or event relations rather than sleeps or timing thresholds; generated programs use race detection too. Diagnostic checks cover enabled/disabled, full, closed, faulty, blocked receivers, budgets, and cancellation, and verify that delivery does not alter results, errors, Steps, journal, RetOps, or concurrency permission. Freeze source, fixtures, and expectations before a full run, then check the Chinese/English specifications, README, help, lessons, examples, and implementation for consistency.
+
 ## Validation and delivery
 
-For a requested deep composition review, use the repository's [composition review skill](skills/lip-composition-review/SKILL.md). Cross-check calls, conditions, recursion, concurrency, lifetimes and execution paths against concrete outputs, error attribution, call counts and ordering. It records the standing request to finish the semantic checks without treating elapsed time as evidence of completion; it remains readable when the environment prevents updates under `.agents/skills`.
-
-Add regressions for real semantic risks rather than restating implementation. Useful checks include numeric/encoding vectors; terminal if/match/value blocks and malformed arguments/source; actual generated binaries/diagnostic locations; legal schedule variations, closed-gate zero calls, prerequisite closure/barriers/Claims; identical Go/Python Data boundaries, pre-authorization zero calls, known-fault replay without reruns; REPL multiline/error recovery/closures/non-repeated historical actions; every lesson with multiple inputs.
-
-Request-summary regressions also prove actual provider-read overlap and surrounding Write barriers in ordinary graphs/parallel loops, plus imported child-Flow composition, rather than checking compilation alone.
+Add regressions for real semantic risks rather than restating implementation. Useful checks include numeric/encoding vectors; terminal if/match/value blocks and malformed arguments/source; actual generated binaries/diagnostic locations; legal schedule variations, closed-gate zero calls, prerequisite closure/barriers/Claims; identical Go/Python Data boundaries, pre-authorization zero calls, known-fault replay without reruns; REPL multiline/error recovery/closures/non-repeated historical actions; every lesson with multiple inputs. Request-summary regressions also prove actual provider-read overlap and surrounding Write barriers in ordinary graphs/parallel loops, plus imported child-Flow composition, rather than checking compilation alone.
 
 Run `make test`, `make race`, `make vet`. race also builds/runs generated binaries with race detection. Makefile caches/temp files stay in `.build` for restricted workspaces. After validation run `make clean`; deliver no lipc, `.build`, Python caches, or other generated products. Restrict cleanup to project products. Report changes, actual checks, and limitations without claiming optional profiles are implemented.
+
+This file and its Chinese counterpart are repository development documentation. They are source-repository collaboration material, not LIP runtime, language specification, or release-package plugins. Builds and releases should include the implementation, specifications, examples, and necessary documentation without copying `.agents/` or `skills/` directories.
