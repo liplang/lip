@@ -302,24 +302,31 @@ func TestWebExamplesInterpreterAndGo(t *testing.T) {
 
 func TestGoBackendNumericBoundariesAndBudget(t *testing.T) {
 	cases := []struct {
-		source string
-		flags  []string
+		source      string
+		flags       []string
+		compileCode string
 	}{
-		{`flow Main()->object{return {q:1//0.1,r:1%0.1,negative:-1e-17%1,subnormal:parse_number("3e-324")}}`, nil},
-		{`flow Main()->number{return if false {1/0} else {7}}`, nil},
-		{`flow Main()->string{return str(1/0)}`, nil},
-		{`flow Main()->number{return parse_number("01")}`, nil},
-		{`flow Main()->number{return {for {}; 1}}`, []string{"-steps", "20"}},
-		{`fn identity(x:any?)->any?{x} flow Main()->any?{return map([null,3,"hello"],identity)}`, nil},
-		{`flow Main()->number{f=[fn(x:any)->any{x}][0];return f("wrong")}`, nil},
-		{`flow Main()->any{f=[fn(x:number)->number{x}][0];return f(1,2)}`, nil},
-		{`flow Main()->any{f=[fn(x:number)->number{x}][0];return f("wrong")}`, nil},
-		{`flow Main()->any{f=[fn(x:any)->number{x}][0];return f("wrong")}`, nil},
-		{`fn outer(f:function,x:any)->number{f(x)} fn inner(x:any)->string{x} flow Main()->any{return outer(inner,true)}`, nil},
+		{`flow Main()->object{return {q:1//0.1,r:1%0.1,negative:-1e-17%1,subnormal:parse_number("3e-324")}}`, nil, ""},
+		{`flow Main()->number{return if false {1/0} else {7}}`, nil, ""},
+		{`flow Main()->string{return str(1/0)}`, nil, ""},
+		{`flow Main()->number{return parse_number("01")}`, nil, ""},
+		{`flow Main()->number{return {for {}; 1}}`, []string{"-steps", "20"}, ""},
+		{`fn identity(x:any?)->any?{x} flow Main()->any?{return map([null,3,"hello"],identity)}`, nil, ""},
+		{`flow Main()->number{f=[fn(x:any)->any{x}][0];return f("wrong")}`, nil, ""},
+		{`flow Main()->any{f=[fn(x:number)->number{x}][0];return f(1,2)}`, nil, "E-ARITY"},
+		{`flow Main()->any{f=[fn(x:number)->number{x}][0];return f("wrong")}`, nil, "E-TYPE"},
+		{`flow Main()->any{f=[fn(x:any)->number{x}][0];return f("wrong")}`, nil, ""},
+		{`fn outer(f:function,x:any)->number{f(x)} fn inner(x:any)->string{x} flow Main()->any{return outer(inner,true)}`, nil, ""},
 	}
 	for i, tt := range cases {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			p, err := Compile(tt.source, Host{})
+			if tt.compileCode != "" {
+				if d, ok := err.(*Diagnostic); !ok || d.Code != tt.compileCode {
+					t.Fatalf("compile error: %v, want %s", err, tt.compileCode)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -807,17 +814,24 @@ export flow Inspect(item:number,minimum:number,mode:string)->object {
  return snapshot[0].value
 }`},
 	}}
-	for _, test := range []struct{ name, before, after string }{
-		{"child_write", "raw=perform request", "raw=perform request;perform effect audit.save(item,1)"},
-		{"child_unknown_request", "request=read_request(item,mode)", "request=[effect audit.read(item,mode)][0]"},
+	for _, test := range []struct {
+		name, before, after string
+		wantError           bool
+	}{
+		{"child_write", "raw=perform request", "raw=perform request;perform effect audit.save(item,1)", true},
+		{"child_known_request_projection", "request=read_request(item,mode)", "request=[effect audit.read(item,mode)][0]", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			child := set.Sources["checks.lip"]
 			child.Text = strings.Replace(child.Text, test.before, test.after, 1)
 			invalid := SourceSet{Root: set.Root, Sources: map[string]Source{"main.lip": set.Sources["main.lip"], "checks.lip": child}}
 			_, err := CompileSourceSet(invalid, host, CompileOptions{})
-			if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
-				t.Fatal("child effects bypassed parallel admission", err)
+			if test.wantError {
+				if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+					t.Fatal("child effects bypassed parallel admission", err)
+				}
+			} else if err != nil {
+				t.Fatal("known read projection rejected", err)
 			}
 			mu.Lock()
 			defer mu.Unlock()

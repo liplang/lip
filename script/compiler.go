@@ -340,9 +340,47 @@ type analysis struct {
 	typ        string
 	ops        *operationSummary
 	returns    *operationSummary
+	desc       *staticDesc
 	effect     EffectClass
 	concurrent bool
 	hasFlow    bool
+}
+
+// staticDesc is the finite, compile-time value description used by the 1.2
+// checker.  It deliberately contains no runtime values or environments: a
+// request keeps only its operation summary, and a callable keeps its frozen
+// declaration plus an abstract return description.  Unknown is represented
+// by nil, while a non-nil descriptor with no request is known pure data.
+// descNoResult is an internal projection witness and is treated as Unknown
+// when exposed beyond a projection; it must not be confused with an empty
+// container.
+type descKind uint8
+
+const (
+	descPlain descKind = iota
+	descRequest
+	descCallable
+	descObject
+	descList
+	descUnion
+	descParam
+	descNoResult
+)
+
+type staticDesc struct {
+	kind    descKind
+	typ     string
+	ops     *operationSummary
+	fn      *expression
+	builtin string
+	param   int
+	ret     *staticDesc
+	fields  map[string]*staticDesc
+	rest    *staticDesc
+	closed  bool
+	slots   []*staticDesc
+	element *staticDesc
+	parts   []*staticDesc
 }
 
 // A finite, compile-time graph of unions. Function return cells permit forward

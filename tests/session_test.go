@@ -91,7 +91,6 @@ func TestSessionPreservesProposalOps(t *testing.T) {
 	for _, rhs := range []string{
 		`[effect worker.read(0)][0]`,
 		`{request:effect worker.read(0)}.request`,
-		`for i in [1] with p=effect worker.read(0) {next p}`,
 	} {
 		t.Run(rhs, func(t *testing.T) {
 			var calls atomic.Int64
@@ -110,26 +109,58 @@ func TestSessionPreservesProposalOps(t *testing.T) {
 				}
 			}
 			for _, name := range []string{"p", "alias"} {
-				_, err := s.Eval(context.Background(), `for i in [1] parallel {perform `+name+`}`, Options{Parallelism: 7})
-				if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
-					t.Fatalf("%s strengthened Unknown Ops: %v", name, err)
+				if _, err := s.Eval(context.Background(), `for i in [1] parallel {perform `+name+`}`, Options{Parallelism: 7}); err != nil {
+					t.Fatalf("%s known read proposal rejected: %v", name, err)
 				}
 			}
-			if calls.Load() != 0 {
-				t.Fatal("rejected parallel call reached provider")
+			if calls.Load() != 2 {
+				t.Fatal("parallel calls did not reach provider exactly once", calls.Load())
 			}
 			if _, err := s.Eval(context.Background(), `perform alias`, Options{}); err != nil {
 				t.Fatal(err)
 			}
-			if calls.Load() != 1 {
-				t.Fatal("ordinary Unknown proposal was not performed")
+			if calls.Load() != 3 {
+				t.Fatal("ordinary proposal was not performed", calls.Load())
 			}
 			for _, source := range []string{`direct=effect worker.read(2)`, `for i in [1] parallel {perform direct}`} {
 				if _, err := s.Eval(context.Background(), source, Options{Parallelism: 7}); err != nil {
 					t.Fatal(source, err)
 				}
 			}
+			if calls.Load() != 4 {
+				t.Fatal("direct proposal was not performed", calls.Load())
+			}
 		})
+	}
+}
+
+func TestSessionCarryProposalRemainsUnknown(t *testing.T) {
+	var calls atomic.Int64
+	host := testHost(func(_ context.Context, r Request) Response {
+		calls.Add(1)
+		return Result(r.Positional[0])
+	})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	for _, source := range []string{
+		`import python "example.worker" as worker`,
+		`p=for i in [1] with state=effect worker.read(0) {next state}`,
+	} {
+		if _, err := s.Eval(ctx, source, Options{}); err != nil {
+			t.Fatal(source, err)
+		}
+	}
+	if _, err := s.Eval(ctx, `for i in [1] parallel {perform p}`, Options{Parallelism: 7}); err == nil {
+		t.Fatal("carry proposal was incorrectly admitted to parallel")
+	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("rejected carry proposal reached provider")
 	}
 }
 
@@ -546,7 +577,7 @@ func TestSessionGeneralHelp(t *testing.T) {
 		}
 	}
 	for source, want := range map[string]string{
-		`help()`:            "LIP 1.0 interactive help",
+		`help()`:            "LIP 1.2 interactive help",
 		`help(3)`:           "binary64",
 		`help(true)`:        "bool",
 		`help(null)`:        "null",
@@ -1028,7 +1059,7 @@ flow Canceled()->number {return 0}
 			t.Skip("Python 3 unavailable")
 		}
 		stdout, stderr := run("3 ** -2\nimport python \"math\" as m\nm.sqrt(3)\nhelp(m.sqrt)\nimport python \"math\"\nmath.sqrt(3)\nhelp()\nhelp(len)\nhelp([1,2])\nm.missing()\nm.sqrt(4)\n:quit\n", "repl")
-		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 1.0 interactive help\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
+		if !strings.HasPrefix(stdout, "0.1111111111111111\n1.7320508075688772\nPython Library Documentation:") || strings.Count(stdout, "1.7320508075688772\n") != 2 || !strings.Contains(stdout, "Return the square root") || !strings.Contains(stdout, "LIP 1.2 interactive help\n") || !strings.Contains(stdout, "len:") || !strings.Contains(stdout, "list\n") || !strings.HasSuffix(stdout, "2\n") || !strings.Contains(stderr, "E-EFFECT-REJECTED") {
 			t.Fatalf("stdout %q stderr %q", stdout, stderr)
 		}
 	})
@@ -1173,7 +1204,7 @@ flow Canceled()->number {return 0}
 			{"modules", "{total:n |>pricing.Adjust,base:pricing.BASE}"},
 		} {
 			stdout, stderr := run(test.answer+"\n:quit\n", "learn", "-lesson", test.id)
-			if stderr != "" || !strings.Contains(stdout, "LIP 1.0") || strings.Count(stdout, "Case ") != 2 || !strings.Contains(stdout, "Passed") {
+			if stderr != "" || !strings.Contains(stdout, "LIP 1.2") || strings.Count(stdout, "Case ") != 2 || !strings.Contains(stdout, "Passed") {
 				t.Fatal(test.id, stdout, stderr)
 			}
 		}

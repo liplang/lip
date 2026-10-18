@@ -716,17 +716,13 @@ func TestDynamicArityPrecedesEffectfulArguments(t *testing.T) {
 		calls.Add(1)
 		return Result(request.Positional[0])
 	})
-	p, err := Compile(`import python "example.worker" as worker
+	_, err := Compile(`import python "example.worker" as worker
 flow Main()->any {
  f=[fn(x:any)->any{x}][0]
  return f(perform effect worker.read(1), perform effect worker.read(2))
 }`, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report, err := p.Run(context.Background(), nil, Options{Parallelism: 4})
-	if err == nil || report.Error.Code != "E-ARITY" || calls.Load() != 0 {
-		t.Fatal("arity check evaluated arguments", err, calls.Load())
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-ARITY" || calls.Load() != 0 {
+		t.Fatal("static arity check evaluated arguments", err, calls.Load())
 	}
 }
 
@@ -736,6 +732,7 @@ flow Main()->any {
 func TestFlowValueControlAndFailureComposition(t *testing.T) {
 	const source = `import host "composition"
 fn erase(value:any)->any{value}
+fn hide(value:any)->any{if true {value}else{null}}
 fn again(n:number,f:function)->any{if n==0 {f}else{again(n-1,f)}}
 fn request_a(n:number,value:number)->effect{if n==0 {effect composition.touch(value)}else{request_b(n-1,value)}}
 fn request_b(n:number,value:number)->effect{request_a(n,value)}
@@ -747,10 +744,10 @@ flow Execute(p:effect)->any{return perform p}
 flow Main(mode:string)->any{
  return match mode {
  "callee_bad"=>({Tap(1);erase(17)})(Tap(9)),
- "arity"=>[fn(x:number)->number{x}][0](Tap(1),Tap(2)),
- "named_arity"=>[fn(x:number)->number{x}][0](other=Tap(9)),
+ "arity"=>hide([fn(x:number)->number{x}][0])(Tap(1),Tap(2)),
+ "named_arity"=>hide([fn(x:number)->number{x}][0])(other=Tap(9)),
  "argument_failure"=>Add(fail("first"),y=Tap(9)),
- "function_type"=>[fn(x:number,y:number)->number{fail("body")}][0](erase("bad"),Tap(2)),
+ "function_type"=>hide([fn(x:number,y:number)->number{fail("body")}][0])(erase("bad"),Tap(2)),
  "flow_type"=>Need(erase("bad"),Tap(2)),
  "function_named"=>[fn(x:number,y:number)->number{x*10+y}][0](y=Tap(2),x=Tap(1)),
  "flow_named"=>Add(y=Tap(2),x=Tap(1)),

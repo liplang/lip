@@ -24,6 +24,8 @@ fn leaf(x:number)->effect {effect worker.read(x)}`, "", "request(x)"},
 		{"branch_union", `fn request(x:number)->effect {if x==1 {effect worker.read(x)} else {effect worker.other(x)}}`, "", "request(x)"},
 		{"match_union", `fn request(x:number)->effect {match x {1=>effect worker.read(x), _=>effect worker.other(x)}}`, "", "request(x)"},
 		{"unused_write", `fn request(x:number)->effect {unused=effect worker.write(x); effect worker.read(x)}`, "", "request(x)"},
+		{"effect_parameter_forwarding", `fn request(p:effect)->effect {p}`, "", "request(effect worker.read(x))"},
+		{"projected_request", `fn request(x:number)->effect {[effect worker.read(x)][0]}`, "", "request(x)"},
 		{"mutual_recursion", `fn request(x:number)->effect {left(5,x)}
 fn left(n:number,x:number)->effect {if n==0 {effect worker.read(x)} else {right(n-1,x)}}
 fn right(n:number,x:number)->effect {left(n,x)}`, "", "request(x)"},
@@ -90,9 +92,7 @@ func TestFunctionProposalUnknownAndUnsafe(t *testing.T) {
 		{"serial", `fn bad(x:number)->effect {effect worker.serial(x)}`, "", "bad(x)"},
 		{"unknown_contract", `fn bad(x:number)->effect {effect worker.unknown(x)}`, "", "bad(x)"},
 		{"unselected_write", `fn bad(x:number)->effect {if true {effect worker.read(x)} else {effect worker.write(x)}}`, "", "bad(x)"},
-		{"effect_parameter", `fn bad(p:effect)->effect {p}`, "", "bad(effect worker.read(x))"},
 		{"function_parameter", `fn bad(f:function,x:number)->effect {f(x)}`, "", "bad(request,x)"},
-		{"projected_request", `fn bad(x:number)->effect {[effect worker.read(x)][0]}`, "", "bad(x)"},
 		{"carry_request", `fn bad(x:number)->effect {for i in [0] with p=effect worker.read(x) {next p}}`, "", "bad(x)"},
 		{"container_function", "", `f=[request][0]`, "f(x)"},
 		{"conditional_function", "", `f=if true {request} else {request}`, "f(x)"},
@@ -260,10 +260,12 @@ fn next_request(x:number)->effect {effect worker.read(x)}`)
 		eval(source)
 	}
 	for _, request := range []string{"dynamic(1)", "unknown", "identity(p)"} {
-		_, err := s.Eval(context.Background(), `for x in [1] parallel {perform `+request+`}`, Options{})
-		if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" || calls.Load() != 4 {
-			t.Fatal(request, err, calls.Load())
+		if _, err := s.Eval(context.Background(), `for x in [1] parallel {perform `+request+`}`, Options{}); err != nil {
+			t.Fatal(request, err)
 		}
+	}
+	if calls.Load() != 7 {
+		t.Fatal("known readonly projections were not executed", calls.Load())
 	}
 	// Deleting/reusing a public name must not retarget a saved closure or summary.
 	if err := s.Delete("p", "request"); err != nil {
@@ -272,7 +274,7 @@ fn next_request(x:number)->effect {effect worker.read(x)}`)
 	eval(`p=[effect worker.read(9)][0]`)
 	eval(`fn request(x:number)->effect {[effect worker.read(x)][0]}`)
 	eval(`for x in [1] parallel {perform captured();perform alias(x)}`)
-	if calls.Load() != 6 {
+	if calls.Load() != 9 {
 		t.Fatal(calls.Load())
 	}
 	// A failed declaration cell publishes no summary and does not replay history.
@@ -281,7 +283,7 @@ fn next_request(x:number)->effect {effect worker.read(x)}`)
 		t.Fatal("failed cell succeeded")
 	}
 	_, err = s.Eval(context.Background(), `failed()`, Options{})
-	if err == nil || calls.Load() != 6 {
+	if err == nil || calls.Load() != 9 {
 		t.Fatal("failed summary committed", err, calls.Load())
 	}
 }

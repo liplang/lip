@@ -859,7 +859,7 @@ func learn(ctx context.Context, args []string) error {
 			return fmt.Errorf("unknown lesson %q; lipc learn -list shows lesson IDs", selection)
 		}
 	}
-	fmt.Println("LIP 1.0 · Learn by small steps")
+	fmt.Printf("LIP %s · Learn by small steps\n", script.LanguageVersion)
 	fmt.Println("Each lesson has one blank. Type the missing code and press Enter; no whole program needed.")
 	fmt.Println(":hint gives a small step; :examples runs worked examples; :demo shows one possible answer.")
 	if *path == "" {

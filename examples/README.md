@@ -4,7 +4,7 @@
 
 所有示例都使用 `Main` 作为默认入口，辅助 Flow 按职责命名。
 
-这些可执行示例逐步展开 LIP 的同一计算模型（当前工作树按 [1.1 草案](../spec/LIP-1.1-SPEC.md)推进）：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例同时通过解释器和实际生成的 Go 程序验证。
+这些可执行示例逐步展开 LIP 1.2 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例可由解释器运行，也可生成 Go 程序。
 
 第一次接触可运行 `./lipc learn`，跟随 38 课与 76 个小例子填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
 
@@ -59,7 +59,7 @@ REPL 也会显示库函数的返回值。`fmt.Print/Printf/Println` 的返回值
 
 普通 for 内的绑定每轮独立。需要携带上一轮结果时用 carry；需要收集独立贡献时用 Claim。普通循环的 `break` 与 carry 的 `break value` 各自作用于自己的构造。
 
-`with` 可以持续构造容器：每轮用 `concat(s.tools, [tool])` 追加列表，用 `put(s.by_name, name, tool)` 增加或覆盖对象字段，再由 `next` 携带整个新状态。结果还能作为下一批循环的初始状态；空输入保留初始值，旧容器保持不变。在 Flow 中可先 `value = perform request`，再将 value 加入状态；`next` 本身保持纯计算。
+`for ... with s = init` 可以持续构造容器：每轮用 `concat(s.tools, [tool])` 追加列表，用 `put(s.by_name, name, tool)` 增加或覆盖对象字段，再用 `next e` 携带表达式 `e` 作为整个新状态；`break e` 返回最终值。结果还能作为下一批循环的初始状态；空输入保留初始值，旧容器保持不变。在 Flow 中可先 `value = perform request`，再将 value 加入状态；`next` 本身保持纯计算。
 
 ## 高级计算与并发
 
@@ -132,7 +132,7 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 1. `upper_request("hello")` 得到请求，没有调用外部库。`perform request` 才执行，并返回合约规定的 Data。
 2. `18_proposals` 的 `forward(request:effect)->effect` 展示 fn 参数与返回值能传请求；Prepare/Execute 展示 Flow 返回和接收请求。Host 参数/结果、入口协议和 Claim 仍要求 Data。
-3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格。经 `forward` 的未知形参或容器投影取回请求，仍可顺序执行，但不能证明并行安全。
+3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格；固定字段、下标和切片投影也保留已知只读请求。真正未知的形参或开放来源仍可顺序执行，但不能证明并行安全。
 
 项目自定义操作可用普通 `policy` 参数携带 token、金额与时限等选项，具体限制由 Host 实施；权限需求由合约声明并由 Host 授予。短例子与当前边界见 [README 的 effect 说明](../README.md#所有外部动作都走同一条边界)。
 
@@ -142,11 +142,11 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 [tmp_ollama_chat.lip](tmp_ollama_chat.lip) 在一个 LIP 文件内实现多轮流式聊天、工具参数检查、计算记录和提醒。模型选择工具，LIP 按明确的工具名执行，再把结果传回模型继续决策。模型接入使用官方 Python `ollama` 客户端，终端编辑使用 `prompt_toolkit`，存储与计时直接调用标准库。
 
-1.1 改写将模型和配置捕获在一个纯请求构造函数中，传给 `RunAgent`；每轮由 `StreamReply(request(s.messages, tools), terminal)` 接收 effect 并执行。模型在启动时选定，替换构造函数可接入兼容 Ollama 分块接口的实现。`Query(request:effect)` 返回行列表，`Write(request:effect)` 返回影响行数；请求须产生 SQLite 游标，两个 Flow 都负责关闭和释放它。SQL 仍使用独立参数。动态请求结果的原生属性使用 `py.getattr(cursor, "rowcount")`，方法使用显式 `effect cursor.method(...)`，无需假定静态来源已知。
+1.2 将模型和配置捕获在一个纯请求构造函数中，传给 `RunAgent`；每轮由 `StreamReply(request(s.messages, tools), terminal)` 接收 effect 并执行。模型在启动时选定，替换构造函数可接入兼容 Ollama 分块接口的实现。`Query(request:effect)` 返回行列表，`Write(request:effect)` 返回影响行数；请求须产生 SQLite 游标，两个 Flow 都负责关闭和释放它。SQL 仍使用独立参数。动态请求结果的原生属性使用 `py.getattr(cursor, "rowcount")`，方法使用显式 `effect cursor.method(...)`；已知请求则可沿有限描述穿过函数、容器和 Flow 返回值。
 
 工具定义用纯 `Tool(name, description, properties, required)` 统一结构。此应用选择由 `BuildTools()` 在启动时构造一次；也可用 `concat(base, [Tool(...)])` 追加，再由 carry 将新列表带入下一轮，见 [12_carry](structures/12_carry.lip)。按条件逐项构造也可使用推导式。需要随对话更新时，将工具列表与 messages 一起放入 carry 状态。`Tool` 只生成模型看到的 schema，新增工具仍须同步业务校验和 `DispatchTool` 分派。顶层静态声明只接受字面量，构造函数应在 fn/Flow 内调用。
 
-业务逻辑仍在同一个文件中，当前 848 行（原先 831 行）。本轮拆分将 `Main` 从 80 行降至 15 行，负责启动、会话与关闭。`OpenModel` 返回包含请求闭包的普通对象；`Conversation` 管理输入循环，`RunCommand` 处理命令，`ChatTurn` 准备上下文，`RunTools` 反馈工具结果。流式代码分成原生分块解码、纯 `MergeChunk` 累积和终端显示，`StreamReply` 从 42 行降至 17 行。工具构造复用既有纯函数能力，跨 Flow 传递请求函数、effect 和嵌套容器使用 1.1 能力；本次重构优先降低每个结构的复杂度，整体增加少量职责明确的声明。工具校验、历史裁剪、流式输出、提醒和终端编辑均保留。动态请求的 Ops 仍为 Unknown，此重构不授予并行资格。
+业务逻辑集中在一个文件中：`Main` 负责启动、会话与关闭，`OpenModel` 返回包含请求闭包的普通对象，`Conversation` 管理输入循环，`RunCommand` 处理命令，`ChatTurn` 准备上下文，`RunTools` 反馈观察。流式代码分成原生分块解码、纯 `MergeChunk` 累积和终端显示。工具构造复用纯函数；请求函数、effect 和嵌套容器可以跨 Flow 传递，有限描述让已知只读请求保留并行资格，动态原生属性仍通过显式调用取得。
 
 先在 `lipc` 使用的 Python 3.9+ 环境中安装客户端，并启动本地 Ollama、下载支持工具调用的模型。以下命令从项目根目录运行，默认模型为 `llama3.1:8b`：
 

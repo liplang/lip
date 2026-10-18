@@ -120,7 +120,7 @@ func repl(ctx context.Context, args []string) error {
 	}
 	defer session.Close()
 	if !*quiet {
-		fmt.Println("LIP 1.0 · Interactive evaluation")
+		fmt.Printf("LIP %s · Interactive evaluation\n", script.LanguageVersion)
 		fmt.Println("Enter LIP expressions, statements, or declarations; :help for commands, :quit or Ctrl-D to exit.")
 	}
 	input := newInteractiveInput(ctx, func(prefix string) []string {
@@ -185,7 +185,7 @@ func repl(ctx context.Context, args []string) error {
 				collecting = false
 				evaluate()
 			case text == ":help":
-				fmt.Println("LIP 1.0: pure fn compute values, Flows organize dependencies, Claims collect facts, effect/perform run external actions.")
+				fmt.Printf("LIP %s: pure fn compute values, Flows organize dependencies, Claims collect facts, effect/perform run external actions.\n", script.LanguageVersion)
 				fmt.Println("help() shows interactive help; help(value), help(module), help(module.member) describe values, Go exports, or Python libraries.")
 				fmt.Println("The generic Go/Python bridge is enabled by default; packages must exist in the current Go module or Python environment.")
 				fmt.Println("Use full, case-sensitive Go package paths; configure dependencies with go get in your module, and choose an alias with as.")

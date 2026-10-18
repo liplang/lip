@@ -64,6 +64,12 @@ type Program struct {
 	host   Host
 	build  Value
 }
+
+// LanguageVersion is the language/release contract exposed by the CLI and
+// embedding applications.  Source-set identity keeps its historical wire
+// tag independently, as required by the specification.
+const LanguageVersion = "1.2"
+
 type CompileOptions struct {
 	Entry string // Empty selects root Main, otherwise the sole root Flow or implicit main.
 }

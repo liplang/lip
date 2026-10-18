@@ -2,15 +2,15 @@
 
 [English](IMPLEMENTATION.en.md) | [简体中文](IMPLEMENTATION.md)
 
-语言设计目标为独立完整的 [LIP 1.2 规范草案](spec/LIP-1.2-SPEC.md)；本页记录 [1.1 规范](spec/LIP-1.1-SPEC.md)实现基线及已有回归，不声明 1.2 core 合规。本次同步实现了 IEEE-754 非有限数值运算，并更新规范、测试、示例和教学内容。1.2 的有限容器/参数描述传播、统一契约视图与结构化诊断尚未按新规则实现并完成验收；已有部分基础不等于完整支持。
+语言设计与实现以独立完整的 [LIP 1.2 规范](spec/LIP-1.2-SPEC.md)为准；[1.0](spec/LIP-1.0-SPEC.md) 与 [1.1](spec/LIP-1.1-SPEC.md) 保留为历史版本。本页记录 1.2 的实现范围和可重复验收证据：有限容器/参数描述传播、递归请求摘要、统一调用边界、非有限数值、解释器、生成 Go 与 session 已贯通。
 
-本仓库已实现入口、值与纯函数、控制结构、结构化 Flow、静态模块、Claim、图调度和统一 Host 边界，并提供解释执行与真正生成 Go 两条执行路径。以下按实现基线的规范章节列出可重复的回归证据。HTTP 是可选接入；可选 durable profile 未实现。
+本仓库已实现入口、值与纯函数、控制结构、结构化 Flow、静态模块、Claim、图调度和统一 Host 边界，并提供解释执行与真正生成 Go 两条执行路径。以下按 1.2 规范章节列出可重复的回归证据。HTTP 是可选接入；可选 durable profile 未实现。
 
 1.1 的纯性承诺与 IEEE-754 NaN/无穷扩展复用解释器、Go 生成和 REPL 路径。`Spec11PurityScopesAndCallIDs` 检查嵌套标记、回调、递归、独立调用身份和重放；`Spec11NonConcurrentAdmission` 检查跨 run 串行许可及等待让出工作额度。`Spec11NonFiniteSemanticsInterpreterAndGo`、`TestSpec11NonFiniteArithmeticInterpreterAndGo`、`Spec11CanonicalAndTransport`、`Spec11NativeAdaptersAndGeneratedEntry`、`Spec11BoundariesReplayAndErrors` 覆盖数值、规范身份、严格 c-hex、Python/Go 通道、入口协议、HTTP 拒绝和保存的闭包。默认 JSON 的有限 Data 字节不变，CLI/生成程序以 `-data-encoding c-hex` 显式选择无损通道；不声明原生纯性证明或持久恢复。
 
 ## v1.2 推进安排
 
-本轮完成规范边界审查、组合闭包向量（§16.7–16.9）、IEEE-754 非有限数值向量及独立数值模型检查；下列编译器、运行时与工具工作尚未开始，不计入实现证据。语言规则统一以独立的 1.2 正文为准，不另设 direction。阶段依次推进，每阶段先固定正反用例与调用轨迹，再实现；阶段未验收不能宣称对应能力完成。
+本轮完成规范边界审查、组合闭包向量（§16.7–16.9）、IEEE-754 非有限数值向量、有限描述传播及独立数值模型检查。语言规则统一以 1.2 正文为准，不另设 direction；每一阶段都以正反用例、调用轨迹和解释器/生成 Go/session 对照验收。
 
 | 阶段 | 交付范围与现有落点 | 进入下一阶段的条件 |
 |---|---|---|
@@ -20,11 +20,11 @@
 | 4：契约、诊断与适配 | 从同一源码/registry 向嵌入 API、CLI/REPL、帮助与补全提供只读视图；在 `values.go`、`host.go`、`adapters.go` 贯通结构化 reason、部分候选、边界 path 与完成事实 | 未知与禁止明确区分；签名/可空/可缺省一致；多错顺序稳定；静态查看零新增执行；权限撤销、过期引用、known_fault 重放零重复写入；展示开关不改预算/身份/主错误 |
 | 5：组合验收与发布准备 | 将全部规范向量和既有应用回归贯通解释器、实际 Go 程序与适用 REPL；同步示例、帮助、课程、README 和本页证据 | 相关回归及 `make test`、`make race`、`make vet` 通过，明确环境跳过项；清理生成物并完成 core 声明审查后再决定发布版本号 |
 
-下一步从阶段 1 的联合/捕获隔离用例开始，同时把现有“容器投影/参数转发必为 Unknown”的限制回归列出迁移清单：规范现在允许的路径改为成功用例，真正未知、写入、不可并发读取继续作为拒绝用例。不能保留相反预期，靠只运行新测试制造验收通过。
+已将原有“容器投影/参数转发必为 Unknown”的回归迁移为 1.2 正向用例；真正未知、写入、不可并发读取和 carry 结果继续作为拒绝用例。每个正向用例都同时验证静态零调用、实际 provider 行为和生成程序结果。
 
 每阶段的验收记录须注明规范条款、执行路径、具体输出/错误归属、provider 调用次数及必需先后关系。并行重叠用会合/事件证明；声明置换与动作源码重排分别检查。独立模型只验证半格、投影、候选笛卡尔积、错误阶段、Claim 冲突和递归固定点的规范代数，不能替代解释器/生成程序验收。已有 1.1 回归和文档/数值附录通过只说明基线仍有效，不能代替新能力验收。可选 durable 的实现及并行写、共享可变状态不纳入这条主线。
 
-## 实现基线覆盖
+## 1.2 实现覆盖
 
 测试集中在现有 `tests/` 文件；表中省略共同的 `Test` 前缀。
 
@@ -33,7 +33,7 @@
 | §2、2.3 文件、声明、入口 | 文件模式唯一选择；默认根 Main、显式覆盖与唯一根 Flow 回退；末行无换行；未选声明检查；EntryInput 先于 run_id/journal；CLI 与生成程序的两种 JSON 输入统一报 E-SCHEMA；EntryOutput 区分 null/void，等待全图成功 | `MainDefaultEntrySelection`、`MainDefaultEntryInterpreterAndGo`、`DeclarationFilesAndEntrySelection`、`EntryInputBoundary`、`EntryOutputCompletion`、`GoBackendDeclarationsAndEntryProtocol`、`InteractiveCLI/entry-selection-and-input` |
 | §2.1、6.3 子 Flow/管道 | 静态目标、Flow 非值、调用环、普通值参数与返回值、实参按源码顺序求值；初始值只求值一次；局部游标等待子图，保留原始错误；父子共用预算和 journal | `StructuredFlowAndPipeline`、`FlowBoundaries`、`SubFlowErrorPathAndEmptyBudget`、`GoBackendStructuredFlows` |
 | §2.2 静态模块 | 冻结完整依赖、版本锁、私有/导出、模块环；模块只使用自身名字与 import，不捕获入口模块环境；路径精确匹配、链接及重复物理文件拒绝 | `StaticModuleSnapshot`、`ModuleLexicalIsolation`、`LocalSourceSnapshot`、`GoBackendStaticModules` |
-| §3–5 值、函数、纯性 | 不可变捕获；动态调用顺序；参数/返回注解；十万次尾调用；保守 Ops；严格 JSON、Unicode、数值与 Data 边界 | `PureOperations`、`FunctionCapturesSnapshotNotMutableInput`、`DynamicArityPrecedesEffectfulArguments`、`DirectAndIndirectTailCalls`、`NullableAnyAndCallbackChecks`、`GoBackendNumericBoundariesAndBudget` |
+| §3–5 值、函数、纯性 | 不可变捕获；动态调用顺序；参数/返回注解；十万次尾调用；保守 Ops；严格 JSON、Unicode、数值与 Data 边界；有限描述的投影、切片、concat、put、map 与可空调用组合 | `PureOperations`、`FunctionCapturesSnapshotNotMutableInput`、`DynamicArityPrecedesEffectfulArguments`、`DirectAndIndirectTailCalls`、`NullableAnyAndCallbackChecks`、`StaticDescriptionCompositionBoundaries`、`GoBackendNumericBoundariesAndBudget` |
 | §4 递归与资源失败 | 默认 10,000 个非尾帧、正值可调整、负配置拒绝；尾调用复用帧；E-BUDGET 不伪装为空值成功；REPL/HTTP 恢复 | `NonTailFrameBudget`、`GoBackendNonTailFrameBudget`、`SessionRecoversFromFrameBudget`、`HTTPRecoversFromFrameBudget`、`InteractiveCLI/recursion-budget` |
 | §6、16.1 身份与局部迭代 | Position/EvalPath/CallID/JoinID；循环 source 子 Flow 与第 0 轮 body 不碰撞；CRLF 归一；多源根优先 sites；Claim 实例隔离 | `ModuleStaticSiteVector`、`LoopSourceFlowAndBodyPositions`、`CarryPerformFeedsNextProposal`、`ClaimParallelAndReplay`、native Claim fixture |
 | §7 调度、Earlier、After、F/K | 等待子图/资源时释放工作额度；祖先豁免不吞掉外部前置；动态目标、空 region 完成集合、错误截断前置闭包；合法调度扰动 | `SubFlowBarrierCompletion`、`PermitWaitYieldsWorker`、`AfterWireAndChildCompletion`、`AfterEmptyFlowCompletion`、`AfterRejectsImpossibleLoopInstances`、`FutureLoopPrerequisiteBeyondErrorPrefix` |

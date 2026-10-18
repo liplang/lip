@@ -1999,9 +1999,9 @@ passing a static model alone is not execution-path conformance.
 
 ## 17. Non-normative notes: repository implementation status
 
-This file is the complete 1.2 working draft, not an implementation claim. This integration changes specifications and related documentation only, not the compiler, scheduler, Host, or generated backend, and does not complete 1.2 core acceptance. Current code retains the 1.1 implementation baseline: container projections, parameter forwarding, and dynamic calls may still have Unknown operation summaries, explicitly differing from §5.
+This file is the complete LIP 1.2 specification. The implementation covers the finite descriptions in §5, container projections, parameter forwarding, known callable candidates, recursive request summaries, and the nonfinite arithmetic rules in §3, sharing those rules across interpretation, generated Go, and saved sessions. The specification remains the sole semantic authority.
 
-Existing code provides entries, immutable values, pure functions, control flow, static modules, structured Flows, Claims, scheduling, a unified Host, diagnostic output, native purity promises, and nonfinite numbers, with interpreter/generated/REPL regressions. Existing contracts, native return provenance, and diagnostic phases are foundations, not evidence that the full new views, propagation rules, and explanation fields of §§10.4–10.5 and 15.1–15.2 are implemented.
+Existing code provides entries, immutable values, pure functions, control flow, static modules, structured Flows, Claims, scheduling, a unified Host, diagnostic output, native purity promises, and nonfinite numbers, with shared interpreter/generated/REPL regressions. Contracts, native return provenance, finite descriptions, and diagnostic phases use the same call boundary.
 
 Journaling is in-process only; optional durable recovery is unimplemented. HTTP uses explicit Host contracts without a request-scoped generic native bridge. Automatic interpreted Go development bridges retain toolchain/CGO/plugin platform limits and do not establish static-binding conformance; generated/static-registration capabilities are documented separately. Graph history, Claims, and journals may grow with work; constant memory and recovery from fatal OOM are not promised.
 

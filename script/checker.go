@@ -2,6 +2,7 @@ package script
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +44,625 @@ type checker struct {
 	returns       map[*expression]*operationSummary
 }
 
+func plainDesc(typ string) *staticDesc { return &staticDesc{kind: descPlain, typ: normalizeType(typ)} }
+func unknownDesc() *staticDesc         { return nil }
+func requestDesc(ops *operationSummary) *staticDesc {
+	if ops == nil {
+		return nil
+	}
+	return &staticDesc{kind: descRequest, typ: "effect", ops: ops}
+}
+func paramDesc(i int, typ string) *staticDesc {
+	return &staticDesc{kind: descParam, typ: normalizeType(typ), param: i}
+}
+func callableDesc(fn *expression, ret *staticDesc) *staticDesc {
+	return &staticDesc{kind: descCallable, typ: "function", fn: fn, ret: ret}
+}
+func listDesc(slots []*staticDesc, element *staticDesc) *staticDesc {
+	return &staticDesc{kind: descList, typ: "list", slots: slots, element: element}
+}
+func objectDesc(fields map[string]*staticDesc, rest *staticDesc, closed bool) *staticDesc {
+	return &staticDesc{kind: descObject, typ: "object", fields: fields, rest: rest, closed: closed}
+}
+func noResultDesc() *staticDesc { return &staticDesc{kind: descNoResult} }
+
+func descType(d *staticDesc) string {
+	if d == nil {
+		return "any"
+	}
+	if d.typ != "" {
+		return d.typ
+	}
+	switch d.kind {
+	case descRequest:
+		return "effect"
+	case descCallable:
+		return "function"
+	case descObject:
+		return "object"
+	case descList:
+		return "list"
+	case descNoResult:
+		return "any"
+	}
+	return "any"
+}
+
+func descParts(d *staticDesc) []*staticDesc {
+	if d == nil {
+		return nil
+	}
+	if d.kind != descUnion {
+		return []*staticDesc{d}
+	}
+	return d.parts
+}
+
+// sameDesc compares the complete finite description.  Descriptors can contain
+// recursive callable returns, so the pair map is part of the comparison rather
+// than relying on pointer identity or the first union insertion order.
+func sameDesc(a, b *staticDesc) bool {
+	type pair struct{ a, b *staticDesc }
+	seen := map[pair]bool{}
+	var eqSummary func(*operationSummary, *operationSummary) bool
+	eqSummary = func(x, y *operationSummary) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		xops, xknown := resolvedOperations(x)
+		yops, yknown := resolvedOperations(y)
+		return xknown == yknown && sort.StringsAreSorted(xops) && sort.StringsAreSorted(yops) && strings.Join(xops, "\x00") == strings.Join(yops, "\x00")
+	}
+	var eq func(*staticDesc, *staticDesc) bool
+	eq = func(x, y *staticDesc) bool {
+		if x == nil || y == nil {
+			return x == y
+		}
+		if x.kind == descNoResult || y.kind == descNoResult {
+			return x.kind == y.kind
+		}
+		p := pair{x, y}
+		if seen[p] {
+			return true
+		}
+		seen[p] = true
+		if x.kind != y.kind || x.typ != y.typ || x.param != y.param || x.fn != y.fn || x.builtin != y.builtin || x.closed != y.closed {
+			return false
+		}
+		if !eqSummary(x.ops, y.ops) || !eq(x.ret, y.ret) || !eq(x.rest, y.rest) || !eq(x.element, y.element) {
+			return false
+		}
+		if (x.slots == nil) != (y.slots == nil) || (x.parts == nil) != (y.parts == nil) || len(x.slots) != len(y.slots) || len(x.parts) != len(y.parts) || len(x.fields) != len(y.fields) {
+			return false
+		}
+		for i := range x.slots {
+			if !eq(x.slots[i], y.slots[i]) {
+				return false
+			}
+		}
+		for i := range x.parts {
+			if !eq(x.parts[i], y.parts[i]) {
+				return false
+			}
+		}
+		for k, xv := range x.fields {
+			yv, ok := y.fields[k]
+			if !ok || !eq(xv, yv) {
+				return false
+			}
+		}
+		return true
+	}
+	return eq(a, b)
+}
+
+// descOrderKey is intentionally structural and stable.  It is used only to
+// canonicalize Union order; it never exposes a runtime pointer or value.
+func descOrderKey(d *staticDesc) string {
+	if d == nil {
+		return "0"
+	}
+	if d.kind == descNoResult {
+		return "n"
+	}
+	var b strings.Builder
+	var write func(*staticDesc, map[*staticDesc]bool)
+	write = func(x *staticDesc, active map[*staticDesc]bool) {
+		if x == nil {
+			b.WriteString("?")
+			return
+		}
+		if active[x] {
+			b.WriteString("r")
+			return
+		}
+		active[x] = true
+		b.WriteByte(byte('a' + x.kind))
+		b.WriteString("[")
+		b.WriteString(x.typ)
+		b.WriteByte('|')
+		if x.fn != nil {
+			b.WriteString("fn:")
+			b.WriteString(strconv.Itoa(len(x.fn.tok.source)))
+			b.WriteByte(':')
+			b.WriteString(x.fn.tok.source)
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(x.fn.tok.site))
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(x.fn.tok.line))
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(x.fn.tok.column))
+		}
+		if x.param >= 0 {
+			b.WriteString(strconv.Itoa(x.param))
+		}
+		if x.kind == descRequest {
+			if ops, known := resolvedOperations(x.ops); known {
+				b.WriteString(strings.Join(ops, ","))
+			} else {
+				b.WriteString("?")
+			}
+		}
+		write(x.ret, active)
+		write(x.rest, active)
+		write(x.element, active)
+		for _, slot := range x.slots {
+			write(slot, active)
+		}
+		// Union parts are canonicalized when the union is built.  Re-sorting
+		// here would restart the recursive key builder and could loop on a
+		// recursive callable.
+		for _, part := range x.parts {
+			write(part, active)
+		}
+		keys := make([]string, 0, len(x.fields))
+		for k := range x.fields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			b.WriteString(k)
+			write(x.fields[k], active)
+		}
+		b.WriteByte(']')
+		delete(active, x)
+	}
+	write(d, map[*staticDesc]bool{})
+	return b.String()
+}
+
+func unionDesc(parts ...*staticDesc) *staticDesc {
+	flat := make([]*staticDesc, 0, len(parts))
+	var add func(*staticDesc)
+	add = func(d *staticDesc) {
+		if d == nil {
+			// Unknown is top for request/callable qualification.  Keep it
+			// explicit by returning nil to every caller.
+			flat = nil
+			return
+		}
+		if flat == nil {
+			return
+		}
+		if d.kind == descNoResult {
+			return
+		}
+		if d.kind == descUnion {
+			for _, p := range d.parts {
+				add(p)
+				if flat == nil {
+					return
+				}
+			}
+			return
+		}
+		for _, p := range flat {
+			if sameDesc(p, d) {
+				return
+			}
+		}
+		flat = append(flat, d)
+	}
+	for _, d := range parts {
+		add(d)
+		if flat == nil {
+			return nil
+		}
+	}
+	if len(flat) == 0 {
+		return nil
+	}
+	if len(flat) == 1 {
+		return flat[0]
+	}
+	sort.SliceStable(flat, func(i, j int) bool { return descOrderKey(flat[i]) < descOrderKey(flat[j]) })
+	return &staticDesc{kind: descUnion, typ: unifyDescTypes(flat), parts: flat}
+}
+
+func unifyDescTypes(parts []*staticDesc) string {
+	if len(parts) == 0 {
+		return "any"
+	}
+	t := descType(parts[0])
+	for _, p := range parts[1:] {
+		t = unify(t, descType(p))
+	}
+	return t
+}
+
+func descOps(d *staticDesc) (*operationSummary, bool) {
+	if d == nil {
+		return nil, false
+	}
+	switch d.kind {
+	case descNoResult:
+		return nil, false
+	case descRequest:
+		return d.ops, d.ops != nil
+	case descUnion:
+		var out *operationSummary
+		for _, p := range d.parts {
+			op, ok := descOps(p)
+			if !ok {
+				return nil, false
+			}
+			if out == nil {
+				out = op
+			} else {
+				out = unionOperations(out, op)
+			}
+		}
+		return out, out != nil
+	default:
+		return nil, false
+	}
+}
+
+func callableParts(d *staticDesc) ([]*staticDesc, bool) {
+	if d == nil {
+		return nil, false
+	}
+	if d.kind == descCallable {
+		return []*staticDesc{d}, true
+	}
+	if d.kind != descUnion {
+		return nil, false
+	}
+	var out []*staticDesc
+	for _, p := range d.parts {
+		if p.kind != descCallable {
+			return nil, false
+		}
+		out = append(out, p)
+	}
+	return out, len(out) != 0
+}
+
+func instantiateDesc(d *staticDesc, args []*staticDesc, active map[*expression]bool) *staticDesc {
+	if d == nil {
+		return nil
+	}
+	if active == nil {
+		active = map[*expression]bool{}
+	}
+	switch d.kind {
+	case descNoResult:
+		return d
+	case descParam:
+		if d.param >= 0 && d.param < len(args) {
+			return args[d.param]
+		}
+		return nil
+	case descRequest, descPlain:
+		return d
+	case descCallable:
+		if d.fn != nil && active[d.fn] {
+			return d
+		}
+		copy := *d
+		if d.fn != nil {
+			active[d.fn] = true
+		}
+		copy.ret = instantiateDesc(d.ret, args, active)
+		if d.fn != nil {
+			delete(active, d.fn)
+		}
+		return &copy
+	case descObject:
+		copy := *d
+		copy.fields = make(map[string]*staticDesc, len(d.fields))
+		for k, v := range d.fields {
+			copy.fields[k] = instantiateDesc(v, args, active)
+		}
+		copy.rest = instantiateDesc(d.rest, args, active)
+		return &copy
+	case descList:
+		copy := *d
+		copy.slots = make([]*staticDesc, len(d.slots))
+		for i, v := range d.slots {
+			copy.slots[i] = instantiateDesc(v, args, active)
+		}
+		copy.element = instantiateDesc(d.element, args, active)
+		return &copy
+	case descUnion:
+		parts := make([]*staticDesc, 0, len(d.parts))
+		for _, p := range d.parts {
+			parts = append(parts, instantiateDesc(p, args, active))
+		}
+		return unionDesc(parts...)
+	}
+	return nil
+}
+
+func staticIndex(e *expression) (int64, bool) {
+	if e == nil {
+		return 0, false
+	}
+	if e.tag == "lit" && e.value.k == Number && e.value.n == float64(int64(e.value.n)) && e.value.n >= -9007199254740991 && e.value.n <= 9007199254740991 {
+		return int64(e.value.n), true
+	}
+	if e.tag == "unary" && e.name == "-" && e.x != nil && e.x.tag == "lit" && e.x.value.k == Number && e.x.value.n == float64(int64(e.x.value.n)) && e.x.value.n >= 0 && e.x.value.n <= 9007199254740991 {
+		return -int64(e.x.value.n), true
+	}
+	if e.tag == "unary" && e.name == "+" && e.x != nil {
+		return staticIndex(e.x)
+	}
+	return 0, false
+}
+
+func staticSliceValue(e *expression) (Value, bool) {
+	if e == nil {
+		return Value{}, false
+	}
+	if e.tag == "lit" {
+		if e.value.k == Null {
+			return e.value, true
+		}
+		if _, ok := staticIndex(e); ok {
+			return e.value, true
+		}
+		return Value{}, false
+	}
+	if e.tag == "unary" && (e.name == "+" || e.name == "-") && e.x != nil && e.x.tag == "lit" && e.x.value.k == Number && e.x.value.n == float64(int64(e.x.value.n)) && e.x.value.n >= 0 && e.x.value.n <= 9007199254740991 {
+		n := e.x.value.n
+		if e.name == "-" {
+			n = -n
+		}
+		v, err := NumberValue(n)
+		return v, err == nil
+	}
+	return Value{}, false
+}
+
+func projectIndex(d *staticDesc, index *expression, gather bool) *staticDesc {
+	if d == nil {
+		return nil
+	}
+	if d.kind == descUnion {
+		var out []*staticDesc
+		for _, p := range d.parts {
+			out = append(out, projectIndex(p, index, gather))
+		}
+		for _, p := range out {
+			if p == nil {
+				return nil
+			}
+		}
+		return unionDesc(out...)
+	}
+	selector := "any"
+	if index != nil && index.info.typ != "" {
+		selector = normalizeType(index.info.typ)
+	}
+	if selector == "any" && (index == nil || index.tag != "list") {
+		// An any selector may be either a scalar index or a gather list.  The
+		// two normal result shapes cannot be safely collapsed into one source.
+		return nil
+	}
+	if d.kind == descObject {
+		if !typeOverlap(selector, "string") {
+			return noResultDesc()
+		}
+		// A dynamic object key can select any known field and, for an open
+		// object, the unknown rest.  A closed object with no fields has no
+		// statically known normal candidate, so keep it Unknown.
+		var out *staticDesc
+		seen := false
+		for _, field := range d.fields {
+			if !seen {
+				out, seen = field, true
+			} else {
+				out = unionDesc(out, field)
+			}
+		}
+		if d.rest != nil {
+			if !seen {
+				out, seen = d.rest, true
+			} else {
+				out = unionDesc(out, d.rest)
+			}
+		} else if !d.closed {
+			return nil
+		}
+		return out
+	}
+	if d.kind == descList {
+		if !gather && !typeOverlap(selector, "number") {
+			return noResultDesc()
+		}
+		if gather && !typeOverlap(selector, "list") {
+			return noResultDesc()
+		}
+	} else if d.kind == descPlain && d.typ == "string" {
+		if gather || !typeOverlap(selector, "number") {
+			return noResultDesc()
+		}
+		return plainDesc("string")
+	} else if d.kind == descPlain || d.kind == descParam {
+		// Plain list/object values carry no finite shape.  Other known scalar
+		// types have no normal indexing candidate.
+		if d.typ == "any" || d.kind == descParam {
+			return nil
+		}
+		return noResultDesc()
+	} else {
+		return noResultDesc()
+	}
+	if gather {
+		if index == nil || index.tag != "list" {
+			return listDesc(nil, descElement(d))
+		}
+		out := make([]*staticDesc, len(index.elems))
+		if d.slots == nil {
+			if len(index.elems) == 0 {
+				return listDesc([]*staticDesc{}, nil)
+			}
+			return listDesc(nil, descElement(d))
+		}
+		for i, raw := range index.elems {
+			n, ok := staticIndex(raw)
+			if !ok || d.slots == nil {
+				return listDesc(nil, d.element)
+			}
+			if n < 0 {
+				n += int64(len(d.slots))
+			}
+			if n < 0 || n >= int64(len(d.slots)) {
+				return noResultDesc()
+			}
+			out[i] = d.slots[n]
+		}
+		return listDesc(out, unionDesc(out...))
+	}
+	n, ok := staticIndex(index)
+	if !ok {
+		return descElement(d)
+	}
+	if d.slots == nil {
+		return descElement(d)
+	}
+	if n < 0 {
+		n += int64(len(d.slots))
+	}
+	if n < 0 || n >= int64(len(d.slots)) {
+		return noResultDesc()
+	}
+	return d.slots[n]
+}
+
+func projectField(d *staticDesc, name string) *staticDesc {
+	if d == nil {
+		return nil
+	}
+	if d.kind == descUnion {
+		parts := make([]*staticDesc, 0, len(d.parts))
+		for _, p := range d.parts {
+			parts = append(parts, projectField(p, name))
+		}
+		for _, p := range parts {
+			if p == nil {
+				return nil
+			}
+		}
+		return unionDesc(parts...)
+	}
+	if d.kind != descObject {
+		if (d.kind == descPlain || d.kind == descParam) && (d.typ == "any" || d.typ == "object") {
+			return nil
+		}
+		return noResultDesc()
+	}
+	if x, ok := d.fields[name]; ok {
+		return x
+	}
+	if d.rest != nil {
+		return d.rest
+	}
+	if d.closed {
+		return noResultDesc()
+	}
+	return nil
+}
+
+func descElement(d *staticDesc) *staticDesc {
+	if d == nil {
+		return nil
+	}
+	if d.kind == descList {
+		if d.element != nil {
+			return d.element
+		}
+		return unionDesc(d.slots...)
+	}
+	if d.kind == descUnion {
+		parts := make([]*staticDesc, 0, len(d.parts))
+		for _, p := range d.parts {
+			parts = append(parts, descElement(p))
+		}
+		return unionDesc(parts...)
+	}
+	if (d.kind == descPlain || d.kind == descParam) && (d.typ == "any" || d.typ == "list") {
+		return nil
+	}
+	return noResultDesc()
+}
+
+func listProjectionDesc(d *staticDesc, bounds []argument) *staticDesc {
+	if d == nil {
+		return nil
+	}
+	if d.kind == descUnion {
+		parts := make([]*staticDesc, 0, len(d.parts))
+		for _, p := range d.parts {
+			parts = append(parts, listProjectionDesc(p, bounds))
+		}
+		for _, p := range parts {
+			if p == nil {
+				return nil
+			}
+		}
+		return unionDesc(parts...)
+	}
+	if d.kind != descList {
+		if (d.kind == descPlain || d.kind == descParam) && (d.typ == "any" || d.typ == "list") {
+			return listDesc(nil, descElement(d))
+		}
+		return noResultDesc()
+	}
+	if d.slots == nil {
+		return listDesc(nil, descElement(d))
+	}
+	values := make([]Value, len(bounds))
+	for i, b := range bounds {
+		value, ok := staticSliceValue(b.expr)
+		if !ok {
+			return listDesc(nil, descElement(d))
+		}
+		values[i] = value
+	}
+	start, step, count, err := slicePlan(len(d.slots), values)
+	if err != nil {
+		return noResultDesc()
+	}
+	slots := make([]*staticDesc, 0, count)
+	for i := int64(0); i < count; i++ {
+		pos := start + i*step
+		if pos < 0 || pos >= int64(len(d.slots)) {
+			return noResultDesc()
+		}
+		slots = append(slots, d.slots[pos])
+	}
+	var element *staticDesc
+	for _, slot := range slots {
+		if element == nil {
+			element = slot
+		} else {
+			element = unionDesc(element, slot)
+		}
+	}
+	return listDesc(slots, element)
+}
+
 func unionOperations(a, b *operationSummary) *operationSummary {
 	if a == nil || b == nil {
 		return nil
@@ -81,7 +701,8 @@ func resolvedOperations(root *operationSummary) ([]string, bool) {
 }
 
 func pureInfo(typ string) analysis {
-	return analysis{typ: normalizeType(typ), effect: PureEffect, concurrent: true}
+	typ = normalizeType(typ)
+	return analysis{typ: typ, desc: plainDesc(typ), effect: PureEffect, concurrent: true}
 }
 func mergeEffect(a, b analysis) analysis {
 	if b.effect > a.effect {
@@ -106,6 +727,54 @@ func unify(a, b string) string {
 		return unify(b, a)
 	}
 	return "any"
+}
+
+// typeOverlap answers the static question needed at callable boundaries: a
+// mismatch is provable only when the two type sets are disjoint.  Nullable
+// values therefore remain dynamically checked when they may contain the
+// expected non-null value.
+func typeOverlap(actual, expected string) bool {
+	actual, expected = normalizeType(actual), normalizeType(expected)
+	if actual == "any" || expected == "any" {
+		return true
+	}
+	actuals := []string{actual}
+	if strings.HasSuffix(actual, "?") {
+		actuals = []string{"null", strings.TrimSuffix(actual, "?")}
+	}
+	expecteds := []string{expected}
+	if strings.HasSuffix(expected, "?") {
+		expecteds = []string{"null", strings.TrimSuffix(expected, "?")}
+	}
+	for _, a := range actuals {
+		for _, e := range expecteds {
+			if a == e {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func descTypeOverlap(d *staticDesc, expected string) bool {
+	if d == nil {
+		return true
+	}
+	if d.kind == descNoResult {
+		// NoResult is an internal missing-position witness.  At a call
+		// boundary it becomes Unknown, so the eventual selector error keeps
+		// its runtime phase instead of turning into a static E-TYPE.
+		return true
+	}
+	if d.kind == descUnion {
+		for _, p := range d.parts {
+			if descTypeOverlap(p, expected) {
+				return true
+			}
+		}
+		return false
+	}
+	return typeOverlap(descType(d), expected)
 }
 func (c *checker) error(t token, code, msg string) {
 	if c.err == nil {
@@ -168,6 +837,7 @@ func checkFlow(s *syntax, host Host, name string) (*checker, error) {
 	walkBlockExpressions(f.body, func(e *expression) { summary = mergeEffect(summary, e.info) })
 	if f.result != "void" && len(f.body.items) != 0 {
 		summary.ops = f.body.items[len(f.body.items)-1].expr.info.ops
+		summary.desc = f.body.items[len(f.body.items)-1].expr.info.desc
 	}
 	f.summary, f.check = summary, c
 	return c, nil
@@ -269,8 +939,10 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 			flow.bindings[name] = info
 		}
 	}
-	for _, p := range s.params {
-		c.declare(flow, p.name, bindingInfo{info: pureInfo(p.typ)}, p.tok)
+	for i, p := range s.params {
+		info := pureInfo(p.typ)
+		info.desc = paramDesc(i, p.typ)
+		c.declare(flow, p.name, bindingInfo{info: info}, p.tok)
 	}
 	returns := 0
 	for i, stmt := range s.body.items {
@@ -327,7 +999,7 @@ func (c *checker) collectWriters(s *statement, top int) {
 }
 func (c *checker) assignType(t token, actual, expected string) {
 	actual, expected = normalizeType(actual), normalizeType(expected)
-	if actual == "any" || expected == "any" || actual == expected || strings.HasSuffix(expected, "?") && (actual == "null" || actual == strings.TrimSuffix(expected, "?")) {
+	if typeOverlap(actual, expected) {
 		return
 	}
 	c.error(t, "E-TYPE", "expected "+expected+", got "+actual)
@@ -339,8 +1011,18 @@ func (c *checker) function(e *expression, env *scope) analysis {
 	c.local++
 	defer func() { c.local-- }()
 	local := env.child()
-	for _, p := range e.params {
-		c.declare(local, p.name, bindingInfo{info: pureInfo(p.typ)}, p.tok)
+	// Publish a provisional callable before checking the body so forward and
+	// recursive calls can retain the operation fixed-point cell.
+	if e.info.desc == nil {
+		e.info.desc = callableDesc(e, nil)
+	}
+	if e.info.returns == nil {
+		e.info.returns = c.returns[e]
+	}
+	for i, p := range e.params {
+		info := pureInfo(p.typ)
+		info.desc = paramDesc(i, p.typ)
+		c.declare(local, p.name, bindingInfo{info: info}, p.tok)
 	}
 	a := c.localBlock(e.body, local, true, false, 0)
 	c.assignType(e.tok, a.typ, e.typ)
@@ -351,6 +1033,11 @@ func (c *checker) function(e *expression, env *scope) analysis {
 	cell.sources = []*operationSummary{a.ops}
 	e.info = pureInfo("function")
 	e.info.returns = cell
+	retDesc := a.desc
+	if retDesc == nil {
+		retDesc = plainDesc(a.typ)
+	}
+	e.info.desc = callableDesc(e, retDesc)
 	return e.info
 }
 func (c *checker) localBlock(b *block, env *scope, pure, parallel bool, loops int) analysis {
@@ -363,6 +1050,7 @@ func (c *checker) localBlock(b *block, env *scope, pure, parallel bool, loops in
 		a = mergeEffect(a, tail)
 		a.typ = tail.typ
 		a.ops = tail.ops
+		a.desc = tail.desc
 	}
 	if b.exit != nil {
 		a = mergeEffect(a, c.carryExit(b.exit, env, pure, parallel, loops))
@@ -446,7 +1134,9 @@ func (c *checker) statement(s *statement, env *scope, pure, parallel bool, loops
 		}
 		child := env.child()
 		if s.name != "" {
-			c.declare(child, s.name, bindingInfo{info: pureInfo("any")}, s.tok)
+			item := pureInfo("any")
+			item.desc = descElement(a.desc)
+			c.declare(child, s.name, bindingInfo{info: item}, s.tok)
 		}
 		nextLoops := loops + 1
 		if s.parallel {
@@ -529,6 +1219,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 	switch e.tag {
 	case "lit":
 		a.typ = e.value.k.String()
+		a.desc = plainDesc(a.typ)
 	case "id":
 		if store, ok := c.stores[e.name]; ok {
 			if pure {
@@ -557,6 +1248,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		}
 		c.require(e.tok, x, want)
 		a.typ = want
+		a.desc = plainDesc(want)
 	case "binary":
 		x, y := sub(e.x), sub(e.y)
 		switch e.name {
@@ -585,27 +1277,43 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				a.typ = "number"
 			}
 		}
+		a.desc = plainDesc(a.typ)
 	case "list":
+		slots := make([]*staticDesc, 0, len(e.elems))
+		var element *staticDesc
 		for _, x := range e.elems {
 			sub(x)
+			slots = append(slots, x.info.desc)
+			if element == nil {
+				element = x.info.desc
+			} else {
+				element = unionDesc(element, x.info.desc)
+			}
 		}
 		a.typ = "list"
+		a.desc = listDesc(slots, element)
 	case "object":
 		names := map[string]bool{}
+		fields := map[string]*staticDesc{}
 		for _, f := range e.fields {
 			if names[f.name] {
 				c.error(f.tok, "E-DUPLICATE", "duplicate object field")
 			}
 			names[f.name] = true
 			sub(f.expr)
+			fields[f.name] = f.expr.info.desc
 		}
 		a.typ = "object"
+		a.desc = objectDesc(fields, nil, true)
 	case "field", "index":
 		x := sub(e.x)
 		if e.tag == "field" {
 			c.require(e.tok, x, "object")
 		} else if x.typ != "any" && x.typ != "list" && x.typ != "string" && x.typ != "object" {
 			c.error(e.tok, "E-TYPE", "value cannot be indexed")
+		}
+		if e.tag == "field" {
+			a.desc = projectField(x.desc, e.name)
 		}
 		if e.y != nil {
 			y := sub(e.y)
@@ -628,7 +1336,22 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				a.typ = "string"
 			}
 		}
-		a.ops = nil
+		if e.tag == "index" {
+			if x.typ == "string" {
+				// Indexing a string always produces a one-scalar string.  A
+				// dynamic/any receiver must stay unknown rather than looking like
+				// a list projection to callable argument checking.
+				a.desc = plainDesc("string")
+			} else if x.desc != nil && e.y != nil && e.y.tag == "lit" && e.y.value.k == String {
+				a.desc = projectField(x.desc, e.y.value.s)
+			} else if e.y != nil && x.desc != nil {
+				gather := e.y.tag == "list" || e.y.info.typ == "list"
+				a.desc = projectIndex(x.desc, e.y, gather)
+			}
+		}
+		if a.desc != nil {
+			a.ops, _ = descOps(a.desc)
+		}
 	case "native_receiver":
 		a = sub(e.x)
 		a.ops = nil
@@ -642,6 +1365,15 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			c.assignType(arg.expr.tok, y.typ, "number?")
 		}
 		a.typ, a.ops = x.typ, nil
+		if x.typ == "string" {
+			a.desc = plainDesc("string")
+		} else if x.typ == "list" {
+			a.desc = listProjectionDesc(x.desc, e.args)
+		} else {
+			// A slice of an any value may be a list or a string at runtime;
+			// do not manufacture a list descriptor and reject a dynamic call.
+			a.desc = nil
+		}
 	case "fn":
 		return c.function(e, env)
 	case "block":
@@ -658,6 +1390,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		a = mergeEffect(a, x)
 		a.typ = unify(x.typ, y.typ)
 		a.ops = unionOperations(x.ops, y.ops)
+		a.desc = unionDesc(x.desc, y.desc)
 	case "match":
 		sub(e.x)
 		first := true
@@ -673,10 +1406,12 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			x := sub(arm.result)
 			if first {
 				a.typ, a.ops = x.typ, x.ops
+				a.desc = x.desc
 				first = false
 			} else {
 				a.typ = unify(a.typ, x.typ)
 				a.ops = unionOperations(a.ops, x.ops)
+				a.desc = unionDesc(a.desc, x.desc)
 			}
 		}
 	case "proposal":
@@ -684,6 +1419,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		a.typ = "effect"
 		if ok {
 			a.ops = &operationSummary{operation: identityKey(contract.Operation.Wire())}
+			a.desc = requestDesc(a.ops)
 		}
 		for _, arg := range e.args {
 			x := sub(arg.expr)
@@ -720,6 +1456,10 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		a.typ = "any"
 		a.ops = nil
 		ops, known := resolvedOperations(x.ops)
+		if dops, dok := descOps(x.desc); dok {
+			x.ops = dops
+			ops, known = resolvedOperations(dops)
+		}
 		if !known {
 			a.effect = UnknownEffect
 			a.concurrent = false
@@ -741,6 +1481,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		if c.trustedNative {
 			a.effect, a.concurrent = PureEffect, true
 		}
+		a.desc = plainDesc(a.typ)
 	case "pipe":
 		first := sub(e.x)
 		local := env.child()
@@ -762,6 +1503,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		c.voidOK = saved
 		a = mergeEffect(first, stage)
 		a.typ, a.ops = stage.typ, stage.ops
+		a.desc = stage.desc
 	case "flow":
 		a = c.flowCall(e, env, pure, parallel)
 	case "call":
@@ -777,14 +1519,78 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		}
 		callee := sub(e.x)
 		c.require(e.tok, callee, "function")
+		argDescs := make([]*staticDesc, len(e.args))
 		for _, arg := range e.args {
 			sub(arg.expr)
 		}
+		for i := range e.args {
+			argDescs[i] = e.args[i].expr.info.desc
+		}
 		a.ops = callee.returns
 		a.typ = "any"
+		candidateDesc := callee.desc
+		if e.x.tag == "id" {
+			if binding, ok := env.find(e.x.name); ok && binding.fn != nil {
+				if binding.fn.info.desc != nil {
+					candidateDesc = binding.fn.info.desc
+				}
+				if candidateDesc == nil || candidateDesc.kind == descPlain {
+					candidateDesc = callableDesc(binding.fn, nil)
+				}
+			}
+		}
+		if candidates, ok := callableParts(candidateDesc); ok {
+			var returns []*staticDesc
+			failed := make([]int, 0, len(candidates))
+			for _, candidate := range candidates {
+				if candidate.fn != nil {
+					if phase := candidatePhase(candidate.fn, e.args); phase >= 0 {
+						failed = append(failed, phase)
+						continue
+					}
+					ret := candidate.ret
+					if ret == nil {
+						cell := candidate.fn.info.returns
+						if cell == nil {
+							cell = c.returns[candidate.fn]
+						}
+						ret = requestDesc(cell)
+					}
+					returns = append(returns, instantiateDesc(ret, argDescs, nil))
+				}
+			}
+			if len(failed) == 0 && len(returns) == len(candidates) && len(returns) > 0 {
+				a.desc = unionDesc(returns...)
+				if typ := descType(a.desc); typ != "any" {
+					declared := ""
+					if len(candidates) == 1 && candidates[0].fn != nil {
+						declared = normalizeType(candidates[0].fn.typ)
+					}
+					if declared != "any" && !strings.HasPrefix(declared, "any?") && declared != "" {
+						a.typ = typ
+					}
+				}
+				a.ops, _ = descOps(a.desc)
+			} else if len(failed) == len(candidates) && len(failed) > 0 {
+				phase := failed[0]
+				for _, p := range failed[1:] {
+					if p < phase {
+						phase = p
+					}
+				}
+				if phase == 1 {
+					c.error(e.tok, "E-ARITY", "callable candidates reject arguments")
+				} else {
+					c.error(e.tok, "E-TYPE", "callable candidates reject argument types")
+				}
+			}
+		}
 		if e.x.tag == "fn" {
 			c.checkArity(e, "", e.x, env)
 			a.typ = e.x.typ
+			if a.desc == nil {
+				a.desc = e.x.info.desc
+			}
 		}
 		if e.x.tag == "id" {
 			if binding, ok := env.find(e.x.name); ok {
@@ -808,17 +1614,26 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 							a.typ = e.args[0].expr.info.typ
 						}
 					}
+					a.desc = builtinDesc(binding.builtin, e, env)
 				} else if binding.fn != nil {
 					c.checkArity(e, "", binding.fn, env)
 					a.typ = binding.fn.typ
+					if a.desc == nil {
+						a.desc = binding.fn.info.desc
+					}
 				}
 			}
+		}
+		if a.desc != nil {
+			a.ops, _ = descOps(a.desc)
 		}
 	case "comprehension":
 		source := sub(e.y)
 		c.require(e.tok, source, "list")
 		local := env.child()
-		c.declare(local, e.name, bindingInfo{info: pureInfo("any")}, e.tok)
+		item := pureInfo("any")
+		item.desc = descElement(source.desc)
+		c.declare(local, e.name, bindingInfo{info: item}, e.tok)
 		if e.z != nil {
 			g := c.expression(e.z, local, pure, parallel)
 			c.require(e.z.tok, g, "bool")
@@ -829,6 +1644,11 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		}
 		a = mergeEffect(a, c.expression(e.x, local, pure, parallel))
 		a.typ = "list"
+		bodyDesc := a.desc
+		if e.x != nil {
+			bodyDesc = e.x.info.desc
+		}
+		a.desc = listDesc(nil, bodyDesc)
 	case "carry":
 		if e.x != nil {
 			source := sub(e.x)
@@ -845,6 +1665,10 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		c.local--
 		a.typ = "any"
 		a.ops = nil
+		// carry state crosses an unbounded number of iterations; retaining a
+		// private request source here would be unsound.  The runtime result is
+		// still checked normally.
+		a.desc = nil
 	}
 	if parallel && a.effect != PureEffect && (a.effect != ReadOnlyEffect || !a.concurrent) {
 		c.error(e.tok, "E-PARALLEL", "perform is not provably Concurrent ReadOnly")
@@ -900,6 +1724,49 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 						c.assignType(element.tok, element.info.typ, info.fn.params[arity-1].typ)
 					}
 				}
+				// A finite source descriptor supplies one abstract callback
+				// activation even when the runtime list is produced by a core
+				// operation rather than a literal.  Reject only when every known
+				// callback candidate is disjoint; partial unions stay dynamic.
+				callbackDesc := callback.info.desc
+				if callback.tag == "id" {
+					if binding, ok := env.find(callback.name); ok && binding.fn != nil {
+						callbackDesc = binding.fn.info.desc
+						if callbackDesc == nil {
+							callbackDesc = callableDesc(binding.fn, nil)
+						}
+					}
+				}
+				if candidates, ok := callableParts(callbackDesc); ok {
+					item := descElement(e.args[0].expr.info.desc)
+					if item != nil && item.kind != descNoResult {
+						abstract := make([]argument, arity)
+						if builtin == "fold" {
+							abstract[0] = argument{expr: &expression{info: analysis{typ: descType(e.args[1].expr.info.desc), desc: e.args[1].expr.info.desc}}}
+							abstract[1] = argument{expr: &expression{info: analysis{typ: descType(item), desc: item}}}
+						} else {
+							abstract[0] = argument{expr: &expression{info: analysis{typ: descType(item), desc: item}}}
+						}
+						failed := 0
+						best := 3
+						for _, candidate := range candidates {
+							phase := candidatePhase(candidate.fn, abstract)
+							if phase >= 0 {
+								failed++
+								if phase < best {
+									best = phase
+								}
+							}
+						}
+						if failed == len(candidates) {
+							if best == 1 {
+								c.error(callback.tok, "E-ARITY", "callback candidates reject arguments")
+							} else {
+								c.error(callback.tok, "E-TYPE", "callback candidates reject argument types")
+							}
+						}
+					}
+				}
 			}
 		}
 		return
@@ -916,6 +1783,10 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 			name = f.params[next].name
 			next++
 		}
+		if seen[name] {
+			c.error(e.tok, "E-ARITY", "unknown/duplicate parameter")
+			continue
+		}
 		found := false
 		for _, p := range f.params {
 			if p.name == name {
@@ -923,7 +1794,7 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 				c.assignType(arg.expr.tok, arg.expr.info.typ, p.typ)
 			}
 		}
-		if !found || seen[name] {
+		if !found {
 			c.error(e.tok, "E-ARITY", "unknown/duplicate parameter")
 		}
 		seen[name] = true
@@ -931,6 +1802,250 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 	if len(seen) != len(f.params) {
 		c.error(e.tok, "E-ARITY", "missing arguments")
 	}
+}
+
+// candidatePhase performs only proofs available from finite descriptions.  A
+// partially compatible callable union remains dynamic/Unknown; all-candidate
+// failure is rejected at the earliest callable-boundary phase.
+func candidatePhase(f *expression, args []argument) int {
+	if f == nil {
+		return 0
+	}
+	seen := map[string]bool{}
+	next := 0
+	for _, arg := range args {
+		name := arg.name
+		if name == "" {
+			if next >= len(f.params) {
+				return 1
+			}
+			name = f.params[next].name
+			next++
+		}
+		if seen[name] {
+			return 1
+		}
+		found := false
+		for _, p := range f.params {
+			if p.name == name {
+				found = true
+				seen[name] = true
+				expected := normalizeType(p.typ)
+				if !descTypeOverlap(arg.expr.info.desc, expected) {
+					return 2
+				}
+				break
+			}
+		}
+		if !found {
+			return 1
+		}
+	}
+	if len(seen) != len(f.params) {
+		return 1
+	}
+	return -1
+}
+
+func concatDesc(left, right *staticDesc) *staticDesc {
+	if left == nil || right == nil {
+		return nil
+	}
+	if left.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, l := range left.parts {
+			r := concatDesc(l, right)
+			if !seen {
+				out, seen = r, true
+			} else {
+				out = unionDesc(out, r)
+			}
+		}
+		return out
+	}
+	if right.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, r := range right.parts {
+			v := concatDesc(left, r)
+			if !seen {
+				out, seen = v, true
+			} else {
+				out = unionDesc(out, v)
+			}
+		}
+		return out
+	}
+	if left.kind != descList || right.kind != descList {
+		if (left.kind == descPlain || left.kind == descParam) && (left.typ == "any" || left.typ == "list") || (right.kind == descPlain || right.kind == descParam) && (right.typ == "any" || right.typ == "list") {
+			return listDesc(nil, nil)
+		}
+		return noResultDesc()
+	}
+	var slots []*staticDesc
+	if left.slots != nil && right.slots != nil {
+		slots = append(append([]*staticDesc(nil), left.slots...), right.slots...)
+	}
+	return listDesc(slots, unionDesc(left.element, right.element))
+}
+
+func mapDesc(source, callback *staticDesc) *staticDesc {
+	if source == nil {
+		return nil
+	}
+	if source.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, part := range source.parts {
+			v := mapDesc(part, callback)
+			if !seen {
+				out, seen = v, true
+			} else {
+				out = unionDesc(out, v)
+			}
+		}
+		return out
+	}
+	if source.kind != descList {
+		if (source.kind == descPlain || source.kind == descParam) && (source.typ == "any" || source.typ == "list") {
+			return nil
+		}
+		return noResultDesc()
+	}
+	if source.slots != nil && len(source.slots) == 0 {
+		return listDesc([]*staticDesc{}, nil)
+	}
+	item := descElement(source)
+	if item == nil || item.kind == descNoResult {
+		return nil
+	}
+	candidates, ok := callableParts(callback)
+	if !ok {
+		return nil
+	}
+	// A map callback is invoked with one abstract source element.  Preserve a
+	// result description only when every finite callback candidate accepts that
+	// activation; a partial mismatch is a dynamic target and must not be used
+	// to admit a request hidden in one candidate.
+	abstract := argument{expr: &expression{info: analysis{typ: descType(item), desc: item}}}
+	var ret *staticDesc
+	for _, candidate := range candidates {
+		if candidate.fn == nil || candidatePhase(candidate.fn, []argument{abstract}) >= 0 {
+			return nil
+		}
+		if candidate.ret == nil {
+			return nil
+		}
+		one := instantiateDesc(candidate.ret, []*staticDesc{item}, nil)
+		if ret == nil {
+			ret = one
+		} else {
+			ret = unionDesc(ret, one)
+		}
+	}
+	return listDesc(nil, ret)
+}
+
+func putDesc(base *staticDesc, key *expression, value *staticDesc) *staticDesc {
+	if base == nil {
+		return nil
+	}
+	if base.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, part := range base.parts {
+			v := putDesc(part, key, value)
+			if !seen {
+				out, seen = v, true
+			} else {
+				out = unionDesc(out, v)
+			}
+		}
+		return out
+	}
+	if base.kind != descObject {
+		if (base.kind == descPlain || base.kind == descParam) && (base.typ == "any" || base.typ == "object") {
+			if key != nil && key.tag == "lit" && key.value.k == String {
+				return objectDesc(map[string]*staticDesc{key.value.s: value}, nil, false)
+			}
+			return objectDesc(nil, nil, false)
+		}
+		return noResultDesc()
+	}
+	fields := make(map[string]*staticDesc, len(base.fields)+1)
+	for k, v := range base.fields {
+		fields[k] = v
+	}
+	if key != nil && key.tag == "lit" && key.value.k == String {
+		fields[key.value.s] = value
+		return objectDesc(fields, base.rest, base.closed && base.rest == nil)
+	}
+	for k, old := range fields {
+		fields[k] = unionDesc(old, value)
+	}
+	rest := unionDesc(base.rest, value)
+	if base.closed && base.rest == nil {
+		rest = value
+	}
+	return objectDesc(fields, rest, false)
+}
+
+func builtinDesc(name string, e *expression, env *scope) *staticDesc {
+	switch name {
+	case "map":
+		if len(e.args) != 2 {
+			return nil
+		}
+		callback := e.args[1].expr.info.desc
+		if e.args[1].expr.tag == "id" && env != nil {
+			if binding, ok := env.find(e.args[1].expr.name); ok && binding.fn != nil {
+				callback = binding.fn.info.desc
+				if callback == nil {
+					callback = callableDesc(binding.fn, nil)
+				}
+			}
+		}
+		return mapDesc(e.args[0].expr.info.desc, callback)
+	case "concat":
+		if len(e.args) != 2 {
+			return nil
+		}
+		return concatDesc(e.args[0].expr.info.desc, e.args[1].expr.info.desc)
+	case "slice":
+		if len(e.args) != 3 && len(e.args) != 4 {
+			return nil
+		}
+		bounds := e.args[1:]
+		if len(bounds) == 2 {
+			// The three-argument core form omits step; represent that omission as
+			// the same null bound used by bracket slicing.
+			bounds = append(append([]argument(nil), bounds...), argument{expr: &expression{tag: "lit", value: NullValue()}})
+		}
+		return listProjectionDesc(e.args[0].expr.info.desc, bounds)
+	case "put":
+		if len(e.args) != 3 {
+			return nil
+		}
+		return putDesc(e.args[0].expr.info.desc, e.args[1].expr, e.args[2].expr.info.desc)
+	case "range":
+		return listDesc(nil, plainDesc("number"))
+	case "keys", "split":
+		return listDesc(nil, plainDesc("string"))
+	case "len", "parse_number":
+		return plainDesc("number")
+	case "str":
+		return plainDesc("string")
+	case "has":
+		return plainDesc("bool")
+	case "print", "log", "telemetry":
+		return plainDesc("null")
+	case "fail":
+		// fail has no normal return; keep its static result unconstrained so a
+		// branch that is never selected does not reject the surrounding type.
+		return plainDesc("any")
+	}
+	return nil
 }
 
 func (c *checker) builtinTypes(e *expression, name string) {
@@ -983,7 +2098,7 @@ func (c *checker) contractArguments(e *expression, contract Contract) {
 		}
 		assigned[index] = true
 		actual, expected := arg.expr.info.typ, normalizeType(contract.Params[index].Schema.Type)
-		if actual != "any" && expected != "any" && actual != expected && !(strings.HasSuffix(expected, "?") && (actual == "null" || actual == strings.TrimSuffix(expected, "?"))) {
+		if !typeOverlap(actual, expected) {
 			c.error(arg.expr.tok, "E-SCHEMA", "operation argument schema mismatch")
 		}
 	}
@@ -1022,6 +2137,17 @@ func (c *checker) flowCall(e *expression, env *scope, pure, parallel bool) analy
 	a := mergeEffect(f.summary, arguments)
 	a.typ = f.result
 	a.hasFlow = true
+	args := make([]*staticDesc, len(e.args))
+	for i := range e.args {
+		args[i] = e.args[i].expr.info.desc
+	}
+	a.desc = instantiateDesc(f.summary.desc, args, nil)
+	if a.desc != nil {
+		if typ := descType(a.desc); typ != "any" && !strings.HasPrefix(normalizeType(f.result), "any?") {
+			a.typ = typ
+		}
+		a.ops, _ = descOps(a.desc)
+	}
 	return a
 }
 func contractValues(contracts map[string]Contract) []Contract {

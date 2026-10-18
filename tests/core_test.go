@@ -478,6 +478,139 @@ func TestPureOperations(t *testing.T) {
 		})
 	}
 }
+
+func TestStaticDescriptionCompositionBoundaries(t *testing.T) {
+	read, _ := NumberValue(7)
+	host := Host{Contracts: []Contract{{
+		Operation:  Operation{Language: "host", Path: "worker", Member: "read"},
+		Version:    "1",
+		Result:     Schema{Type: "number"},
+		Effect:     ReadOnlyEffect,
+		Concurrent: true,
+		Invoke: func(context.Context, Request) Response {
+			return Result(read)
+		},
+	}}}
+	// The invalid branch is a known missing position.  It must be discarded
+	// from the union, leaving the valid request eligible for parallel ReadOnly.
+	p, err := Compile(`import host "worker"
+flow Main()->number {
+ facts=claim()
+ for x in [1] parallel {
+  p=if true { [effect worker.read()][0] } else { [effect worker.read()][99] }
+  value=perform p
+  facts <+ value
+ }
+ return len([row.value for row in facts])
+}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report, err := p.Run(context.Background(), nil, Options{Parallelism: 2}); err != nil || num(report.Output) != 1 {
+		t.Fatalf("valid projection union: report=%+v err=%v", report, err)
+	}
+
+	// A map result has unknown length.  concat must not inherit the known
+	// prefix slots from its left operand: the unknown suffix may put a plain
+	// number at index zero, so the perform must remain behind an Unknown
+	// barrier.
+	_, err = Compile(`import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+  p=concat([effect worker.read()],map([1],fn(x:number)->number{x}))[0]
+  perform p
+ }
+}`, host)
+	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+		t.Fatalf("unknown concat length was admitted: err=%v", err)
+	}
+	if _, err := Compile(`import host "worker"
+flow Main(index:any)->void {
+ for x in [1] parallel {
+  value=perform [effect worker.read()][index]
+ }
+}`, host); err == nil {
+		t.Fatal("any index was treated as a scalar request projection")
+	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+		t.Fatalf("any index diagnostic: %v", err)
+	}
+	if p, err := Compile(`import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+  base=if true {{a:effect worker.read()}} else {{a:1}}
+  value=perform put(base,"a",effect worker.read()).a
+ }
+}`, host); err != nil {
+		t.Fatalf("union object put lost the valid candidate: %v", err)
+	} else if _, err := p.Run(context.Background(), nil, Options{Parallelism: 2}); err != nil {
+		t.Fatalf("union object put runtime: %v", err)
+	}
+
+	// A nullable abstract argument overlaps a non-null parameter.  The call is
+	// accepted for dynamic checking, while the selected null branch still
+	// raises the ordinary runtime type error.
+	p, err = Compile(`fn need(x:number)->number{x}
+flow Main()->number{return need(if true {1}else{null})}`, Host{})
+	if err != nil {
+		t.Fatalf("nullable overlap was rejected statically: %v", err)
+	}
+	if report, err := p.Run(context.Background(), nil, Options{}); err != nil || num(report.Output) != 1 {
+		t.Fatalf("nullable overlap success: report=%+v err=%v", report, err)
+	}
+	p, err = Compile(`fn need(x:number)->number{x}
+flow Main()->number{return need(if false {1}else{null})}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), nil, Options{}); err == nil {
+		t.Fatal("nullable argument bypassed runtime parameter check")
+	}
+	p, err = Compile(`fn need(x:number)->number{x}
+flow Main()->number{return need([1][9])}`, Host{})
+	if err != nil {
+		t.Fatalf("missing projection became a static type error: %v", err)
+	}
+	if runErr := func() error { _, runErr := p.Run(context.Background(), nil, Options{}); return runErr }(); runErr == nil {
+		t.Fatal("missing projection did not fail at runtime")
+	} else if d, ok := runErr.(*Diagnostic); !ok || d.Code != "E-INDEX" {
+		t.Fatalf("missing projection phase: %v", runErr)
+	}
+	if _, err := Compile(`flow Main()->list{return map(range(3),fn(x:string)->string{x})}`, Host{}); err == nil {
+		t.Fatal("known core list element type did not reject an incompatible map callback")
+	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-TYPE" {
+		t.Fatalf("map callback diagnostic: %v", err)
+	}
+	// The three-argument core slice form has the same static propagation as
+	// bracket slicing with an omitted step.
+	if p, err := Compile(`import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+  p=slice([effect worker.read()],0,1)[0]
+  perform p
+ }
+}`, host); err != nil {
+		t.Fatalf("three-argument slice lost request provenance: %v", err)
+	} else if _, err := p.Run(context.Background(), nil, Options{Parallelism: 2}); err != nil {
+		t.Fatalf("three-argument slice runtime: %v", err)
+	}
+	// A callback union with one incompatible candidate remains dynamic even if
+	// every candidate happens to return the same known request.
+	if _, err := Compile(`import host "worker"
+fn numeric(x:number)->effect {effect worker.read()}
+fn textual(x:string)->effect {effect worker.read()}
+flow Main()->void {
+ callback=if true {numeric} else {textual}
+ for x in [1] parallel {
+  p=map([1],callback)[0]
+  perform p
+ }
+}`, host); err == nil {
+		t.Fatal("partially incompatible map callback was admitted to parallel")
+	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
+		t.Fatalf("partial map callback diagnostic: %v", err)
+	}
+}
+
 func TestNumericAndEncodingVectors(t *testing.T) {
 	for _, tt := range []struct{ a, b, q, r float64 }{{-5, 3, -2, 1}, {5, -3, -2, -1}, {1, .1, 9, math.Float64frombits(0x3fb9999999999996)}, {-1e-17, 1, -1, math.Nextafter(1, 0)}, {1e-17, -1, -1, math.Nextafter(-1, 0)}, {math.SmallestNonzeroFloat64, 1, 0, math.SmallestNonzeroFloat64}} {
 		report := runSource(t, "flow Main()->object { return {q:("+formatNumber(tt.a)+")//("+formatNumber(tt.b)+"), r:("+formatNumber(tt.a)+")%("+formatNumber(tt.b)+")} }", Host{}, Options{})
@@ -657,10 +790,14 @@ func TestStaticDiagnostics(t *testing.T) {
 		{`flow Main()->list { facts=claim(); facts <+ facts; return facts }`, "E-CLAIM-ORDER"},
 		{`flow Main()->list { facts=claim(); f=fn()->list{facts}; return facts }`, "E-PURITY"},
 		{`import python "example.worker" as worker
-flow Main()->void { for x in [0] parallel { p=[effect worker.read(x)]; q=p[0]; out=perform q } }`, "E-PARALLEL"},
+		flow Main()->void { for x in [0] parallel { p=[effect worker.read(x)]; q=p[0]; out=perform q } }`, "E-PARALLEL"},
 	}
 	for _, tt := range cases {
-		_, e := Compile(tt.source, testHost(func(context.Context, Request) Response { return Result(number(0)) }))
+		host := testHost(func(context.Context, Request) Response { return Result(number(0)) })
+		if tt.code == "E-PARALLEL" {
+			host.Contracts[0].Concurrent = false
+		}
+		_, e := Compile(tt.source, host)
 		if e == nil || !strings.Contains(e.Error(), tt.code) {
 			t.Fatalf("%s: %v", tt.code, e)
 		}
@@ -1099,8 +1236,13 @@ flow Main()->any{return [0][fail("stop"):perform effect w.read(1):perform effect
 	}
 	for _, expr := range []string{`[p][::-1][0]`, `[p][[0]][0]`, `slice([p],null,null,-1)[0]`} {
 		source = `import python "example.worker" as w;flow Main()->void {p=effect w.read(1);q=` + expr + `;for x in [0] parallel {perform q}}`
-		if _, err = Compile(source, host); err == nil || err.(*Diagnostic).Code != "E-PARALLEL" || len(calls) != 0 {
-			t.Fatal("projection strengthened Ops", expr, err, calls)
+		before := len(calls)
+		p, compileErr := Compile(source, host)
+		if compileErr != nil {
+			t.Fatal("known read projection rejected", expr, compileErr)
+		}
+		if _, err = p.Run(context.Background(), nil, Options{Parallelism: 2}); err != nil || len(calls) != before+1 {
+			t.Fatal("known read projection did not run", expr, err, calls)
 		}
 	}
 }
@@ -1278,7 +1420,7 @@ func TestFlowValueDataAndSnapshotBoundaries(t *testing.T) {
 		{"host_nested_data", `flow Box()->object{return {f:fn()->number{1}}} flow Main()->number{box=Box();return perform effect boundary.take(box)}`, "E-SCHEMA"},
 		{"claim_data", `flow Box()->object{return {f:fn()->number{1}}} flow Main()->list{facts=claim();box=Box();facts <+ box;return facts}`, "E-SCHEMA"},
 		{"parameter_annotation", `fn hidden()->any{"wrong"} flow Need(f:function)->number{perform effect boundary.take({});return f()} flow Main()->number{return Need(hidden())}`, "E-SCHEMA"},
-		{"return_annotation", `fn hidden()->any{fn()->number{1}} flow Wrong()->number{return hidden()} flow Main()->number{return Wrong()}`, "E-SCHEMA"},
+		{"return_annotation", `fn hidden()->any{fn()->number{1}} flow Wrong()->number{return hidden()} flow Main()->number{return Wrong()}`, "E-TYPE"},
 		{"snapshot_instance", `flow Snapshot()->effect{facts=claim();facts <+ 1;complete=facts;return {len(complete);effect claim.snapshot("facts")}} flow Use(p:effect)->any{return perform p} flow Main()->any{return Use(Snapshot())}`, "E-RESOURCE"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

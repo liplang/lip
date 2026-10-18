@@ -645,7 +645,7 @@ func cloneSessionFlow(f *flowDecl) *flowDecl {
 	return &out
 }
 
-const sessionHelp = `LIP 1.0 interactive help
+const sessionHelp = `LIP 1.2 interactive help
 Enter LIP expressions, statements, fn/Flow declarations, static Data, exports, and imports.
 Lists support a[-1], a[[2,0,-1]], and a[start:stop:step]; a[::-1] reverses a list.
 Strings support scalar indices and slices by Unicode scalar; slice bounds clip and step cannot be zero.
