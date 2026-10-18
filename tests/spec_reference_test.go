@@ -19,7 +19,7 @@ import (
 // Execute the algorithm printed in the spec, independently of script/values.go,
 // so edits to the reference cannot silently disagree with its bit-vector table.
 func TestSpecNumericReference(t *testing.T) {
-	for _, edition := range []string{"LIP-1.0-SPEC.md", "LIP-1.0-SPEC.en.md", "LIP-1.1-SPEC.md", "LIP-1.1-SPEC.en.md"} {
+	for _, edition := range []string{"LIP-1.0-SPEC.md", "LIP-1.0-SPEC.en.md", "LIP-1.1-SPEC.md", "LIP-1.1-SPEC.en.md", "LIP-1.2-SPEC.md", "LIP-1.2-SPEC.en.md"} {
 		t.Run(edition, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
@@ -165,8 +165,6 @@ func TestDocumentationConsistency(t *testing.T) {
 			}
 		}
 	}
-	zh := read(filepath.Join(root, "spec/LIP-1.1-SPEC.md"))
-	en := read(filepath.Join(root, "spec/LIP-1.1-SPEC.en.md"))
 	sections := regexp.MustCompile(`(?m)^#{2,3}\s+(\d+(?:\.\d+)?)\.`)
 	sectionIDs := func(text string) []string {
 		var ids []string
@@ -175,8 +173,12 @@ func TestDocumentationConsistency(t *testing.T) {
 		}
 		return ids
 	}
-	if !reflect.DeepEqual(sectionIDs(zh), sectionIDs(en)) {
-		t.Error("specification section numbers differ between editions")
+	for _, version := range []string{"1.1", "1.2"} {
+		zh := read(filepath.Join(root, "spec/LIP-"+version+"-SPEC.md"))
+		en := read(filepath.Join(root, "spec/LIP-"+version+"-SPEC.en.md"))
+		if !reflect.DeepEqual(sectionIDs(zh), sectionIDs(en)) {
+			t.Errorf("%s specification section numbers differ between editions", version)
+		}
 	}
 	// Evidence tables must continue to point to tests that actually exist.
 	testFiles, err := filepath.Glob("*_test.go")
@@ -199,6 +201,270 @@ func TestDocumentationConsistency(t *testing.T) {
 					t.Errorf("%s: missing evidence Test%s", path, match[1])
 				}
 			}
+		}
+	}
+}
+
+// The current edition must retain the whole language and its appendices when
+// new rules are integrated, rather than becoming a supplement to an old spec.
+func TestSpec12Standalone(t *testing.T) {
+	sections := regexp.MustCompile(`(?m)^#{2,3}\s+(\d+(?:\.\d+)?)\.`)
+	oldSpec := regexp.MustCompile(`LIP-1\.[01]-SPEC`)
+	for _, edition := range []string{"LIP-1.2-SPEC.md", "LIP-1.2-SPEC.en.md"} {
+		t.Run(edition, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "spec", edition))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if oldSpec.Match(data) {
+				t.Error("1.2 must not delegate language rules to an earlier specification")
+			}
+			seen := map[string]bool{}
+			for _, match := range sections.FindAllSubmatch(data, -1) {
+				id := string(match[1])
+				if seen[id] {
+					t.Errorf("duplicate specification section %s", id)
+				}
+				seen[id] = true
+			}
+			for i := 0; i <= 17; i++ {
+				if !seen[fmt.Sprint(i)] {
+					t.Errorf("missing complete-language section %d", i)
+				}
+			}
+			for _, id := range []string{"5.1", "5.2", "5.3", "10.4", "10.5", "15.1", "15.2", "16.5", "16.7", "16.8"} {
+				if !seen[id] {
+					t.Errorf("missing required integrated section %s", id)
+				}
+			}
+		})
+	}
+	directions, err := filepath.Glob(filepath.Join("..", "spec", "LIP-1.2-DIRECTION*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directions) != 0 {
+		t.Errorf("1.2 rules belong in the complete specification, found %v", directions)
+	}
+}
+
+// TestSpec12CompositionModel exercises the finite algebra that the 1.2
+// composition vectors describe. It deliberately does not import script/ so a
+// checker or evaluator change cannot make this independent semantic check pass
+// by sharing the same implementation.
+func TestSpec12CompositionModel(t *testing.T) {
+	type requestSet struct {
+		unknown bool
+		known   []string
+	}
+	union := func(parts ...requestSet) requestSet {
+		seen := map[string]bool{}
+		out := requestSet{}
+		for _, part := range parts {
+			out.unknown = out.unknown || part.unknown
+			for _, id := range part.known {
+				seen[id] = true
+			}
+		}
+		for id := range seen {
+			out.known = append(out.known, id)
+		}
+		sort.Strings(out.known)
+		return out
+	}
+
+	r := requestSet{known: []string{"read"}}
+	w := requestSet{known: []string{"write"}}
+	u := requestSet{unknown: true, known: []string{"bridge.read"}}
+	want := requestSet{unknown: true, known: []string{"bridge.read", "read", "write"}}
+	for _, parts := range [][]requestSet{
+		{r, w, u}, {u, r, w}, {w, u, r}, {w, r, u},
+	} {
+		if got := union(parts...); !reflect.DeepEqual(got, want) {
+			t.Fatalf("union order changed result: got %#v want %#v", got, want)
+		}
+	}
+	if got := union(r, union(w, u)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("union reassociation changed result: got %#v want %#v", got, want)
+	}
+	if got := union(r, r); !reflect.DeepEqual(got, r) {
+		t.Fatalf("union idempotence failed: got %#v want %#v", got, r)
+	}
+
+	// A gather is all-or-nothing for each candidate. In particular [0, 9]
+	// cannot turn an invalid projection into a partial [r] result.
+	gather := func(slots []string, indices []int) ([]string, bool) {
+		out := make([]string, 0, len(indices))
+		for _, raw := range indices {
+			i := raw
+			if i < 0 {
+				i += len(slots)
+			}
+			if i < 0 || i >= len(slots) {
+				return nil, false
+			}
+			out = append(out, slots[i])
+		}
+		return out, true
+	}
+	if got, ok := gather([]string{"r"}, []int{0, 9}); ok || got != nil {
+		t.Fatalf("invalid gather returned a partial projection: got %#v ok=%v", got, ok)
+	}
+	if got, ok := gather([]string{"w", "r"}, []int{1, -1, 1}); !ok || !reflect.DeepEqual(got, []string{"r", "r", "r"}) {
+		t.Fatalf("valid gather lost order/duplicates: got %#v ok=%v", got, ok)
+	}
+
+	// Callee and argument alternatives are independent. Zipping the two
+	// slices would incorrectly discard the cross combinations.
+	calleeKinds := []string{"number", "string"}
+	argKinds := []string{"number", "string"}
+	compatible := 0
+	for _, callee := range calleeKinds {
+		for _, arg := range argKinds {
+			if callee == arg {
+				compatible++
+			}
+		}
+	}
+	if compatible != 2 {
+		t.Fatalf("callee/argument alternatives were zipped: compatible=%d", compatible)
+	}
+
+	// All-candidate failure chooses the earliest validation phase, not the
+	// first candidate's error or the order in which a cache was visited.
+	type phase int
+	const (
+		callable phase = iota
+		arity
+		parameterType
+	)
+	choose := func(phases ...phase) phase {
+		best := parameterType
+		for _, p := range phases {
+			if p < best {
+				best = p
+			}
+		}
+		return best
+	}
+	if got := choose(parameterType, arity); got != arity {
+		t.Fatalf("call-boundary phase ordering failed: got %v", got)
+	}
+	if got := choose(arity, callable); got != callable {
+		t.Fatalf("callable phase did not precede arity: got %v", got)
+	}
+
+	// Least fixed points are independent of declaration/visit order.
+	solve := func(order []string) map[string]map[string]bool {
+		direct := map[string]map[string]bool{
+			"readBase": {"read": true},
+			"ring":     {},
+		}
+		deps := map[string][]string{
+			"readBase": {"readBase"},
+			"ring":     {"ring"},
+		}
+		sets := map[string]map[string]bool{"readBase": {}, "ring": {}}
+		for round := 0; round < 32; round++ {
+			changed := false
+			for _, name := range order {
+				before := len(sets[name])
+				for id := range direct[name] {
+					sets[name][id] = true
+				}
+				for _, dep := range deps[name] {
+					for id := range sets[dep] {
+						sets[name][id] = true
+					}
+				}
+				changed = changed || len(sets[name]) != before
+			}
+			if !changed {
+				break
+			}
+		}
+		return sets
+	}
+	forward := solve([]string{"readBase", "ring"})
+	reverse := solve([]string{"ring", "readBase"})
+	if !reflect.DeepEqual(forward, reverse) || !reflect.DeepEqual(forward["readBase"], map[string]bool{"read": true}) || len(forward["ring"]) != 0 {
+		t.Fatalf("fixed point depends on visit order: forward=%#v reverse=%#v", forward, reverse)
+	}
+
+	// Claim join is idempotent by complete identity, while a changed value
+	// under one identity is a conflict and equal values under new identities
+	// remain separate facts.
+	type atom struct{ id, value string }
+	store := map[string]string{}
+	join := func(a atom) (conflict bool) {
+		if old, ok := store[a.id]; ok {
+			return old != a.value
+		}
+		store[a.id] = a.value
+		return false
+	}
+	if join(atom{"j1", "v"}) || join(atom{"j1", "v"}) || join(atom{"j2", "v"}) || len(store) != 2 {
+		t.Fatalf("claim idempotence/distinct identity failed: %#v", store)
+	}
+	if !join(atom{"j1", "changed"}) || len(store) != 2 {
+		t.Fatalf("claim identity conflict was not retained: %#v", store)
+	}
+
+	// Stable ErrorKey ordering is structural, not completion order.
+	type pair struct{ a, b int }
+	type key struct {
+		pos  []pair
+		path []pair
+		site int
+	}
+	less := func(a, b key) bool {
+		cmp := func(x, y []pair) int {
+			for i := 0; i < len(x) && i < len(y); i++ {
+				if x[i].a != y[i].a {
+					if x[i].a < y[i].a {
+						return -1
+					}
+					return 1
+				}
+				if x[i].b != y[i].b {
+					if x[i].b < y[i].b {
+						return -1
+					}
+					return 1
+				}
+			}
+			if len(x) < len(y) {
+				return -1
+			}
+			if len(x) > len(y) {
+				return 1
+			}
+			return 0
+		}
+		if c := cmp(a.pos, b.pos); c != 0 {
+			return c < 0
+		}
+		if c := cmp(a.path, b.path); c != 0 {
+			return c < 0
+		}
+		return a.site < b.site
+	}
+	early := key{pos: []pair{{2, 0}}, site: 50}
+	late := key{pos: []pair{{8, 0}}, site: 10}
+	if !less(early, late) || less(late, early) {
+		t.Fatalf("ErrorKey did not follow structural position: early=%#v late=%#v", early, late)
+	}
+}
+
+func TestSpec12CompositionSectionPresent(t *testing.T) {
+	for _, edition := range []string{"spec/LIP-1.2-SPEC.md", "spec/LIP-1.2-SPEC.en.md"} {
+		data, err := os.ReadFile(filepath.Join("..", edition))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "16.9") || !strings.Contains(text, "provider") || !strings.Contains(text, "After") || !strings.Contains(text, "Claim") {
+			t.Fatalf("%s lacks the integrated composition closure vectors", edition)
 		}
 	}
 }

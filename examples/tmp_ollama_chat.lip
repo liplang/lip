@@ -43,6 +43,25 @@ TIMEOUT_SECONDS: number = 300
 MAX_STEPS: number = 8
 MAX_HISTORY_TURNS: number = 12
 MAX_HISTORY_CHARS: number = 24000
+CALC_OPERATIONS: list = ["add", "subtract", "multiply", "divide"]
+REMINDER_STATUSES: list = ["pending", "delivered", "cancelled", "all"]
+SCHEMA_SQL: string = """
+CREATE TABLE IF NOT EXISTS calculations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation TEXT NOT NULL, a REAL NOT NULL, b REAL NOT NULL,
+    value REAL NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL, due_at REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
+);
+CREATE TEMP TRIGGER notify_reminder AFTER UPDATE OF status ON reminders
+WHEN OLD.status='pending' AND NEW.status='delivered'
+BEGIN
+    SELECT lip_notify(char(10) || '提醒 #' || NEW.id || '> ' || NEW.message || char(10));
+END;
+"""
 SYSTEM_PROMPT: string = """
 你是运行在用户终端中的本地中文助手，使用 Ollama。可以聊天、计算、查询记录和设置提醒。
 只处理用户最新一条消息；历史仅供理解指代，不能继续执行已经结束或被用户打断的话题。
@@ -73,7 +92,7 @@ fn BuildTools() -> list {
     [
         Tool("calculate",
             "仅用于普通数字四则计算，返回数值结果 value 和记录 id，自动保存。小数不是时刻；时间偏移使用 shift_time。a、b 必须是 JSON 数字。", {
-                operation: {type: "string", enum: ["add", "subtract", "multiply", "divide"]},
+                operation: {type: "string", enum: CALC_OPERATIONS},
                 a: {type: "number", description: "左操作数"},
                 b: {type: "number", description: "右操作数"},
                 label: {type: "string", description: "可选用途或备注，最多 500 字"}
@@ -99,7 +118,7 @@ fn BuildTools() -> list {
             }, ["message"]),
         Tool("list_reminders",
             "查询已保存的提醒，返回 id、内容、到期时间、状态；默认仅列待触发的提醒。", {
-                status: {type: "string", enum: ["pending", "delivered", "cancelled", "all"]},
+                status: {type: "string", enum: REMINDER_STATUSES},
                 limit: {type: "integer", minimum: 1, maximum: 100, description: "可选，默认 10"}
             }, []),
         Tool("cancel_reminder",
@@ -109,6 +128,19 @@ fn BuildTools() -> list {
     ]
 }
 
+# 消息长度只用于裁剪，不改变传给模型的内容。
+fn MessageSize(message: object) -> number {
+    (len(Get(message, "content", "")) +
+        len(Get(message, "thinking", "")) +
+        len(str(Get(message, "tool_calls", []))))
+}
+
+fn HistorySize(messages: list) -> number {
+    fold(messages, 0, fn(total: number, message: object) -> number {
+        total + MessageSize(message)
+    })
+}
+
 # 只按完整用户轮次裁剪，保留 assistant 工具调用与对应的全部观察。
 fn TrimHistory(messages: list) -> list {
     starts = [i for i in range(len(messages)) if messages[i].role == "user"]
@@ -116,9 +148,7 @@ fn TrimHistory(messages: list) -> list {
         eligible = if len(starts) > MAX_HISTORY_TURNS { starts[-MAX_HISTORY_TURNS:] } else { starts }
         # 总字符预算也按完整轮次裁剪；至少保留最新用户轮次及其工具观察。
         kept = for start in eligible with selected = starts[-1] {
-            size = fold(messages[start:], 0, fn(total: number, message: object) -> number {
-                total + len(Get(message, "content", "")) + len(Get(message, "thinking", "")) + len(str(Get(message, "tool_calls", [])))
-            })
+            size = HistorySize(messages[start:])
             if size <= MAX_HISTORY_CHARS { break start } else { next selected }
         }
         concat([messages[0]], messages[kept:])
@@ -213,7 +243,7 @@ flow Timestamp(stamp: number) -> string {
 }
 
 flow LocalTime(stamp: number) -> object {
-    text = Timestamp(stamp)
+    text = stamp |> Timestamp
     value = dates.datetime.fromisoformat(text)
     display = value.strftime("%Y-%m-%d %H:%M:%S (UTC%z)")
     configured = os.Getenv("LIP_CHAT_TZ")
@@ -245,20 +275,23 @@ flow ShiftTime(args: object) -> object {
     return result
 }
 
-# SQL requests yield SQLite cursors; each Flow closes and releases its cursor.
+# SQL requests yield SQLite cursors; one helper owns close/release for both reads and writes.
+flow CloseCursor(cursor: any) -> void {
+    perform effect cursor.close()
+    native_release(cursor)
+}
+
 flow Query(request: effect) -> list {
     cursor = perform request
     rows = perform effect cursor.fetchall()
-    perform effect cursor.close()
-    native_release(cursor)
+    CloseCursor(cursor)
     return rows
 }
 
 flow Write(request: effect) -> number {
     cursor = perform request
     changed = py.getattr(cursor, "rowcount")
-    perform effect cursor.close()
-    native_release(cursor)
+    CloseCursor(cursor)
     return changed
 }
 
@@ -295,6 +328,16 @@ flow ReapTimers(runtime: object, cancel_id: string) -> void {
     }
 }
 
+flow RestoreTimers(runtime: object) -> void {
+    now = seconds.time()
+    # 到期项先由同一条 SQL 进入 delivered，触发一次通知；其余项恢复 Timer。
+    Write(effect runtime.db.execute("UPDATE reminders SET status='delivered' WHERE status='pending' AND due_at<=?", [now]))
+    pending = Query(effect runtime.db.execute("SELECT CAST(id AS TEXT), due_at FROM reminders WHERE status='pending'", []))
+    for row in pending {
+        StartTimer(runtime, row[0], row[1])
+    }
+}
+
 flow OpenStore() -> object {
     configured = os.Getenv("LIP_CHAT_DB")
     location = if configured == "" { ".ollama_chat/state.sqlite3" } else { configured }
@@ -307,36 +350,13 @@ flow OpenStore() -> object {
     notify = functools.partial(py.print, flush=true)
     perform effect db.create_function("lip_notify", 1, notify)
     native_release(notify)
-    schema = perform effect db.executescript("""
-CREATE TABLE IF NOT EXISTS calculations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL, a REAL NOT NULL, b REAL NOT NULL,
-    value REAL NOT NULL, label TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message TEXT NOT NULL, due_at REAL NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
-);
-CREATE TEMP TRIGGER notify_reminder AFTER UPDATE OF status ON reminders
-WHEN OLD.status='pending' AND NEW.status='delivered'
-BEGIN
-    SELECT lip_notify(char(10) || '提醒 #' || NEW.id || '> ' || NEW.message || char(10));
-END;
-""")
+    schema = perform effect db.executescript(SCHEMA_SQL)
     perform effect schema.close()
     native_release(schema)
     timers = collections.deque()
     runtime = {db: db, timers: timers, path: location}
     # 重启时补发到期提醒；未来提醒恢复为标准库 Timer。
-    now = seconds.time()
-    Write(effect db.execute("UPDATE reminders SET status='delivered' WHERE status='pending' AND due_at<=?", [now]))
-    pending = Query(effect db.execute("SELECT CAST(id AS TEXT), due_at FROM reminders WHERE status='pending'", []))
-    for row in pending {
-        id = row[0]
-        due = row[1]
-        StartTimer(runtime, id, due)
-    }
+    RestoreTimers(runtime)
     return runtime
 }
 
@@ -367,6 +387,15 @@ fn Arithmetic(operation: string, a: number, b: number) -> object {
     result
 }
 
+flow SaveCalculation(runtime: object, operation: string, a: number, b: number, value: number, label: string) -> object {
+    created = seconds.time() |> Timestamp
+    Write(effect runtime.db.execute(
+        "INSERT INTO calculations(operation,a,b,value,label,created_at) VALUES(?,?,?,?,?,?)",
+        [operation, a, b, value, label, created]))
+    rows = Query(effect runtime.db.execute("SELECT CAST(last_insert_rowid() AS TEXT)", []))
+    return {ok: true, saved: true, id: rows[0][0], value: value}
+}
+
 flow Calculate(runtime: object, args: object) -> object {
     label = Get(args, "label", "")
     valid_label = ValidText(label, true)
@@ -379,11 +408,7 @@ flow Calculate(runtime: object, args: object) -> object {
             string => {
                 calculated = Arithmetic(args.operation, args.a, args.b)
                 if !calculated.ok { calculated } else {
-                    created = Timestamp(seconds.time())
-                    Write(effect runtime.db.execute("INSERT INTO calculations(operation,a,b,value,label,created_at) VALUES(?,?,?,?,?,?)",
-                        [args.operation, args.a, args.b, calculated.value, label, created]))
-                    rows = Query(effect runtime.db.execute("SELECT CAST(last_insert_rowid() AS TEXT)", []))
-                    {ok: true, saved: true, id: rows[0][0], value: calculated.value}
+                    SaveCalculation(runtime, args.operation, args.a, args.b, calculated.value, label)
                 }
             },
             _ => {ok: false, error: "operation 必须是字符串"}
@@ -408,13 +433,8 @@ flow ListCalculations(runtime: object, args: object) -> object {
     return result
 }
 
-flow SetReminder(runtime: object, args: object) -> object {
-    message = Get(args, "message", "")
-    valid_message = ValidText(message, false)
-    now = seconds.time()
-    deadline = if !ValidFields(args, ["message"], ["after_seconds", "at"]) || !valid_message {
-        {ok: false, error: "message 必须为 1–500 字的非空文本"}
-    } else if has(args, "after_seconds") == has(args, "at") {
+flow ResolveDeadline(args: object, now: number) -> object {
+    deadline = if has(args, "after_seconds") == has(args, "at") {
         {ok: false, error: "after_seconds 与 at 必须且只能提供一个"}
     } else if has(args, "after_seconds") {
         delay = args.after_seconds
@@ -432,9 +452,21 @@ flow SetReminder(runtime: object, args: object) -> object {
             {ok: false, error: "提醒时间必须在未来 366 天内"}
         } else { {ok: true, due: due} }
     }
+    return deadline
+}
+
+flow SetReminder(runtime: object, args: object) -> object {
+    message = Get(args, "message", "")
+    valid_message = ValidText(message, false)
+    now = seconds.time()
+    deadline = if !ValidFields(args, ["message"], ["after_seconds", "at"]) || !valid_message {
+        {ok: false, error: "message 必须为 1–500 字的非空文本"}
+    } else {
+        ResolveDeadline(args, now)
+    }
     result = if !deadline.ok { deadline } else {
         created = Timestamp(now)
-        due_text = Timestamp(deadline.due)
+        due_text = deadline.due |> Timestamp
         Write(effect runtime.db.execute("INSERT INTO reminders(message,due_at,status,created_at) VALUES(?,?,'pending',?)",
             [message, deadline.due, created]))
         rows = Query(effect runtime.db.execute("SELECT CAST(last_insert_rowid() AS TEXT)", []))
@@ -449,14 +481,14 @@ flow ListReminders(runtime: object, args: object) -> object {
     status = Get(args, "status", "pending")
     limit = Get(args, "limit", 10)
     result = if (!ValidFields(args, [], ["status", "limit"]) ||
-        !Includes(["pending", "delivered", "cancelled", "all"], status) || !ValidLimit(limit)) {
+        !Includes(REMINDER_STATUSES, status) || !ValidLimit(limit)) {
         {ok: false, error: "status 必须为 pending/delivered/cancelled/all，limit 为 1–100 的整数"}
     } else {
         rows = Query(effect runtime.db.execute(
             "SELECT CAST(id AS TEXT),message,due_at,status,created_at FROM reminders WHERE (?='all' OR status=?) ORDER BY due_at,id LIMIT ?",
             [status, status, limit]))
         reminders = for row in rows with items = [] {
-            due_text = Timestamp(row[2])
+            due_text = row[2] |> Timestamp
             next concat(items, [{id: row[0], message: row[1], due_at: due_text, status: row[3], created_at: row[4]}])
         }
         {ok: true, reminders: reminders}
@@ -528,7 +560,9 @@ flow NormalizeArgs(name: string, args: any) -> any {
                 },
                 _ => value
             }
-            next if has(normalized, field) { put(normalized, field, converted) } else { normalized }
+            next if has(normalized, field) {
+                put(normalized, field, converted)
+            } else { normalized }
         },
         _ => args
     }
@@ -831,6 +865,15 @@ flow Conversation(request: function, runtime: object, input: object, tools: list
     }
 }
 
+flow CloseSession(input: object, model: object, runtime: object) -> void {
+    ReapTimers(runtime, "*")
+    perform effect runtime.db.close()
+    perform effect model.client.close()
+    if input.terminal { perform effect input.reader.close() }
+    native_release(input.reader)
+    fmt.Println("\n会话结束。")
+}
+
 flow Main() -> void {
     # 普通行输入/模型执行期间使用系统 Ctrl-C；编辑期间由 prompt_toolkit 处理按键。
     signal.Reset()
@@ -839,10 +882,5 @@ flow Main() -> void {
     runtime = OpenStore()
     Welcome(model.name, input, runtime)
     Conversation(model.request, runtime, input, BuildTools())
-    ReapTimers(runtime, "*")
-    perform effect runtime.db.close()
-    perform effect model.client.close()
-    if input.terminal { perform effect input.reader.close() }
-    native_release(input.reader)
-    fmt.Println("\n会话结束。")
+    CloseSession(input, model, runtime)
 }

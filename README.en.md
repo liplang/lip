@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
-Released version: **1.0**. This working tree implements the [1.1 draft](spec/LIP-1.1-SPEC.en.md); the [1.0 specification](spec/LIP-1.0-SPEC.en.md) is retained and the release version is unchanged.
+Released version: **1.0**. The complete language design is the [1.2 draft specification](spec/LIP-1.2-SPEC.en.md). The compiler retains the [1.1 specification](spec/LIP-1.1-SPEC.en.md) as its implementation baseline; new 1.2 requirements are not yet implemented and accepted. Historical specifications remain, and the release version is unchanged.
 
 **Compute with values. Organize work as a graph. Build results from facts.**
 
@@ -10,7 +10,9 @@ LIP is a small language for composable computation, parallel analysis, and tool 
 
 The focus is a solid computational core. Math, files, networking, databases, and models come through the **Go / Python ecosystems**. Interactive exploration and generated Go share the same value, dependency, identity, and call rules. LIP fits programs that break down tasks, collect evidence, call tools, and produce an explicit conclusion.
 
-[Language specification](spec/LIP-1.1-SPEC.en.md) · [Example tutorial](examples/README.en.md) · [Implementation and validation](IMPLEMENTATION.en.md)
+[Language specification](spec/LIP-1.2-SPEC.en.md) · [Example tutorial](examples/README.en.md) · [Implementation and validation](IMPLEMENTATION.en.md)
+
+The 1.2 specification independently defines the complete language, integrating information preservation through encapsulation, interface contracts, diagnostics, and adapter requirements without depending on historical specifications. Examples and limits below describe the current implementation; see the [implementation guide](IMPLEMENTATION.en.md) for the gap between requirements and verified capabilities.
 
 Practical checks cover a CRUD website, SQLite queries, pandas ETL, scikit-learn regression/classification, NumPy linear algebra, and SciPy integration/optimization. The [linear model example](examples/advanced/27_linear_model.lip) demonstrates training, prediction, and error measurement with the pure core. Websites use explicit Host contracts for storage and templates; scientific libraries use the Go/Python bridge in scripts and the REPL. See the implementation guide for tested paths and current limits.
 
@@ -221,7 +223,7 @@ Direct Go/Python library calls lower to this protocol too. Interactive convenien
 
 Loop iterations, child Flows, contributions, and calls derive identities from source positions and dynamic paths. These identities connect diagnostics, Claim provenance, and call records without numbering work by arrival or completion. Modules are frozen into one source snapshot at build time; source contents, versions, and dependency resolution determine its build identity.
 
-Under the specification's conditions—fixed inputs and external responses, fair and finite termination, no live snapshot, and no cancellation or budget interference—legal schedules produce the same successful result or primary error. Claim order and structural identities make those results inspectable. See [specification §13](spec/LIP-1.1-SPEC.en.md#13-determinism-and-guarantee-boundaries) for the complete conditions.
+Under the specification's conditions—fixed inputs and external responses, fair and finite termination, no live snapshot, and no cancellation or budget interference—legal schedules produce the same successful result or primary error. Claim order and structural identities make those results inspectable. See [specification §13](spec/LIP-1.2-SPEC.en.md#13-determinism-and-guarantee-boundaries) for the complete conditions.
 
 ### One program, from exploration to a Go executable
 
@@ -632,7 +634,7 @@ Routes use explicit-method ServeMux patterns; compilation and conflict checks ha
 
 Defaults are 30 seconds, 1 MiB each for request/response bodies, 8 MiB each for canonical Data, and 64 concurrent requests across routes. CLI options are `-timeout`, `-concurrent`, `-body-bytes`, `-response-bytes`, `-parallel`, `-frames`, `-steps`, and `-elements`; zero selects defaults. Embedded configuration also provides `HTTPOptions.MaxDataBytes`.
 
-`serve` uses pure core or explicit teaching contracts with `-host demo`. Embed through `NewHTTPHandler` / `NewHTTPMux` and application authentication middleware. Authorization and operations receive the same context; applications own Hosts and connection pools. `HTTPOptions.OnError` receives server diagnostics while public errors use fixed categories. HTTP uses explicit Host operations; the generic native bridge currently serves files, sessions, and generated programs. See [specification §12.1](spec/LIP-1.1-SPEC.en.md#121-optional-http-host-integration).
+`serve` uses pure core or explicit teaching contracts with `-host demo`. Embed through `NewHTTPHandler` / `NewHTTPMux` and application authentication middleware. Authorization and operations receive the same context; applications own Hosts and connection pools. `HTTPOptions.OnError` receives server diagnostics while public errors use fixed categories. HTTP uses explicit Host operations; the generic native bridge currently serves files, sessions, and generated programs. See [specification §12.1](spec/LIP-1.2-SPEC.en.md#121-optional-http-host-integration).
 
 ## Embedding and build identity
 

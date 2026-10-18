@@ -2,11 +2,29 @@
 
 [English](IMPLEMENTATION.en.md) | [简体中文](IMPLEMENTATION.md)
 
-唯一语言依据为 [LIP 1.1 规范草案](spec/LIP-1.1-SPEC.md)。本仓库已实现 core 的入口、值与纯函数、控制结构、结构化 Flow、静态模块、Claim、图调度和统一 Host 边界，并提供解释执行与真正生成 Go 两条执行路径。以下按规范章节列出实现与可重复的回归证据，供使用、复核与后续开发。HTTP 是可选接入；可选 durable profile 未实现。
+语言设计目标为独立完整的 [LIP 1.2 规范草案](spec/LIP-1.2-SPEC.md)；本页记录 [1.1 规范](spec/LIP-1.1-SPEC.md)实现基线及已有回归，不声明 1.2 core 合规。本次仅整合规范与文档，未修改编译器。1.2 的有限容器/参数描述传播、统一契约视图与结构化诊断尚未按新规则实现并完成验收；已有部分基础不等于完整支持。
+
+本仓库已实现入口、值与纯函数、控制结构、结构化 Flow、静态模块、Claim、图调度和统一 Host 边界，并提供解释执行与真正生成 Go 两条执行路径。以下按实现基线的规范章节列出可重复的回归证据。HTTP 是可选接入；可选 durable profile 未实现。
 
 1.1 的纯性承诺与 NaN/无穷扩展复用解释器、Go 生成和 REPL 路径。`Spec11PurityScopesAndCallIDs` 检查嵌套标记、回调、递归、独立调用身份和重放；`Spec11NonConcurrentAdmission` 检查跨 run 串行许可及等待让出工作额度。`Spec11NonFiniteSemanticsInterpreterAndGo`、`Spec11InfinityErrorsInterpreterAndGo`、`Spec11CanonicalAndTransport`、`Spec11NativeAdaptersAndGeneratedEntry`、`Spec11BoundariesReplayAndErrors` 覆盖数值、规范身份、严格 c-hex、Python/Go 通道、入口协议、HTTP 拒绝和保存的闭包。默认 JSON 的有限 Data 字节不变，CLI/生成程序以 `-data-encoding c-hex` 显式选择无损通道；不声明原生纯性证明或持久恢复。
 
-## 规范覆盖
+## v1.2 推进安排
+
+本轮完成规范边界审查、组合闭包向量（§16.7–16.9）及独立有限模型检查；下列编译器、运行时与工具工作尚未开始，不计入实现证据。语言规则统一以独立的 1.2 正文为准，不另设 direction。阶段依次推进，每阶段先固定正反用例与调用轨迹，再实现；阶段未验收不能宣称对应能力完成。
+
+| 阶段 | 交付范围与现有落点 | 进入下一阶段的条件 |
+|---|---|---|
+| 1：描述与合约基础 | 在 `compiler.go`、`checker.go`、`host.go` 的现有模型中明确 Info、NoResult、Union、Callable/captures、registry 快照和原因结构；复用现有 schema/参数绑定，不新建接口文件或执行机 | 联合结合/交换/幂等、不同 captures 不误合并、快照隔离、静态零调用和预算明确失败有针对性回归；尚不据不完整模型增强准入 |
+| 2：容器与循环传递 | 在 checker 中完成固定/动态投影、逐候选负下标、gather/slice、put/concat、普通 for、推导式与 map 容器外形；回调参数到返回增强留到阶段 3，原生来源继续独立 | §16.7–16.9 中适用本阶段的空输入、开放 rest、覆盖、异长列表、读写混合及字面量边界有正反用例；解释器与真实生成程序在 1/2/7 额度下保持调用数及 barrier 次序 |
+| 3：调用、递归与保存值 | 完成实参到返回位置、候选签名/类型、闭包、Flow 返回、BaseOps/Active 和 `session.go` 的描述保存；`backend.go` 携带检查结果，不在运行时反推 | 多层/互递归/高阶/跨模块/跨 cell 结果一致；Active/缓存访问顺序不改接受条件；实参动作不被 Pure fn 或返回摘要隐藏；Flow 执行 Summary 不按实参专门化 |
+| 4：契约、诊断与适配 | 从同一源码/registry 向嵌入 API、CLI/REPL、帮助与补全提供只读视图；在 `values.go`、`host.go`、`adapters.go` 贯通结构化 reason、部分候选、边界 path 与完成事实 | 未知与禁止明确区分；签名/可空/可缺省一致；多错顺序稳定；静态查看零新增执行；权限撤销、过期引用、known_fault 重放零重复写入；展示开关不改预算/身份/主错误 |
+| 5：组合验收与发布准备 | 将全部规范向量和既有应用回归贯通解释器、实际 Go 程序与适用 REPL；同步示例、帮助、课程、README 和本页证据 | 相关回归及 `make test`、`make race`、`make vet` 通过，明确环境跳过项；清理生成物并完成 core 声明审查后再决定发布版本号 |
+
+下一步从阶段 1 的联合/捕获隔离用例开始，同时把现有“容器投影/参数转发必为 Unknown”的限制回归列出迁移清单：规范现在允许的路径改为成功用例，真正未知、写入、不可并发读取继续作为拒绝用例。不能保留相反预期，靠只运行新测试制造验收通过。
+
+每阶段的验收记录须注明规范条款、执行路径、具体输出/错误归属、provider 调用次数及必需先后关系。并行重叠用会合/事件证明；声明置换与动作源码重排分别检查。独立模型只验证半格、投影、候选笛卡尔积、错误阶段、Claim 冲突和递归固定点的规范代数，不能替代解释器/生成程序验收。已有 1.1 回归和文档/数值附录通过只说明基线仍有效，不能代替新能力验收。可选 durable 的实现及并行写、共享可变状态不纳入这条主线。
+
+## 实现基线覆盖
 
 测试集中在现有 `tests/` 文件；表中省略共同的 `Test` 前缀。
 

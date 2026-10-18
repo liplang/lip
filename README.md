@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [简体中文](README.md)
 
-当前发布版本：**1.0**。本工作树正在实现 [1.1 规范草案](spec/LIP-1.1-SPEC.md)；[1.0 规范](spec/LIP-1.0-SPEC.md)保留，发布版本号暂不调整。
+当前发布版本：**1.0**。完整语言设计见 [1.2 规范草案](spec/LIP-1.2-SPEC.md)；当前编译器仍以 [1.1 规范](spec/LIP-1.1-SPEC.md)为实现基线，尚未实现并验收 1.2 的新增要求。历史规范保留，发布版本号暂不调整。
 
 **用值描述计算，用图组织工作，用事实形成结果。**
 
@@ -10,7 +10,9 @@ LIP 是一门面向可组合计算、并行分析与工具协作的小语言。�
 
 LIP 的重点是把这套计算核心做扎实。数学、文件、网络、数据库和模型能力接入 **Go / Python 生态**；从交互探索到编译为 Go，沿用同一套值、依赖、身份与调用规则。它适合需要分解任务、收集证据、调用工具并形成明确结论的程序。
 
-[语言规范](spec/LIP-1.1-SPEC.md) · [示例教程](examples/README.md) · [实现与验证](IMPLEMENTATION.md)
+[语言规范](spec/LIP-1.2-SPEC.md) · [示例教程](examples/README.md) · [实现与验证](IMPLEMENTATION.md)
+
+1.2 规范独立定义完整语言，并整合封装后的信息保留、接口契约、诊断与适配要求；它不依赖历史规范。下文运行示例和限制描述当前实现，规范要求与已验证能力的差距见[实现说明](IMPLEMENTATION.md)。
 
 实际应用检查覆盖 CRUD 网站、SQLite 查询、pandas ETL、scikit-learn 回归/分类、NumPy 线性代数和 SciPy 积分/优化。[线性模型示例](examples/advanced/27_linear_model.lip) 使用纯核心演示训练、预测与误差计算。网站通过显式 Host 合约接入存储和模板；科学计算库在脚本和 REPL 中通过 Go/Python bridge 使用。已验证的执行路径与当前限制见实现说明。
 
@@ -221,7 +223,7 @@ Go/Python 的直接库调用也转换为这套协议。交互便利性、显式�
 
 循环迭代、子 Flow、贡献和调用按源码位置与动态路径获得身份。它们连接错误定位、Claim 来源和调用记录，避免用任务抵达或完成的先后给工作编号。多个模块在构建时冻结为同一源码快照；源码、版本和依赖解析共同确定构建身份。
 
-在固定输入与外部应答、公平且有限终结、无 live snapshot 和取消/预算干扰等规范前提下，合法调度得到相同成功结果或相同主错误。Claim 的逻辑顺序与结构身份提供可复查的依据；完整条件见 [规范 §13](spec/LIP-1.1-SPEC.md#13-确定性与保证边界)。
+在固定输入与外部应答、公平且有限终结、无 live snapshot 和取消/预算干扰等规范前提下，合法调度得到相同成功结果或相同主错误。Claim 的逻辑顺序与结构身份提供可复查的依据；完整条件见 [规范 §13](spec/LIP-1.2-SPEC.md#13-确定性与保证边界)。
 
 ### 一份程序，从探索走到 Go 可执行文件
 
@@ -632,7 +634,7 @@ request 提供 method、path、raw_path、host、params、query、headers、body
 
 默认时限 30 秒，请求/响应正文各 1 MiB，规范 Data 编码各 8 MiB，全路由最多同时处理 64 个请求。CLI 提供 `-timeout`、`-concurrent`、`-body-bytes`、`-response-bytes`、`-parallel`、`-frames`、`-steps`、`-elements`；零选择默认值，嵌入配置另有 `HTTPOptions.MaxDataBytes`。
 
-`serve` 使用纯核心或 `-host demo` 的显式合约。嵌入可用 `NewHTTPHandler` / `NewHTTPMux`，外接鉴权 middleware；Authorize 与操作接收同一 context，Host 和连接池由应用管理。`HTTPOptions.OnError` 接收服务端诊断，公开错误仅提供固定类别。HTTP 使用显式 Host 操作，通用原生桥接当前用于文件、会话与生成程序。完整契约见 [规范 §12.1](spec/LIP-1.1-SPEC.md#121-可选-http-host-接入)。
+`serve` 使用纯核心或 `-host demo` 的显式合约。嵌入可用 `NewHTTPHandler` / `NewHTTPMux`，外接鉴权 middleware；Authorize 与操作接收同一 context，Host 和连接池由应用管理。`HTTPOptions.OnError` 接收服务端诊断，公开错误仅提供固定类别。HTTP 使用显式 Host 操作，通用原生桥接当前用于文件、会话与生成程序。完整契约见 [规范 §12.1](spec/LIP-1.2-SPEC.md#121-可选-http-host-接入)。
 
 ## 嵌入与构建身份
 
