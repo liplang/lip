@@ -94,11 +94,11 @@ func TestFunctionProposalUnknownAndUnsafe(t *testing.T) {
 		{"unselected_write", `fn bad(x:number)->effect {if true {effect worker.read(x)} else {effect worker.write(x)}}`, "", "bad(x)"},
 		{"function_parameter", `fn bad(f:function,x:number)->effect {f(x)}`, "", "bad(request,x)"},
 		{"carry_request", `fn bad(x:number)->effect {for i in [0] with p=effect worker.read(x) {next p}}`, "", "bad(x)"},
-		{"container_function", "", `f=[request][0]`, "f(x)"},
-		{"conditional_function", "", `f=if true {request} else {request}`, "f(x)"},
-		{"returned_function", `fn maker()->function {request}`, "f=maker()", "f(x)"},
 		{"empty_recursive_component", `fn bad(x:number)->effect {bad(x)}`, "", "bad(x)"},
-		{"recursive_unknown", `fn bad(x:number,p:effect)->effect {if x==0 {p} else {bad(x-1,p)}}`, "", "bad(x,effect worker.read(x))"},
+		{"recursive_unknown_parameter", `fn bad(n:number,p:effect)->effect {if n==0 {p} else {bad(n-1,p)}}`, "", "bad(2,effect worker.unknown(x))"},
+		{"recursive_parameter_swap", `fn bad(n:number,p:effect,q:effect)->effect {if n==0 {p} else {bad(n-1,q,p)}}`, "", "bad(2,effect worker.read(x),effect worker.write(x))"},
+		{"known_parameter_swap", `fn middle(p:effect,q:effect)->effect {p}
+fn bad(p:effect,q:effect)->effect {middle(q,p)}`, "", "bad(effect worker.read(x),effect worker.write(x))"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := `import python "example.worker" as worker
@@ -124,6 +124,49 @@ fn request()->effect {effect worker.read(1)}
 flow Main()->number {return len(perform request())}`, host)
 	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-TYPE" || calls.Load() != 0 {
 		t.Fatal(err, calls.Load())
+	}
+}
+
+func TestFunctionProposalClosedValuesAndRecursiveParameters(t *testing.T) {
+	tests := []struct {
+		name, declarations, setup, request string
+	}{
+		{"list_function", ``, `f=[request][0]`, "f(x)"},
+		{"conditional_function", ``, `f=if true {request} else {request}`, "f(x)"},
+		{"returned_function", `fn maker()->function {request}`, `f=maker()`, "f(x)"},
+		{"recursive_parameter", `fn recursive(n:number,p:effect)->effect {if n==0 {p} else {recursive(n-1,p)}}`, ``, "recursive(3,effect worker.read(x))"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int64
+			host := testHost(func(_ context.Context, r Request) Response {
+				calls.Add(1)
+				return Result(r.Positional[0])
+			})
+			source := `import python "example.worker" as worker
+fn request(x:number)->effect {effect worker.read(x)}
+` + test.declarations + `
+flow Main()->list {
+ facts=claim()
+ for x in [1,2,3] parallel {
+ ` + test.setup + `
+ value=perform ` + test.request + `
+ facts <+ value
+ }
+ return [row.value for row in facts]
+}`
+			p, err := Compile(source, host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 0 {
+				t.Fatal("checking invoked provider", calls.Load())
+			}
+			r, err := p.Run(context.Background(), nil, Options{Parallelism: 3})
+			if err != nil || display(t, r.Output) != "[1,2,3]" || calls.Load() != 3 {
+				t.Fatal(r, err, calls.Load())
+			}
+		})
 	}
 }
 
@@ -285,6 +328,44 @@ fn next_request(x:number)->effect {effect worker.read(x)}`)
 	_, err = s.Eval(context.Background(), `failed()`, Options{})
 	if err == nil || calls.Load() != 9 {
 		t.Fatal("failed summary committed", err, calls.Load())
+	}
+}
+
+func TestSessionClosedValuesAndRecursiveParameters(t *testing.T) {
+	var calls atomic.Int64
+	host := testHost(func(_ context.Context, r Request) Response {
+		calls.Add(1)
+		return Result(r.Positional[0])
+	})
+	s, err := NewSession(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eval := func(source string, options Options) {
+		t.Helper()
+		if _, err := s.Eval(context.Background(), source, options); err != nil {
+			t.Fatal(source, err)
+		}
+	}
+	eval(`import python "example.worker" as worker`, Options{})
+	eval(`fn request(x:number)->effect {effect worker.read(x)}
+fn maker()->function {request}
+fn retry(n:number,p:effect)->effect {if n==0 {p} else {retry(n-1,p)}}`, Options{})
+	eval(`from_list=[request][0]
+from_condition=if true {request} else {request}
+from_return=maker()`, Options{})
+	if calls.Load() != 0 {
+		t.Fatal("summary construction invoked provider", calls.Load())
+	}
+	eval(`for x in [1,2] parallel {
+perform from_list(x)
+perform from_condition(x)
+perform from_return(x)
+perform retry(2,effect worker.read(x))
+}`, Options{Parallelism: 4})
+	if calls.Load() != 8 {
+		t.Fatal("session did not preserve closed/recursive summaries", calls.Load())
 	}
 }
 

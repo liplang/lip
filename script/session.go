@@ -671,7 +671,7 @@ native_data(value) takes a Data snapshot; native_release(value) releases a nativ
 Direct library calls use the Host boundary; effect constructs a request, perform executes it.
 fn bodies remain pure. fn f(x:number)->number @{math.sqrt(x)} promises the native computation is pure; ordinary wrappers need no @, and nested fn require their own marker for direct native calls.
 nan and inf are number literals. -inf < finite numbers < inf; nan != nan. JSON rejects non-finite numbers. :run -data-encoding c-hex selects lossless Data transport.
-Known pure request builders preserve operation summaries across calls, aliases and cells. Parallel still requires all operations Concurrent ReadOnly; projections, dynamic calls and carry stay Unknown.
+Known pure request builders preserve operation summaries across calls, aliases and cells. Closed-container projections, conditional/returned functions, and recursive effect forwarding can preserve a known request; open projections, dynamic calls, and carry remain Unknown. Parallel still requires every operation to be Concurrent ReadOnly.
 The REPL displays expression and binding results. fmt.Print/Printf/Println return the byte count after the adapter handles error; this count is also displayed.
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
 

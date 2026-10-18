@@ -43,6 +43,7 @@ var examples = []exampleCase{
 	{path: "ecosystem/18_proposals.lip", demo: true, want: `{"average":2,"first":"HELLO","second":"HELLO, LIP"}`},
 	{path: "ecosystem/19_parallel_read_write.lip", demo: true, want: `["ADA","LIN","SAM"]`},
 	{path: "ecosystem/20_recorded_iteration.lip", demo: true, want: `{"rounds":4,"score":0.8}`},
+	{path: "ecosystem/21_summary_recovery.lip", demo: true, want: `[{"name":"ada","values":["ADA","ADA","ADA","ADA"]},{"name":"lin","values":["LIN","LIN","LIN","LIN"]}]`},
 	{path: "ecosystem/30_native_purity.lip", native: true, want: `{"display":"[3,nan,4,inf]","missing":true}`},
 	{path: "advanced/21_business_failures.lip", want: `{"failures":3,"visited":4}`},
 	{path: "advanced/26_flows.lip", input: `{"xs":[3,1,2]}`, want: `{"count":3,"values":[5,3,4]}`},

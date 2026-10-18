@@ -202,7 +202,7 @@ func repl(ctx context.Context, args []string) error {
 				fmt.Println("Names stay bound until :del removes them. Open () [] {} or triple-quoted strings allow more input; other expressions use a trailing \\ to continue.")
 				fmt.Println("Successful cells retain results without rerunning past actions; failed cells commit no bindings, and completed external actions remain.")
 				fmt.Println("fn f(x:number)->number @{math.sqrt(x)} promises native computational purity. Outer wrappers need no @; nested native bodies need their own marker. nan and inf are number literals; use -data-encoding c-hex for lossless file transport.")
-				fmt.Println("Known pure request builders retain operation summaries; parallel still requires every candidate Concurrent ReadOnly. Projections, dynamic calls and carry stay Unknown.")
+				fmt.Println("Known pure request builders retain operation summaries; closed projections, conditional/returned functions, and recursive effect forwarding can preserve a known request. Open projections, dynamic calls and carry stay Unknown; parallel still requires every candidate Concurrent ReadOnly.")
 				fmt.Println("Non-tail calls default to 10,000 active frames; -frames changes the budget. Exhaustion reports E-BUDGET; the next cell can still run.")
 				fmt.Println("-parallel accepts any positive integer; it limits active evaluations without preallocating that many workers. :run inherits the limit unless overridden.")
 				fmt.Println(editorHelp)

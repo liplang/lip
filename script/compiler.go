@@ -388,6 +388,11 @@ type staticDesc struct {
 // nil means Unknown; an empty resolved summary is also Unknown at use.
 type operationSummary struct {
 	operation string
+	// parameter marks a summary that is supplied by a function/Flow argument.
+	// It is intentionally separate from operation so the zero value remains an
+	// empty fixed-point cell used by forward and recursive declarations.
+	parameter bool
+	param     int
 	sources   []*operationSummary
 }
 

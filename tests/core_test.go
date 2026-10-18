@@ -1351,7 +1351,9 @@ func generatedHost()(Host,error){return Host{Contracts:[]Contract{{Operation:Ope
 	if calls.Load() != before+1 {
 		t.Fatal(calls.Load(), before)
 	}
-	// A request parameter has Unknown Ops, even if its caller passes a read.
+	// A Flow's execution Summary keeps a request parameter Unknown, even if its
+	// caller passes a known read; returned-request descriptions are a separate
+	// judgment and may be specialized at the later perform site.
 	_, err = Compile(`import host "steps";flow Execute(p:effect)->any{return perform p} flow Main()->void{for x in [1] parallel {Execute(effect steps.read(x))}}`, host)
 	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
 		t.Fatal(err)

@@ -116,12 +116,14 @@ These examples explicitly enable teaching contracts with -host demo. Python exam
 | [18_proposals](ecosystem/18_proposals.lip) | Pure request construction/passing, chains, different result types | `first="HELLO", second="HELLO, LIP", average=2` |
 | [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | Function-summary parallel reads, complete collection, sequential writes | ["ADA","LIN","SAM"]; stderr logs |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | Prior observation in next request | rounds=4, score=0.8 |
+| [21_summary_recovery](ecosystem/21_summary_recovery.lip) | Request summaries through closed containers, conditional/returned functions, and recursive parameters | Four uppercase results per name |
 
 ```sh
 ./lipc run -host demo examples/ecosystem/17_go_python.lip
 ./lipc run -host demo examples/ecosystem/18_proposals.lip
 ./lipc run -host demo -parallel 4 examples/ecosystem/19_parallel_read_write.lip
 ./lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
+./lipc run -host demo -parallel 4 examples/ecosystem/21_summary_recovery.lip
 ```
 
 Teaching contracts/schemas/byte encoding live in DemoHost in [adapters.go](../script/adapters.go). The default CLI generic bridge also supports direct imported calls/properties/native objects, e.g. `import go "strings"; strings.ToUpper("hello")` or `import python "math"; math.sqrt(3)`. Calls/properties lower to perform effect. Arrays/native objects retain references; native_data(value) explicitly snapshots Data. See [configuration/conversions/prerequisites](../README.en.md#connecting-go--python).
@@ -130,7 +132,7 @@ Keep three points in mind when reading the effect examples:
 
 1. `upper_request("hello")` creates a request without calling the library. `perform request` executes it and returns the Data specified by its contract.
 2. `forward(request:effect)->effect` in `18_proposals` shows that fn parameters and results can carry requests. Prepare/Execute also show Flows returning/accepting requests. Host parameters/results, entry protocols, and Claims still require Data.
-3. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. Fixed fields, indexes, and slices preserve a known read as well; genuinely unknown parameters or open sources can still execute sequentially, but cannot establish parallel safety.
+3. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. Fixed fields, indexes, and slices preserve a known read as well. `21_summary_recovery` also shows forwarding through closed containers, conditional/returned functions, and recursive effect parameters. Genuinely unknown parameters or open sources can still execute sequentially, but cannot establish parallel safety.
 
 Project operations can accept ordinary `policy` parameters carrying token, money, and time options, with enforcement implemented by the Host. Contracts declare permission requirements and the Host grants access. See the short example and current boundaries in the [README effect explanation](../README.en.md#every-external-action-follows-one-protocol).
 

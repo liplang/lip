@@ -118,12 +118,14 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 | [18_proposals](ecosystem/18_proposals.lip) | 纯函数构造/传递请求、请求链、不同结果类型 | `first="HELLO", second="HELLO, LIP", average=2` |
 | [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | 保留函数返回摘要的并行 ReadOnly、完整收集、顺序 Write | `["ADA","LIN","SAM"]`；日志写 stderr |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | 记录结果进入下一轮外部请求 | `rounds=4, score=0.8` |
+| [21_summary_recovery](ecosystem/21_summary_recovery.lip) | 闭合容器、条件/返回函数和递归参数保留请求摘要 | 每个名字得到四个大写结果 |
 
 ```sh
 ./lipc run -host demo examples/ecosystem/17_go_python.lip
 ./lipc run -host demo examples/ecosystem/18_proposals.lip
 ./lipc run -host demo -parallel 4 examples/ecosystem/19_parallel_read_write.lip
 ./lipc run -host demo examples/ecosystem/20_recorded_iteration.lip
+./lipc run -host demo -parallel 4 examples/ecosystem/21_summary_recovery.lip
 ```
 
 这些教学示例的显式操作合约、schema 和 bytes 编码集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中。CLI 默认还提供通用 Go/Python 桥接，可以直接调用导入库的函数、读取模块属性和操作原生对象，例如 `import go "strings"; strings.ToUpper("hello")` 或 `import python "math"; math.sqrt(3)`。直接调用和属性访问会降为 `perform effect`；数组等原生对象以资源引用保留，使用 `native_data(value)` 显式取得普通数据快照。通用配置、转换规则和运行条件见 [README](../README.md#接入-go--python)。
@@ -132,7 +134,7 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 1. `upper_request("hello")` 得到请求，没有调用外部库。`perform request` 才执行，并返回合约规定的 Data。
 2. `18_proposals` 的 `forward(request:effect)->effect` 展示 fn 参数与返回值能传请求；Prepare/Execute 展示 Flow 返回和接收请求。Host 参数/结果、入口协议和 Claim 仍要求 Data。
-3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格；固定字段、下标和切片投影也保留已知只读请求。真正未知的形参或开放来源仍可顺序执行，但不能证明并行安全。
+3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格；固定字段、下标和切片投影也保留已知只读请求。`21_summary_recovery` 进一步展示闭合容器、条件/返回函数和递归 effect 参数的转发。真正未知的形参或开放来源仍可顺序执行，但不能证明并行安全。
 
 项目自定义操作可用普通 `policy` 参数携带 token、金额与时限等选项，具体限制由 Host 实施；权限需求由合约声明并由 Host 授予。短例子与当前边界见 [README 的 effect 说明](../README.md#所有外部动作都走同一条边界)。
 

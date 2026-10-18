@@ -5,8 +5,9 @@ import go "strings" as text
 import python "statistics" as stats
 # Pure construction retains the returned operation; it does not call Go.
 fn upper_request(value:string)->effect { effect text.ToUpper(value) }
-# Ordinary fn parameters/results can carry requests. This generic parameter has
-# Unknown Ops, so forwarding works sequentially but cannot establish parallel safety.
+# Ordinary fn parameters/results can carry requests. An unknown operation
+# parameter remains conservative for parallel safety; a known request argument
+# can now be substituted into the summary at the call site.
 fn forward(request:effect)->effect { request }
 # Same-run Flows can return a request or receive one for execution.
 flow Prepare(value:string)->effect { return upper_request(value) }

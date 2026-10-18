@@ -98,6 +98,8 @@ flow Main()->list {
 
 The request keeps its `worker.read` source through the function and object field, so the three read-only actions can overlap. The complete Claim read still returns `[1,2,3]` in input order.
 
+The same rule applies to known closed containers, conditional/returned functions, and recursive parameter forwarding. No new syntax is needed: the static summary substitutes a known request source at the call site. Open containers, dynamic callables, Writes, and nonconcurrent reads remain ineligible when their source cannot be proven. See [`21_summary_recovery`](examples/ecosystem/21_summary_recovery.lip) for a complete example.
+
 ## Run and build
 
 ```sh

@@ -931,7 +931,7 @@ Recorded perform。这不把活动 store 误当成随时固定的变量。
 描述的构造如下；这些是分析记号，不增加源语法或可跨 Host 传输的值：
 
 ```text
-D ::= Unknown(reason) | Plain(type) | Request(operations)
+D ::= Unknown(reason) | Plain(type) | Param(i, type) | Request(operations)
     | Callable(origin, captures) | Object(fields, rest)
     | List(slots, element) | Union(D, ...)
 ```
@@ -949,6 +949,11 @@ Union 保留全部候选，不按常量 guard 删除分支。请求候选作集�
 不是请求则该位置的 Ops 为 Unknown；可调用候选同样必须全部已知才建立有限目标集。
 不同容器先按候选各自投影，再联合结果，不能把第一候选的结构或签名套到其他候选上。
 Plain/Unknown 可共享；实现不得仅为纯 Data 大列表强制建立逐元素来源记录。
+
+`Param(i,type)` 是函数或 Flow 的第 i 个抽象实参来源，只用于静态摘要，不是新的运行时值或源类型。
+`Request(operations)` 的 operation 摘要也可以暂时包含 `ParamOps(i)`；调用点拿到实际参数描述后再替换它。
+声明体内部若参数尚未绑定到已知请求，`ParamOps(i)` 不提供 parallel 资格；替换后若得到完整有限候选，
+调用点可以继续使用其 effect 与 Concurrent 属性。参数以外的 `any`、开放容器和动态 callable 仍为 Unknown。
 
 Union 规范化满足结合、交换和幂等律：展开嵌套联合并去除完全相同的描述，不改变候选。
 同一 origin 但抽象 captures 不同的 Callable 必须分别保留。Unknown 吸收的是请求资格，
@@ -1054,21 +1059,31 @@ map 返回增强要求全部候选按上述规则接受该一个抽象实参；f
 
 ### 5.3. 递归收敛、会话与可移植接受条件
 
-为所有语言 fn 建立与实参无关的 `BaseOps(f)` 联合方程。直接请求是单元素集合，
+为所有语言 fn 建立 `BaseOps(f)` 与参数来源关系的联合方程。直接请求是单元素集合，
 绑定/括号/简单别名/不可变捕获保留信息，if/match 联合全部候选，value-block 分析尾值。
-只通过具名声明、直接匿名 fn 及其简单别名解析的调用连接 callee 方程；参数、容器投影、
-动态 callee、carry 与核心结果为 Unknown。只计算返回的请求；未返回的构造不进入方程。
-对有限 operation 集合与 Unknown 取最小固定点，内部空集为 bottom，Unknown 为 top。
-`R={worker.read}∪R` 得到 `{worker.read}`，`R=R` 的空解在使用处成为 Unknown。
-此步骤不按声明顺序或经验迭代次数截断。
+函数返回值引用参数时保留 `Param(i,type)`；返回的请求摘要可保留 `ParamOps(i)`，由调用点
+按实际抽象实参替换。只通过具名声明、直接匿名 fn 及其简单别名解析的调用连接 callee 方程；
+未解析的动态 callee、开放容器、carry 与核心结果仍为 Unknown。只计算返回的请求；未返回的
+构造不进入方程。
+对有限 operation 集合、参数摘要和 Unknown 取最小固定点，内部空集为 bottom，Unknown 为 top。
+`R={worker.read}∪R` 得到 `{worker.read}`；`R=ParamOps(0)∪R` 在调用点传入 `worker.read`
+时得到 `{worker.read}`；`R=R` 的空解在使用处成为 Unknown。固定点必须与声明顺序、联合遍历
+顺序和合法缓存策略无关，不按递归深度或经验迭代次数截断。
 
 第 5.2 节的描述传递使用当前分析调用链中的 fn origin 集合 Active。初始集合为空；
 进入尚不在 Active 的 fn 时加入其 origin，完成该候选后移除。再次遇到同一 origin 时
-停止展开该次调用，仅返回 BaseOps 可证明的 Request；BaseOps 为 Unknown 时只保留
-声明返回类型，并标记 recursive_boundary。该回退不借用其他调用点实参或缓存的更强
-描述。Flow 返回传递沿无环调用图分析；进入 fn 时仍遵守同一 Active 规则。
-有限源码中每条展开路径的 fn origin 至多出现一次，因此不会无限展开递归容器或高阶调用。
+使用该 fn 的摘要固定点，不把递归调用冻结为空的 Unknown；参数来源关系通过
+`Param(i)`/`ParamOps(i)` 保留到外层调用点。没有基础返回或固定点只剩空循环时，仍只保留
+声明返回类型，并标记 `recursive_boundary`。该回退不借用其他调用点实参或缓存的更强描述。
+Flow 返回传递沿无环调用图分析；进入 fn 时仍遵守同一 Active 规则。
+有限源码中每条展开路径的 fn origin 至多出现一次；递归固定点只保留有限摘要图，不展开
+运行时递归次数，也不把递归本身当作 Flow 图循环。
 联合各候选时使用独立的 Active 分支，不能用先到候选影响后到候选。
+
+若尚未完成的递归/前向摘要边需要把 effect 参数映射到不同的参数位置，而当前有限摘要图没有
+可验证的映射边，实现必须保守回退 Unknown；不得把目标函数的参数位置直接当作调用者位置来
+取得并行资格。已知摘要完成后，普通调用仍按实际参数描述重新绑定；同位置的递归转发（如下面
+`retry`）可以保留 `ParamOps`。
 
 先在调用方上下文计算抽象实参，再加入 callee origin，因此 `identity(identity(p))`
 不把前后两个已经结束的传递误判为递归重入。构造闭包不进入 body；传递已知回调才
@@ -1102,6 +1117,26 @@ flow Main()->list {
     return [row.value for row in facts]
 }
 ```
+
+递归参数传递使用同一摘要关系，不增加新的源写法：
+
+```lip
+fn retry(n:number, p:effect)->effect {
+    if n == 0 { p } else { retry(n - 1, p) }
+}
+
+flow Recursive()->list {
+    facts=claim()
+    for x in [1,2] parallel {
+        value=perform retry(3, effect worker.read(x))
+        facts <+ value
+    }
+    return [row.value for row in facts]
+}
+```
+
+`retry` 的固定点是 `return=Param(1)`；调用点传入已知读取后，两个请求仍满足
+`Concurrent ReadOnly`。若参数传入 Write 或 Unknown，原有 `E-PARALLEL` 限制仍然生效。
 
 所有候选都必须满足 ReadOnly 且 Concurrent；Write、不可并发读取或 Unknown 候选仍
 导致 E-PARALLEL，包括常量未选分支中的候选。构造函数和静态分析零 provider 调用。

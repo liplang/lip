@@ -107,6 +107,8 @@ flow Main()->list {
 
 这里的请求经过函数参数和 object 字段仍保留 `worker.read` 的静态来源，所以三个只读动作可以并行；`facts` 的完整读取仍按输入位置返回 `[1,2,3]`。
 
+同一规则也适用于已知的闭合容器、条件/返回函数和递归参数转发。它们不会增加新的语法；静态摘要只在调用点把已知请求来源代入，真实未知的开放容器、动态 callable、Write 或不可并发读取仍不能获得并行资格。完整示例见 [`21_summary_recovery`](examples/ecosystem/21_summary_recovery.lip)。
+
 ## 从文件到 Go 程序
 
 ```sh

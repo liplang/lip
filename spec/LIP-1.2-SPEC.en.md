@@ -534,7 +534,7 @@ Composite effects take the supremum `Pure<ReadOnly<Write<Unknown`. Reading a com
 The constructors below are analysis notation, introducing neither source syntax nor values transferable across the Host boundary:
 
 ```text
-D ::= Unknown(reason) | Plain(type) | Request(operations)
+D ::= Unknown(reason) | Plain(type) | Param(i, type) | Request(operations)
     | Callable(origin, captures) | Object(fields, rest)
     | List(slots, element) | Union(D, ...)
 ```
@@ -542,6 +542,14 @@ D ::= Unknown(reason) | Plain(type) | Request(operations)
 origin identifies a language fn/core function's declaration/expression in its defining frozen source snapshot, never an address or an unqualified name. Distinct module/cell declarations remain distinct even when their local sites or names coincide. captures contain abstract descriptions only. Recursive captures use declaration references bound to that same lexical snapshot, without recursively expanding captured functions or looking up a later reused name. Object fields are indexed by known string keys; rest describes other keys or is Closed, meaning no other keys in normal results. List slots are ordered descriptions of a known length or Absent; element conservatively unions all elements. An empty list's element is Unknown at use. Descriptions own no runtime objects and MUST NOT retain runtime environments, business values, or entire source trees. Static field names/literal indices are source selectors, not samples of runtime values.
 
 Union retains every candidate without constant-guard pruning. Request sets union; an unknown or non-request candidate makes that position's Ops Unknown. A finite callable target set likewise requires every candidate to be known. Project each candidate container before unioning results; never impose the first candidate's structure/signature on others. Plain/Unknown descriptions may be shared; plain Data collections MUST NOT require per-element provenance records merely because they are large.
+
+`Param(i,type)` denotes the i-th abstract argument source of a language fn or Flow. It is analysis
+notation only, not a runtime value or a new source type. A `Request(operations)` summary may
+temporarily contain `ParamOps(i)`; the call site substitutes the operation summary of its actual
+argument. An unresolved `ParamOps(i)` supplies no parallel eligibility inside the declaration;
+after substitution, a complete finite operation set may contribute its effect and Concurrent
+properties. `any`, open containers, and dynamic callables outside the parameter relation remain
+Unknown.
 
 Union normalization is associative, commutative, and idempotent: flatten nested unions and deduplicate identical descriptions without changing candidates. Callable descriptions with the same origin but different abstract captures MUST remain separate. Unknown absorbs request eligibility, not the known evidence required by §15.1. Neither union traversal order nor a cache's first insertion determines a result.
 
@@ -601,9 +609,16 @@ Static Flows transfer abstract arguments to return positions in the same way, as
 
 ### 5.3. Recursive convergence, sessions, and portable acceptance
 
-Build argument-independent `BaseOps(f)` union equations for every language fn. Direct requests yield singletons; bindings/parentheses/simple aliases/immutable captures preserve information; if/match unions all candidates; value blocks analyze their tail. Only calls resolved through named declarations, direct anonymous fn, and simple aliases link callee equations. Parameters, container projections, dynamic callees, carry, and core results are Unknown. Include returned requests only, not unreturned constructions. Solve finite operation sets plus Unknown by the least fixed point, with internal empty bottom and Unknown top. `R={worker.read}∪R` yields `{worker.read}`; the empty solution of `R=R` becomes Unknown at use. Declaration order and heuristic iteration limits MUST NOT truncate this step.
+Build `BaseOps(f)` union equations and parameter-source relations for every language fn. Direct requests yield singletons; bindings/parentheses/simple aliases/immutable captures preserve information; if/match unions all candidates; value blocks analyze their tail. A returned parameter retains `Param(i,type)`, and a returned request may retain `ParamOps(i)` until a call site supplies an abstract argument description. Only calls resolved through named declarations, direct anonymous fn, and simple aliases link callee equations. Unresolved dynamic callees, open containers, carry, and core results remain Unknown. Include returned requests only, not unreturned constructions. Solve finite operation sets, parameter summaries, and Unknown by the least fixed point, with internal empty bottom and Unknown top. `R={worker.read}∪R` yields `{worker.read}`; `R=ParamOps(0)∪R` yields `{worker.read}` when the call supplies that known request; the empty solution of `R=R` becomes Unknown at use. Declaration order, union traversal order, and heuristic iteration limits MUST NOT truncate this step.
 
-§5.2 transfer carries an Active set of fn origins along the current analysis call path, initially empty. Entering a new origin adds it, removing it after that candidate finishes. Reentering the same origin stops expansion and returns only a Request proven by BaseOps; Unknown BaseOps retains only the declared return type and records recursive_boundary. This fallback cannot borrow other call-site arguments or stronger cached descriptions. Flow return transfer follows the acyclic graph and retains the same Active rule when entering fn. Every expansion path visits each finite source fn origin at most once, preventing infinite recursive container/higher-order expansion. Union candidates use independent Active branches, never first-arrival effects.
+§5.2 transfer carries an Active set of fn origins along the current analysis call path, initially empty. Entering a new origin adds it, removing it after that candidate finishes. Reentering the same origin uses that fn's fixed-point summary instead of freezing the recursive call as Unknown; `Param(i)`/`ParamOps(i)` relations remain available to the outer call site. If no base return exists, or the fixed point contains only an empty cycle, retain only the declared return type and record `recursive_boundary`. This fallback cannot borrow other call-site arguments or stronger cached descriptions. Flow return transfer follows the acyclic graph and retains the same Active rule when entering fn. Every expansion path visits each finite source fn origin at most once; recursive fixed points keep a finite summary graph and never unfold runtime recursion or turn fn recursion into a Flow cycle. Union candidates use independent Active branches, never first-arrival effects.
+
+If an unfinished recursive/forward summary edge would map an effect parameter to a different
+parameter position and the finite summary graph has no verifiable mapping edge, the implementation
+MUST conservatively fall back to Unknown; it MUST NOT treat the callee's parameter positions as the
+caller's positions to gain parallel eligibility. Once the callee summary is complete, ordinary calls
+rebind descriptions by their actual arguments. Same-position recursive forwarding, as in `retry`
+below, can retain `ParamOps`.
 
 Compute abstract argument descriptions in the caller context before adding the callee origin. Thus `identity(identity(p))` does not mistake two completed sequential transfers for recursive reentry. Constructing a closure does not enter its body; transferring a known callback does. Memoization MUST distinguish abstract arguments, captures, and the relevant Active context, or use a provably equivalent representation. A result from an empty Active context cannot replace a required recursive fallback. Cache/union candidate visitation order must not change either precision or acceptance.
 
@@ -627,6 +642,27 @@ flow Main()->list {
     return [row.value for row in facts]
 }
 ```
+
+Recursive parameter forwarding uses the same summary relation and introduces no source syntax:
+
+```lip
+fn retry(n:number, p:effect)->effect {
+    if n == 0 { p } else { retry(n - 1, p) }
+}
+
+flow Recursive()->list {
+    facts=claim()
+    for x in [1,2] parallel {
+        value=perform retry(3, effect worker.read(x))
+        facts <+ value
+    }
+    return [row.value for row in facts]
+}
+```
+
+The fixed point for `retry` is `return=Param(1)`. Supplying a known read at the call site then
+preserves `Concurrent ReadOnly`; a Write or Unknown argument remains subject to the existing
+`E-PARALLEL` restriction.
 
 Every candidate MUST be ReadOnly and Concurrent. Write, nonconcurrent ReadOnly, or Unknown still causes E-PARALLEL, including candidates under constant-unselected guards. Builders and static analysis invoke no providers. Every actual perform still validates the actual proposal's type, Data, contract, permissions, resources, and result; any exempts none. Precise summaries may remove Unknown barriers but preserve §7 ordering. §13 fixed-response and other determinism assumptions remain applicable.
 

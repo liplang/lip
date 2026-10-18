@@ -1,0 +1,26 @@
+# Run: lipc run -host demo -parallel 4 examples/ecosystem/21_summary_recovery.lip
+# A known function keeps its request summary when it travels through a closed
+# list, a conditional, or a function return. Recursive forwarding keeps the
+# effect parameter and therefore remains eligible for a known read.
+import go "strings" as text
+
+fn upper_request(value:string)->effect { effect text.ToUpper(value) }
+fn make_upper()->function { upper_request }
+fn retry(n:number, request:effect)->effect {
+    if n == 0 { request } else { retry(n - 1, request) }
+}
+
+flow Main()->list {
+    from_list = [upper_request][0]
+    from_condition = if true { upper_request } else { upper_request }
+    from_return = make_upper()
+    facts = claim()
+    for name in ["ada", "lin"] parallel {
+        one = perform from_list(name)
+        two = perform from_condition(name)
+        three = perform from_return(name)
+        four = perform retry(2, upper_request(name))
+        facts <+ {name:name, values:[one, two, three, four]}
+    }
+    return [row.value for row in facts]
+}

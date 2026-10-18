@@ -40,6 +40,7 @@ type checker struct {
 	err           error
 	top           int
 	local         int
+	active        map[*expression]bool
 	voidOK        *expression
 	returns       map[*expression]*operationSummary
 }
@@ -53,7 +54,14 @@ func requestDesc(ops *operationSummary) *staticDesc {
 	return &staticDesc{kind: descRequest, typ: "effect", ops: ops}
 }
 func paramDesc(i int, typ string) *staticDesc {
-	return &staticDesc{kind: descParam, typ: normalizeType(typ), param: i}
+	d := &staticDesc{kind: descParam, typ: normalizeType(typ), param: i}
+	if d.typ == "effect" {
+		d.ops = paramOperations(i)
+	}
+	return d
+}
+func paramOperations(i int) *operationSummary {
+	return &operationSummary{parameter: true, param: i}
 }
 func callableDesc(fn *expression, ret *staticDesc) *staticDesc {
 	return &staticDesc{kind: descCallable, typ: "function", fn: fn, ret: ret}
@@ -108,6 +116,9 @@ func sameDesc(a, b *staticDesc) bool {
 	eqSummary = func(x, y *operationSummary) bool {
 		if x == nil || y == nil {
 			return x == y
+		}
+		if x.parameter || y.parameter {
+			return x.parameter == y.parameter && x.param == y.param && len(x.sources) == len(y.sources)
 		}
 		xops, xknown := resolvedOperations(x)
 		yops, yknown := resolvedOperations(y)
@@ -299,6 +310,8 @@ func descOps(d *staticDesc) (*operationSummary, bool) {
 		return nil, false
 	case descRequest:
 		return d.ops, d.ops != nil
+	case descParam:
+		return d.ops, d.ops != nil
 	case descUnion:
 		var out *operationSummary
 		for _, p := range d.parts {
@@ -338,6 +351,37 @@ func callableParts(d *staticDesc) ([]*staticDesc, bool) {
 	return out, len(out) != 0
 }
 
+// provisionalParameterSwap marks a call whose callee summary is still an
+// empty forward/recursive cell and whose effect parameter is forwarded through
+// a different positional parameter.  The compact summary graph deliberately
+// keeps same-position recursion precise; without an argument-mapping edge, a
+// swapped recursive call could otherwise read only the first parameter and
+// hide a Write/Unknown request.  Falling back to Unknown is conservative until
+// a richer finite mapping is available.
+func provisionalParameterSwap(active map[*expression]bool, fn *expression, args []*staticDesc) bool {
+	if fn == nil {
+		return false
+	}
+	cell := fn.info.returns
+	provisional := cell == nil || (!cell.parameter && cell.operation == "" && len(cell.sources) == 0)
+	if !active[fn] && !provisional {
+		return false
+	}
+	for i, p := range fn.params {
+		if normalizeType(p.typ) != "effect" {
+			continue
+		}
+		if i >= len(args) {
+			return true
+		}
+		d := args[i]
+		if d != nil && d.kind == descParam && d.param != i {
+			return true
+		}
+	}
+	return false
+}
+
 func instantiateDesc(d *staticDesc, args []*staticDesc, active map[*expression]bool) *staticDesc {
 	if d == nil {
 		return nil
@@ -353,7 +397,18 @@ func instantiateDesc(d *staticDesc, args []*staticDesc, active map[*expression]b
 			return args[d.param]
 		}
 		return nil
-	case descRequest, descPlain:
+	case descRequest:
+		// A provisional forward/recursive call points at an empty summary
+		// cell.  Keep that cell by identity so a later function check can
+		// publish its fixed point; copying an empty cell here would freeze the
+		// call as an artificial Unknown.
+		if d.ops != nil && !d.ops.parameter && d.ops.operation == "" && len(d.ops.sources) == 0 {
+			return d
+		}
+		copy := *d
+		copy.ops = instantiateOperations(d.ops, args)
+		return &copy
+	case descPlain:
 		return d
 	case descCallable:
 		if d.fn != nil && active[d.fn] {
@@ -670,6 +725,48 @@ func unionOperations(a, b *operationSummary) *operationSummary {
 	return &operationSummary{sources: []*operationSummary{a, b}}
 }
 
+// instantiateOperations substitutes parameter summary atoms with the
+// operation summary of the corresponding actual descriptor.  The memo table
+// deliberately preserves recursive cells: a recursive relation such as
+// R(p) = p | R(p) becomes a finite graph whose reachability is still the
+// operation summary of p, rather than an artificial Unknown.
+func instantiateOperations(root *operationSummary, args []*staticDesc) *operationSummary {
+	if root == nil {
+		return nil
+	}
+	memo := map[*operationSummary]*operationSummary{}
+	var visit func(*operationSummary) *operationSummary
+	visit = func(s *operationSummary) *operationSummary {
+		if s == nil {
+			return nil
+		}
+		if s.parameter {
+			if s.param < 0 || s.param >= len(args) {
+				return nil
+			}
+			op, ok := descOps(args[s.param])
+			if !ok {
+				return nil
+			}
+			return op
+		}
+		if cached, ok := memo[s]; ok {
+			return cached
+		}
+		copy := &operationSummary{operation: s.operation}
+		memo[s] = copy
+		for _, source := range s.sources {
+			instantiated := visit(source)
+			if instantiated == nil {
+				return nil
+			}
+			copy.sources = append(copy.sources, instantiated)
+		}
+		return copy
+	}
+	return visit(root)
+}
+
 // Reachability computes the least union fixed point, including recursive
 // components. Empty intermediate cells are bottom, never an unknown leaf.
 // No function is evaluated and no operation is inferred from a runtime value.
@@ -681,6 +778,9 @@ func resolvedOperations(root *operationSummary) ([]string, bool) {
 		s := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
 		if s == nil {
+			return nil, false
+		}
+		if s.parameter {
 			return nil, false
 		}
 		if seen[s] {
@@ -942,6 +1042,9 @@ func analyzeBindings(s *syntax, host Host, initial map[string]bindingInfo) (*che
 	for i, p := range s.params {
 		info := pureInfo(p.typ)
 		info.desc = paramDesc(i, p.typ)
+		if normalizeType(p.typ) == "effect" {
+			info.ops = paramOperations(i)
+		}
 		c.declare(flow, p.name, bindingInfo{info: info}, p.tok)
 	}
 	returns := 0
@@ -1019,9 +1122,17 @@ func (c *checker) function(e *expression, env *scope) analysis {
 	if e.info.returns == nil {
 		e.info.returns = c.returns[e]
 	}
+	if c.active == nil {
+		c.active = map[*expression]bool{}
+	}
+	c.active[e] = true
+	defer delete(c.active, e)
 	for i, p := range e.params {
 		info := pureInfo(p.typ)
 		info.desc = paramDesc(i, p.typ)
+		if normalizeType(p.typ) == "effect" {
+			info.ops = paramOperations(i)
+		}
 		c.declare(local, p.name, bindingInfo{info: info}, p.tok)
 	}
 	a := c.localBlock(e.body, local, true, false, 0)
@@ -1234,6 +1345,18 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			a.typ = "list"
 		} else if x, ok := env.find(e.name); ok {
 			a = x.info
+			// A binding that carries a statically known function can be copied
+			// through a list/object/conditional without losing its callable
+			// return description.  The binding's ordinary type remains
+			// "function", but its finite descriptor belongs to the declaration
+			// that created the value.
+			if x.fn != nil && (a.desc == nil || (a.desc.kind == descPlain && a.desc.typ == "function")) {
+				if x.fn.info.desc != nil {
+					a.desc = x.fn.info.desc
+				} else {
+					a.desc = callableDesc(x.fn, nil)
+				}
+			}
 			a.effect, a.concurrent, a.hasFlow = PureEffect, true, false
 		} else if _, ok := c.syntax.flows[e.name]; ok {
 			c.error(e.tok, "E-TYPE", "Flow declarations are not values")
@@ -1350,7 +1473,9 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			}
 		}
 		if a.desc != nil {
-			a.ops, _ = descOps(a.desc)
+			if ops, ok := descOps(a.desc); ok {
+				a.ops = ops
+			}
 		}
 	case "native_receiver":
 		a = sub(e.x)
@@ -1542,10 +1667,15 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		if candidates, ok := callableParts(candidateDesc); ok {
 			var returns []*staticDesc
 			failed := make([]int, 0, len(candidates))
+			uncertain := false
 			for _, candidate := range candidates {
 				if candidate.fn != nil {
 					if phase := candidatePhase(candidate.fn, e.args); phase >= 0 {
 						failed = append(failed, phase)
+						continue
+					}
+					if provisionalParameterSwap(c.active, candidate.fn, argDescs) {
+						uncertain = true
 						continue
 					}
 					ret := candidate.ret
@@ -1559,7 +1689,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 					returns = append(returns, instantiateDesc(ret, argDescs, nil))
 				}
 			}
-			if len(failed) == 0 && len(returns) == len(candidates) && len(returns) > 0 {
+			if !uncertain && len(failed) == 0 && len(returns) == len(candidates) && len(returns) > 0 {
 				a.desc = unionDesc(returns...)
 				if typ := descType(a.desc); typ != "any" {
 					declared := ""
@@ -1570,7 +1700,14 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 						a.typ = typ
 					}
 				}
-				a.ops, _ = descOps(a.desc)
+				if ops, ok := descOps(a.desc); ok {
+					a.ops = ops
+				}
+			} else if uncertain {
+				// A provisional recursive/forward cell with a positional effect
+				// swap has no finite argument-mapping edge in this summary graph.
+				// Keep the call dynamically valid, but do not let it establish Ops.
+				a.desc, a.ops = nil, nil
 			} else if len(failed) == len(candidates) && len(failed) > 0 {
 				phase := failed[0]
 				for _, p := range failed[1:] {
@@ -1625,7 +1762,9 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			}
 		}
 		if a.desc != nil {
-			a.ops, _ = descOps(a.desc)
+			if ops, ok := descOps(a.desc); ok {
+				a.ops = ops
+			}
 		}
 	case "comprehension":
 		source := sub(e.y)
