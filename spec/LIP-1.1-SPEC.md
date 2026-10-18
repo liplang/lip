@@ -71,7 +71,7 @@ Flow 本身仍不是值，调用图仍无环，fn 的计算结果与业务效果
 
 | 对象 | 规则 |
 |---|---|
-| Data | null、bool、number（有限 binary64、正负无穷或规范 NaN）、UTF-8 string、list、string-keyed object |
+| Data | null、bool、number（完整 binary64，包括正负无穷与规范 NaN）、UTF-8 string、list、string-keyed object |
 | fn | 捕获不可变值的纯闭包；允许第 3.2 节单向诊断和第 10.3 节 @{...} 显式承诺纯性的原生调用；支持递归、互递归和函数值 |
 | effect | 已解析 operation 与已固定 Data 参数组成的不可变 proposal |
 | Flow | 具名图定义；不可变绑定、控制结构和子 Flow 调用降低得到依赖图；不是普通值 |
@@ -497,18 +497,19 @@ bool 与 number 不相等。对象字段/索引不产生隐式绑定，重复 ob
 求值右侧。`&&`、`||`、if/match 未选分支不求值。
 
 number 为 IEEE 754 binary64，含第 3.3 节的正负无穷与规范 NaN；`-0` 规范化为 `0`。以下数值域规则适用于有限操作数；非有限操作数先按第 3.3 节处理。基本四则按 binary64 的 round-to-
-nearest/ties-to-even 求值，禁止浮点重结合或影响结果的隐式 FMA。有限操作数除零、产生非有限结果报
-`E-NUMBER`。`a // b` 为精确数学商向负无穷取整后的 binary64 值；`a % b` 是与该取整
+nearest/ties-to-even 求值，禁止浮点重结合或影响结果的隐式 FMA；结果允许为规范 NaN 或正负无穷。
+`a / 0` 按 IEEE-754 产生带符号无穷，`0 / 0` 为 NaN；`a // 0` 与 `a % 0` 为 NaN。
+`a // b` 为精确数学商向负无穷取整后的 binary64 值；`a % b` 是与该取整
 对应的数学余数，舍入后必须满足 b>0 时 `[0,b)`、b<0 时 `(b,0]`。若舍入等于排除的
 边界 b，取 `nextafter(b,0)`；零规范化为 0。这里 a、b 是两个 number 操作数，
 `nextafter(b,0)` 表示从 b 向零移动一个 binary64 可表示值，是数值规则的辅助记号，
 不是 LIP 内建函数。实现不得使用截断除法代替 floor 除法。
 
 `a ** b` 为实数幂，`a */ b` 为以右操作数 b 为底的实数对数。两者只接受两个 number，
-类型不符报 E-TYPE。幂的约定为 `0 ** 0 = 1`；零底数的负指数、负底数的非整数指数报
-E-NUMBER。这里“整数指数”指存储的 binary64 值精确为整数，不受索引安全整数范围限制。
-对数要求 a>0、b>0 且 b!=1，否则报 E-NUMBER；有限合法输入中 `1 */ b = 0`、`a */ a = 1`。
-超出有限 number 范围的结果报 E-NUMBER；允许次正规结果和下溢为零，并规范化负零。
+类型不符报 E-TYPE。幂的约定为 `0 ** 0 = 1`；零底数的负指数返回 `+inf`；负底数的非整数指数返回
+NaN。这里“整数指数”指存储的 binary64 值精确为整数，不受索引安全整数范围限制。
+对数要求 a>=0、b>0 且 b!=1；非法定义域返回 NaN。`0 */ b` 在 b>1 时为 -inf，在 0<b<1 时为 +inf；
+有限合法输入中 `1 */ b = 0`、`a */ a = 1`。超出有限 number 范围的结果返回带符号无穷；允许次正规结果和下溢为零，并规范化负零。
 两者使用第 16.5 节固定的 binary64 参考算法，近似实数运算，不承诺正确舍入；
 不得直接替换为随平台或库版本变化的 pow/log。数学上相等的不同表达式未必逐位相等。
 领域数值库、复数和其他超越函数由 Go/Python operation 提供。
@@ -669,7 +670,7 @@ Claim 或 journal 记录。实参的效果仍须完整合并：Flow 内 print �
 
 每次实际求值到合法诊断调用时进行一次发送尝试；正常路径返回 null。未选分支不发送，
 声明、补全、静态检查与构建不执行诊断。即使关闭输出，实参仍按正常调用顺序求值并检查；
-print(1/0) 仍产生参数的 E-NUMBER。编译器不得仅依据返回值纯性删除、合并、缓存或提前
+print(1/0) 仍先求值参数并显示 inf。编译器不得仅依据返回值纯性删除、合并、缓存或提前
 执行带诊断的调用，从而改变实际执行路径的发送尝试。纯值优化仍须保留这些尝试与参数错误。
 
 接收端只接受已经固定的事件，不向 LIP 返回发送状态，不同步回调 LIP，不提供程序可读的
@@ -706,7 +707,7 @@ number/number?/any 注解、容器、Claim 和入口/Host 值。所有原生 qui
 符号与 payload 在进入 LIP 前统一为 binary64 bits `0x7ff8000000000000`；不得保留可观察的
 payload。`inf` 同样是不可重定义的 number 字面量，表示 binary64 正无穷（bits 0x7ff0000000000000）；
 `-inf` 是其一元负号形式（bits 0xfff0000000000000）。原生 NaN 与正负无穷可进入
-相同 Data 位置。不会把有限操作数的领域错误、除零或溢出静默变为 nan/inf。
+相同 Data 位置。有限操作数的除零、溢出和幂/对数非法定义域按第 3 节产生 NaN 或带符号无穷；它们不是控制流错误。
 
 NaN 检测可由现有比较组合，无需新增核心函数。以下 is_nan 指普通辅助 fn，使用时自行声明：
 
@@ -733,7 +734,7 @@ fn is_nan(x:number)->bool { x != x }
 幂等，同 CallID 的规范 NaN 实参可重放；与 null、string "nan" 或其他值均不合并。
 
 `inf` 与 `-inf` 的规则如下。运算先检查类型，再处理上述幂恒等式与 NaN，
-再处理本表，最后才进入有限数算法。`/ // %` 的零除数在 NaN 传播后总是报 E-NUMBER，
+再处理本表，最后才进入有限数算法。`// %` 的零除数在 NaN 传播后总是返回 NaN；`/` 的零除数按 IEEE-754 返回带符号无穷或 NaN，
 包括 `inf / 0`；实参仍按通常顺序严格求值。
 
 | 情形 | 结果 |
@@ -750,7 +751,7 @@ fn is_nan(x:number)->bool { x != x }
 
 abs 是描述规则的数学记号，不增加核心函数。已有 `a ** 0 = 1`、`1 ** b = 1`
 优先于 NaN/无穷规则；例如 `inf ** 0 = 1`、`(-1) ** inf = 1`、`0 ** -inf = inf`。
-有限操作数的负底数非整数幂仍为 E-NUMBER；有限数算法的溢出结果不转为 inf。
+有限操作数的负底数非整数幂返回 NaN；有限数算法的溢出结果转为带符号 inf。
 整除与余数使用有限除数趋向指定符号无穷的单侧极限规则，与 Python 相同；
 不对无穷使用精确有理数算法，也不要求无穷情形满足有限余数恒等式。
 
@@ -2336,7 +2337,7 @@ Host 数据边界和持久 journal 的实现验收。
 | 运行时 Error | 条件 |
 |---|---|
 | E-TYPE / E-ARITY / E-SCHEMA | 动态值/参数/输入/结果不符 |
-| E-VALUE / E-NUMBER / E-INDEX | 非法 native 数据/传输、数值域错误/除零或有限操作数溢出、越界/缺键；规范 NaN 与正负无穷本身合法 |
+| E-VALUE / E-INDEX | 非法 native 数据/传输、越界/缺键；规范 NaN 与正负无穷以及算术产生的非有限结果本身合法 |
 | E-FAIL / E-MATCH-NO-ARM | fail 调用或表达式 match 无 arm |
 | E-BUDGET / E-CAPABILITY / E-OPERATION | 明确资源预算、授权或注册失败 |
 | E-CLAIM-CONFLICT / E-DEPENDENCY | 同 JoinID 变值或不可用数据依赖 |
@@ -2484,7 +2485,7 @@ bits=1 表示八字节 binary64 编码的无符号整数值为 1，即最小正�
 
 字面量 `2e-324` 舍入为 0，`3e-324` 舍入为最小正次正规值（bits=1）。四则运算不能
 flush subnormal；number 的四则/literal 转换结果均按第 3 节规范化零。有限操作数除数为零和非有限
-商报 E-NUMBER。以上向量必须在解释器、生成 Go 和边界编解码中一致。
+商按本节规则产生 NaN 或无穷。以上向量必须在解释器、生成 Go 和边界编解码中一致。
 
 ### 16.4. 核心一致性用例
 
@@ -2549,10 +2550,10 @@ flow Main() -> number {
 | `[0][[0,1]]` / `[0][::0]` | E-INDEX / E-VALUE，无部分结果 | core 求值及生成程序 |
 | function/effect list 经索引列表、切片再投影 | 原值保留；Ops 仍为 Unknown，不能放行 parallel | core 静态/动态 |
 | `{ len([0]); }` / `{ len([0]); null }` | 分别为 1 / null，末尾分号是 padding | core 求值 |
-| `if false { 1 / 0 } else { 7 }` | 7；无 E-NUMBER，未选分支不消耗执行预算 | core 求值/不同 Ready 次序 |
+| `if false { 1 / 0 } else { 7 }` | 7；无数值错误，未选分支不消耗执行预算 | core 求值/不同 Ready 次序 |
 | `flow Main()->number { if false { x=1/0 }; return 7 }` | x 为 unselected_gate；无根错误，F 为空，不截断，输出 7 | core 调度 |
 | `[1 / x for x in [0,2] if x != 0]` | `[0.5]`；x=0 的 body 不求值 | core 求值 |
-| `[x for x in [1] if 1 / 0 == 0]` | guard E-NUMBER，不能当成 false | core 求值 |
+| `[x for x in [1] if 1 / 0 == 0]` | guard 得到 NaN==0 的 false，不能把数值 NaN 当成错误或静默跳过 | core 求值 |
 | `[perform effect worker.read(x) for x in [0,1,2] if x>0]` | 输出 [1,2]；两个 CallID 的该 EvalPath 索引为 1/2，不是 0/1 | core 身份 |
 | `"10" < "9"` / `"a" < "aa"` / `1 < "2"` | true / true / E-TYPE（直接已知时静态拒绝） | core 比较 |
 | `parse_number("+1e-3")` / `parse_number("-0")` / `parse_number("3e-324")` | 0.001 / 0 / bits=1 | core 求值 |
@@ -2727,7 +2728,7 @@ HTTP 接入还须满足以下用例；它们不要求未声明 HTTP 配置的 co
 | 输入 / 环境 | 必需结果 | 层 |
 |---|---|---|
 | `fn twice(x:number)->number{log("debug",x);x*2}`，输入 3 | 开启/关闭/满队列/关闭缓冲均返回 6；接收端故障不能改变计算 | core 诊断 |
-| `print(1/0)`，输出关闭 | 仍为 E-NUMBER；不得省略实参求值 | core 求值 |
+| `print(1/0)`，输出关闭 | 仍显示 inf；不得省略实参求值 | core 求值 |
 | 未选分支中的诊断；只声明/编译带诊断的函数 | 零发送尝试 | core 路径 |
 | 带诊断的已知 ReadOnly 请求构造函数在 parallel 中执行 | RetOps 不丢失；真实读取可重叠；journal 只记录 perform | core 摘要 |
 | `print(perform effect store.commit())` 位于 parallel body / 普通 fn / @{...} fn | E-PARALLEL / E-PURITY / 按显式承诺接受；实际写入违反承诺，Host 检查仍生效 | core 效果 |
@@ -2742,13 +2743,13 @@ is_nan 使用第 3.3 节的辅助 fn。实际不纯的调用属于作者违约�
 |---|---|---|
 | `nan`、`-nan`、原生不同 payload/sign 的 NaN | 同一规范 number，is_nan 为 true，C 为 037ff8000000000000 | core 数值 |
 | `inf`、`-inf`、Go/Python 原生无穷 | number；C 分别为 037ff0000000000000、03fff0000000000000 | core 数值 |
-| `inf-inf`、`0*inf`、`inf/inf`；`inf/0`；`1e308*2` | nan、nan、nan；E-NUMBER；E-NUMBER | core 数值 |
+| `inf-inf`、`0*inf`、`inf/inf`；`inf/0`；`1e308*2` | nan、nan、nan；inf；inf | core 数值 |
 | `(-inf)**3`、`(-inf)**0.5`、`0**-inf`、`inf*/inf` | -inf、inf、inf、nan | core 数值 |
 | `-1//inf`、`-1%inf`、`inf//2`、`inf%2` | -1、inf、nan、nan | core 数值 |
 | `parse_number(str(-inf))`；`xs[inf]`；`range(inf)` | -inf；E-INDEX；E-VALUE | core 边界 |
 | 正负无穷经原生参数/结果、入口与 c-hex 往返；JSON 编码 | 保留符号与 C；JSON 拒绝，完成事实保留 | core 传输 |
 | `nan == nan`、`nan != nan`、`[nan] == [nan]`、`nan < 0`、`nan >= 0` | false、true、false、false、false | core 比较 |
-| `nan / 0`、`nan % 0`、`nan */ 1`、`nan ** 0`、`1 ** nan` | nan、nan、nan、1、1；`0/0`、`0**-1` 仍为 E-NUMBER | core 数值 |
+| `nan / 0`、`nan % 0`、`nan */ 1`、`nan ** 0`、`1 ** nan` | nan、nan、nan、1、1；`0/0`、`0**-1` 为 nan、inf | core 数值 |
 | `is_nan(parse_number(str(nan)))`；`parse_number("NaN")`；`is_nan(null)` | true；E-VALUE；E-TYPE | core 函数 |
 | `xs[nan]`、`xs[:nan]`、`range(nan)`、`nan + "x"` | E-INDEX、E-INDEX、E-VALUE、E-TYPE | core 边界 |
 | match 的 nan literal、number 类型与 is_nan guard | literal 不匹配；类型与 guard 可选中；未选 arm 零调用 | core 控制 |
@@ -2779,14 +2780,14 @@ is_nan 使用第 3.3 节的辅助 fn。实际不纯的调用属于作者违约�
 `math.Frexp(x)` 返回精确的 `(m,k)`，满足 x=m·2^k、非零时 0.5≤|m|<1；
 `math.Sqrt(x)` 为非负 x 的平方根，按 nearest/ties-to-even 正确舍入；
 `math.Ldexp(m,k)` 返回 m·2^k 经 nearest/ties-to-even 舍入的 binary64，允许次正规数、
-零和溢出；`math.Inf(1)` 为此有限操作数算法的内部正无穷溢出哨兵，最终必须转为 E-NUMBER。
+零和溢出；`math.Inf(1)` 为此有限操作数算法的正无穷溢出结果；它成为 LIP 的 inf，而不是错误。
 已有无穷操作数的规则由第 3.3 节先处理，不进入此算法。
 整数/浮点转换遵循代码，涉及的循环索引可精确表示。符合本节结果的等价优化可使用；
 不得借由误差容限接受不同的结果位模式。
 
 调用前先按第 3.3 节处理非有限操作数，再执行第 3 节有限数定义域检查；corePower 接受检查通过的有限操作数，coreLog 只接受
 正有限操作数，coreExp 只由 corePower 调用。`**` 取 corePower(a,b)；`*/` 先处理
-第 3 节的精确特例，再取 numericDiv(coreLog(a),coreLog(b))。最终拒绝非有限值并规范化零。
+第 3 节的精确特例，再取 numericDiv(coreLog(a),coreLog(b))。保留算法产生的 NaN/无穷并规范化零。
 自然对数使用固定 24 项级数及指数分解；指数使用固定 24 项级数和 2 的幂缩放；
 幂的整数部分使用带缩放的平方求幂，±0.5 指数使用平方根及其倒数。这些辅助函数不加入核心函数表。
 
@@ -2899,7 +2900,7 @@ func corePower(x, y float64) float64 {
 ```
 
 以下用例在解释器及生成程序中必须一致；表中的 bits 是规范化结果的 binary64
-无符号 64 位编码，十六进制写法仅用于说明结果。定义域错误不产生成功值。
+无符号 64 位编码，十六进制写法仅用于说明结果。数值定义域与溢出产生 NaN/无穷值；类型错误仍不产生成功值。
 
 | 表达式 | 预期结果 |
 |---|---|
@@ -2907,8 +2908,10 @@ func corePower(x, y float64) float64 {
 | `(-2) ** 3` | -8 |
 | `2 ** -1074` | bits=1，最小正次正规数 |
 | `2 ** -1075`、`(-2) ** -1075` | 0 |
-| `2 ** 1024`、`0 ** -1`、`(-2) ** 0.5` | E-NUMBER |
-| `0 */ 2`、`2 */ 1`、`2 */ 0`、`2 */ -2` | E-NUMBER |
+| `2 ** 1024`、`0 ** -1`、`(-2) ** 0.5` | inf、inf、nan |
+| `3 / 0`、`-3 / 0`、`0 / 0` | inf、-inf、nan |
+| `222 ** 8888`、`nan * inf` | inf、nan |
+| `0 */ 2`、`2 */ 1`、`2 */ 0`、`2 */ -2` | -inf、nan、nan、nan |
 | `0.25 */ 2`、`8 */ 0.5` | -2、-3 |
 | `2 ** 0.5`、`4 ** -0.5` | bits=`0x3ff6a09e667f3bcd`、0.5 |
 | `5e-324 ** 0.5` | 精确 2^-537，bits=`0x1e60000000000000` |

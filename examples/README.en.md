@@ -35,7 +35,7 @@ Run `./lipc run examples/basics/FILE.lip`.
 
 `**` associates right: `2 ** 3 ** 2 = 512`. Power precedes left negation: `-3 ** 2 = -9`; use `(-3) ** 2 = 9` for a negative base. Negative exponents work: `2 ** -3 = 0.125`. `*/` uses its right operand as base: `8 */ 2 = 3`, at multiplication precedence, associating left.
 
-number does not distinguish integer/fraction types: 3 equals 3.0 and displays as 3. Log arguments/base must be positive, base not 1; negative power bases require integral exponents. Fixed algorithms approximate power/log; domain/overflow errors are E-NUMBER.
+number does not distinguish integer/fraction types: 3 equals 3.0 and displays as 3. `3 / 0` is `inf`, `0 / 0` is `nan`, `222 ** 8888` overflows to `inf`, `nan * inf` is `nan`, and `0 ** -1` is `inf`. Log accepts a nonnegative argument, a positive base other than 1; invalid domains and nonintegral negative powers yield `nan`, while zero arguments and overflow can yield signed `inf`. Fixed algorithms approximate power/log.
 
 Try `learn -lesson power` / `logarithm`. REPL/learn support arrows for editing/history (vertical movement in multiline input), Ctrl-P/N for history, Alt-Enter for a new line, Tab completion, and Ctrl-R search; see [keyboard help](../README.en.md#interactive-computation-and-learning).
 

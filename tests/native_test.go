@@ -170,7 +170,7 @@ func TestNativeRunOwnershipAndFailedCellCleanup(t *testing.T) {
 	nativeCell(t, s, `saved=lib.New()`, "")
 	count := func() int { return reflect.ValueOf(host.Native.Go).Elem().FieldByName("objects").Len() }
 	baseline := count()
-	for _, source := range []string{`abandoned=lib.New();fail("stop")`, `unused=lib.New();1/0`} {
+	for _, source := range []string{`abandoned=lib.New();fail("stop")`, `unused=lib.New();parse_number("01")`} {
 		if _, err := s.Eval(context.Background(), source, Options{}); err == nil {
 			t.Fatal("failed cell succeeded")
 		}
@@ -252,7 +252,7 @@ def alive():
 	defer s.Close()
 	nativeCell(t, s, `import python "lip_ownership_fixture" as lib`, "")
 	nativeCell(t, s, `saved=lib.make()`, "")
-	if _, err := s.Eval(context.Background(), `abandoned=lib.make();1/0`, Options{}); err == nil {
+	if _, err := s.Eval(context.Background(), `abandoned=lib.make();parse_number("01")`, Options{}); err == nil {
 		t.Fatal("failed cell succeeded")
 	}
 	nativeCell(t, s, `lib.alive()`, "1")

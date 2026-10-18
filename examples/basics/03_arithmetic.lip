@@ -1,5 +1,6 @@
-# number is finite binary64. Parentheses change precedence.
+# number uses the complete IEEE-754 binary64 value domain. Parentheses change precedence.
 # / divides; // rounds the quotient toward negative infinity; % follows the divisor sign.
+# / by zero and arithmetic overflow produce inf/nan values; // and % by zero produce nan.
 # The specification defines floating-point boundaries for // and %, independently of Go/Python.
 # ** is right-associative exponentiation: 2 ** 3 ** 2 = 2 ** (3 ** 2).
 # Power precedes left negation: -3 ** 2 = -9; use (-3) ** 2 = 9 to square a negative base.
@@ -19,6 +20,12 @@ flow Main() -> object {
         negative_base: (-3) ** 2,
         inverse_power: 2 ** -3,
         logarithm: 8 */ 2,
+        divide_by_zero: str(3 / 0),
+        zero_over_zero: str(0 / 0),
+        overflow: str(222 ** 8888),
+        invalid_power: str((-1) ** 0.5),
+        invalid_log: str(2 */ 0),
+        nan_mix: str(nan * inf),
         logic: (3 >= 2) && !(1 == 2)
     }
 }

@@ -844,12 +844,10 @@ func absInt(x int) int {
 	return x
 }
 
-func finiteNumber(n float64) (Value, error) {
-	if math.IsNaN(n) || math.IsInf(n, 0) {
-		return Value{}, diagnostic("E-NUMBER", "finite arithmetic produced a non-finite result")
-	}
-	return NumberValue(n)
-}
+// arithmeticNumber preserves the complete binary64 result domain.  LIP
+// normalizes NaN payloads and signed zero in NumberValue, while retaining
+// infinities produced by IEEE-754 division, overflow, and exponentiation.
+func arithmeticNumber(n float64) (Value, error) { return NumberValue(n) }
 func containsNonFinite(v Value) bool {
 	if v.k == Number && (math.IsNaN(v.n) || math.IsInf(v.n, 0)) {
 		return true
@@ -880,29 +878,44 @@ func arithmetic(op string, a, b Value) (Value, error) {
 	if math.IsNaN(a.n) || math.IsNaN(b.n) {
 		return nanValue(), nil
 	}
-	if (op == "/" || op == "//" || op == "%") && b.n == 0 {
-		return Value{}, diagnostic("E-NUMBER", "division by zero")
+	// IEEE-754 division by zero is a value operation: non-zero finite values
+	// produce a signed infinity and 0/0 produces NaN.  Floor division and
+	// remainder have no IEEE quotient at a zero divisor, so their invalid
+	// result is the canonical NaN as well.  This keeps the operation total over
+	// the language number domain instead of turning a numeric result into a
+	// control-flow error.
+	if (op == "//" || op == "%") && b.n == 0 {
+		return nanValue(), nil
 	}
 	if math.IsInf(a.n, 0) || math.IsInf(b.n, 0) {
 		return infiniteArithmetic(op, a.n, b.n)
 	}
 	switch op {
 	case "+":
-		return finiteNumber(a.n + b.n)
+		return arithmeticNumber(a.n + b.n)
 	case "-":
-		return finiteNumber(a.n - b.n)
+		return arithmeticNumber(a.n - b.n)
 	case "*":
-		return finiteNumber(a.n * b.n)
+		return arithmeticNumber(a.n * b.n)
 	case "/":
-		return finiteNumber(a.n / b.n)
+		return arithmeticNumber(a.n / b.n)
 	case "**":
-		if a.n == 0 && b.n < 0 || a.n < 0 && math.Trunc(b.n) != b.n {
-			return Value{}, diagnostic("E-NUMBER", "power has no finite real value")
+		if a.n == 0 && b.n < 0 {
+			return infValue(), nil
 		}
-		return finiteNumber(corePower(a.n, b.n))
+		if a.n < 0 && math.Trunc(b.n) != b.n {
+			return nanValue(), nil
+		}
+		return arithmeticNumber(corePower(a.n, b.n))
 	case "*/":
-		if a.n <= 0 || b.n <= 0 || b.n == 1 {
-			return Value{}, diagnostic("E-NUMBER", "logarithm requires value > 0, base > 0 and base != 1")
+		if a.n < 0 || b.n <= 0 || b.n == 1 {
+			return nanValue(), nil
+		}
+		if a.n == 0 {
+			if b.n > 1 {
+				return number(math.Inf(-1)), nil
+			}
+			return infValue(), nil
 		}
 		if a.n == 1 {
 			return number(0), nil
@@ -910,7 +923,7 @@ func arithmetic(op string, a, b Value) (Value, error) {
 		if a.n == b.n {
 			return number(1), nil
 		}
-		return finiteNumber(numericDiv(coreLog(a.n), coreLog(b.n)))
+		return arithmeticNumber(numericDiv(coreLog(a.n), coreLog(b.n)))
 	case "//", "%":
 		x, y := new(big.Rat).SetFloat64(a.n), new(big.Rat).SetFloat64(b.n)
 		q := new(big.Rat).Quo(x, y)
@@ -921,20 +934,20 @@ func arithmetic(op string, a, b Value) (Value, error) {
 		}
 		if op == "//" {
 			n, _ := new(big.Rat).SetInt(whole).Float64()
-			return finiteNumber(n)
+			return arithmeticNumber(n)
 		}
 		r := new(big.Rat).Sub(x, new(big.Rat).Mul(new(big.Rat).SetInt(whole), y))
 		n, _ := r.Float64()
 		if n == b.n {
 			n = math.Nextafter(b.n, 0)
 		}
-		return finiteNumber(n)
+		return arithmeticNumber(n)
 	}
 	return Value{}, diagnostic("E-TYPE", "unknown arithmetic operator")
 }
 
 // Infinite operands are handled before the fixed finite algorithms and exact
-// rational division. Finite overflow still goes through finiteNumber.
+// rational division is used only for finite operands; rounded overflow remains a value.
 func infiniteArithmetic(op string, a, b float64) (Value, error) {
 	switch op {
 	case "+":
@@ -983,8 +996,14 @@ func infiniteArithmetic(op string, a, b float64) (Value, error) {
 		}
 		return infValue(), nil
 	case "*/":
-		if a <= 0 || b <= 0 || b == 1 {
-			return Value{}, diagnostic("E-NUMBER", "logarithm requires value > 0, base > 0 and base != 1")
+		if a < 0 || b <= 0 || b == 1 {
+			return nanValue(), nil
+		}
+		if a == 0 {
+			if b > 1 {
+				return number(math.Inf(-1)), nil
+			}
+			return infValue(), nil
 		}
 		if math.IsInf(a, 1) {
 			if math.IsInf(b, 1) {

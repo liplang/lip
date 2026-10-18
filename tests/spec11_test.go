@@ -78,9 +78,8 @@ flow Main()->list{return [` + strings.Join(expressions, ",") + `]}`
 	}
 }
 
-func TestSpec11NaNFailures(t *testing.T) {
+func TestSpec11NaNBoundaryFailures(t *testing.T) {
 	for _, test := range []struct{ expression, code string }{
-		{`0/0`, "E-NUMBER"}, {`(-1)**0.5`, "E-NUMBER"}, {`1e308*2`, "E-NUMBER"},
 		{`parse_number("NaN")`, "E-VALUE"}, {`parse_number("+nan")`, "E-VALUE"}, {`parse_number("-nan")`, "E-VALUE"},
 		{`nan+"x"`, "E-TYPE"}, {`[1][nan]`, "E-INDEX"}, {`[1][nan:]`, "E-INDEX"},
 		{`range(nan)`, "E-VALUE"}, {`range(0,2,nan)`, "E-VALUE"},
@@ -99,32 +98,34 @@ func TestSpec11NaNFailures(t *testing.T) {
 	}
 }
 
-func TestSpec11InfinityErrorsInterpreterAndGo(t *testing.T) {
-	cases := []struct{ expression, code string }{
-		{`inf/0`, "E-NUMBER"}, {`-inf//0`, "E-NUMBER"}, {`inf%0`, "E-NUMBER"},
-		{`inf */ 1`, "E-NUMBER"}, {`(-inf) */ 2`, "E-NUMBER"}, {`2 */ -inf`, "E-NUMBER"},
-		{`0 */ inf`, "E-NUMBER"}, {`[1][inf]`, "E-INDEX"}, {`[1][:inf]`, "E-INDEX"},
-		{`range(inf)`, "E-VALUE"}, {`range(0,2,-inf)`, "E-VALUE"},
-		{`1e308*2`, "E-NUMBER"}, {`2**1024`, "E-NUMBER"}, {`0**-1`, "E-NUMBER"},
+func TestSpec11NonFiniteArithmeticInterpreterAndGo(t *testing.T) {
+	cases := []struct{ expression, want string }{
+		{`3/0`, "inf"}, {`-3/0`, "-inf"}, {`3/-0`, "inf"}, {`-3/-0`, "-inf"}, {`0/0`, "nan"},
+		{`inf/0`, "inf"}, {`-inf//0`, "nan"}, {`inf%0`, "nan"},
+		{`nan*inf`, "nan"}, {`1e308*2`, "inf"}, {`222**8888`, "inf"}, {`(-222)**8889`, "-inf"},
+		{`2**1024`, "inf"}, {`0**-1`, "inf"}, {`(-1)**0.5`, "nan"},
+		{`inf */ 1`, "nan"}, {`(-inf) */ 2`, "nan"}, {`2 */ -inf`, "nan"},
+		{`0 */ inf`, "-inf"}, {`0 */ 0.5`, "inf"}, {`0 */ 1`, "nan"}, {`2 */ -0`, "nan"}, {`2 */ 0`, "nan"},
 	}
 	var arms []string
 	for i, test := range cases {
-		arms = append(arms, fmt.Sprintf("%d=>%s", i, test.expression))
+		arms = append(arms, fmt.Sprintf("%d=>str(%s)", i, test.expression))
 	}
-	p, err := Compile(`flow Main(i:number)->any{return match i {`+strings.Join(arms, ",")+`,_=>null}}`, Host{})
+	p, err := Compile(`flow Main(i:number)->string{return match i {`+strings.Join(arms, ",")+`,_=>""}}`, Host{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	executable, _ := buildNative(t, p, GoOptions{})
 	for i, test := range cases {
 		t.Run(test.expression, func(t *testing.T) {
-			_, err := p.Run(context.Background(), map[string]Value{"i": number(float64(i))}, Options{})
-			if err == nil || !strings.Contains(err.Error(), test.code) {
-				t.Fatal(err)
+			r, err := p.Run(context.Background(), map[string]Value{"i": number(float64(i))}, Options{})
+			wantJSON := `"` + test.want + `"`
+			if err != nil || display(t, r.Output) != wantJSON {
+				t.Fatal(display(t, r.Output), err)
 			}
-			_, stderr, err := runNative(t, executable, "-input", fmt.Sprintf(`{"i":%d}`, i))
-			if err == nil || !strings.Contains(stderr, test.code) {
-				t.Fatal(stderr, err)
+			stdout, stderr, err := runNative(t, executable, "-input", fmt.Sprintf(`{"i":%d}`, i))
+			if err != nil || strings.TrimSpace(stdout) != wantJSON {
+				t.Fatal(stdout, stderr, err)
 			}
 		})
 	}

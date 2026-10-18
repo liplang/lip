@@ -137,7 +137,7 @@ flow Main()->object {
 
 func TestDiagnosticArgumentsAndEffects(t *testing.T) {
 	for _, source := range []string{
-		`flow Main()->number {print(1/0);return 7}`,
+		`flow Main()->number {print(parse_number("01"));return 7}`,
 		`flow Main()->number {f=[log][0];f(3,{print("argument");4});return 7}`,
 	} {
 		p, err := Compile(source, Host{})
@@ -498,7 +498,7 @@ func TestDiagnosticSessionFailureAndCaptures(t *testing.T) {
 	if r := eval(`keep()`); display(t, r.Value) != "2" {
 		t.Fatal(r)
 	}
-	if _, err := s.Eval(context.Background(), `uncommitted={print("before failure");1/0}`, Options{Trace: traces}); err == nil {
+	if _, err := s.Eval(context.Background(), `uncommitted={print("before failure");parse_number("01")}`, Options{Trace: traces}); err == nil {
 		t.Fatal("expected failure")
 	}
 	if _, err := s.Eval(context.Background(), `uncommitted`, Options{Trace: traces}); err == nil {

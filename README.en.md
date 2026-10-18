@@ -258,7 +258,7 @@ If GOBIN is set, add that directory to PATH. A custom location can be selected w
 
 ## Language core and program structure
 
-Bindings are immutable; inner scopes can shadow ordinary names. Values include null, bool, finite binary64 numbers, signed infinities, and canonical `nan`, UTF-8 strings, lists, objects, pure functions, and requests. **Data** recursively excludes functions and requests and is the boundary format for entry protocols, Hosts, and Claims; same-run Flows can pass all ordinary values. An `any` annotation still requires the type and Data checks of its eventual use.
+Bindings are immutable; inner scopes can shadow ordinary names. Values include null, bool, complete binary64 numbers, including signed infinities and canonical `nan`, UTF-8 strings, lists, objects, pure functions, and requests. **Data** recursively excludes functions and requests and is the boundary format for entry protocols, Hosts, and Claims; same-run Flows can pass all ordinary values. An `any` annotation still requires the type and Data checks of its eventual use.
 
 | Work to express | Syntax |
 |---|---|
@@ -290,7 +290,7 @@ flow Main()->object {
 
 The result has two tools and a by_name index; first still has one tool. `put` replaces a field with the same key, while `concat` retains duplicate list entries. Empty input returns the initial state. A Flow can also perform an external action before carrying its result into the next round; see the [carry example](examples/structures/12_carry.lip). Prefer a comprehension when only transforming input items into a list; repeated `concat` has no constant-time append guarantee and may copy quadratically for large lists.
 
-Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; finite-operand domain errors and overflow raise `E-NUMBER`; existing NaN/infinite operands follow specification §3.3. See the [tutorial](examples/README.en.md) for numerical, string, and control-structure examples.
+Arithmetic includes `+ - * / // % ** */`. Exponentiation `**` associates right: `2 ** 3 ** 2` is 512, `-3 ** 2` is -9, and `2 ** -3` is 0.125. `8 */ 2` is the logarithm of 8 with base 2, yielding 3. Powers and logarithms use fixed binary64 approximation algorithms; zero division, overflow, and invalid power/log domains produce IEEE-754 `nan` or signed `inf`; existing nonfinite operands follow specification §3.3. See the [tutorial](examples/README.en.md) for numerical, string, and control-structure examples.
 
 ### Entry points and successful results
 

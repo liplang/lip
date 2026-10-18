@@ -114,7 +114,7 @@ func (c *checker) error(t token, code, msg string) {
 }
 func reserved(name string) bool {
 	_, b := builtinArity[name]
-	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan void ", " "+name+" ")
+	return b || name == "claim" || strings.Contains(" import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan inf void ", " "+name+" ")
 }
 func (c *checker) declare(s *scope, name string, info bindingInfo, t token) {
 	if reserved(name) {

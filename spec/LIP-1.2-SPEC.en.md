@@ -276,13 +276,13 @@ Valued entries use only value with their validated result; void entries, includi
 
 ## 3. Values and core operations
 
-All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers or two strings; other comparisons are E-TYPE. `+` accepts two numbers or two strings, never implicit conversion. Numbers are binary64, including §3.3 signed infinities and canonical NaN; normalize negative zero to zero. Handle nonfinite operands under §3.3 first; finite-operand overflow/nonfinite results and division by zero remain errors.
+All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers or two strings; other comparisons are E-TYPE. `+` accepts two numbers or two strings, never implicit conversion. Numbers are binary64, including §3.3 signed infinities and canonical NaN; normalize negative zero to zero. Handle nonfinite operands under §3.3 first; IEEE-754 results, including NaN and signed infinities, are values.
 
 Data is a finite acyclic value tree: lists preserve order, objects have unique keys and canonical UTF-8 key order. Native mutable objects must be copied to Data or represented by declared Host references, never directly shared. Equality is typed and structural: null equals only null, and bool never equals number; fn/effect are not comparable even inside containers. Field/index access creates no implicit binding. Stop operand evaluation after an error.
 
-For finite operands, basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. Division by zero/nonfinite results are E-NUMBER. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`. Host integers outside this range require rejection or explicit string/bytes schema encoding.
+For finite operands, basic arithmetic MUST use binary64 round-to-nearest/ties-to-even, without reassociation or result-changing implicit FMA. `a / 0` follows IEEE-754 signed-infinity/NaN rules; `a // 0` and `a % 0` yield NaN. Nonfinite results are values. `a // b` is the binary64 value of the floor of the exact mathematical quotient. `a % b` is its corresponding mathematical remainder, rounded to binary64 and constrained to `[0,b)` for b>0 or `(b,0]` for b<0. If rounding reaches the excluded boundary b, use `nextafter(b,0)`; normalize zero. nextafter denotes one binary64 step toward zero and is not a LIP builtin. Implementations MUST NOT substitute truncating division. Safe integers have absolute value at most `2^53-1`. Host integers outside this range require rejection or explicit string/bytes schema encoding.
 
-For finite operands, `a ** b` is real exponentiation; `a */ b` is real logarithm to base b. Both require numbers (E-TYPE otherwise). `0 ** 0 = 1`; zero to a negative power and negative bases to nonintegral powers are E-NUMBER. Integral exponent means the stored binary64 is exactly integral, without the safe-index limit. Log requires a>0, b>0, b!=1; for valid finite inputs `1 */ b = 0` and `a */ a = 1`. Overflow is E-NUMBER; subnormals/underflow to zero are allowed, with zero normalization. Both MUST use §16.5's fixed binary64 algorithm, not platform/version-dependent pow/log. They approximate real operations without correctly-rounded guarantees; mathematically equivalent expressions need not be bit-identical. Other numerical functions/complex values belong to libraries.
+For finite operands, `a ** b` is real exponentiation; `a */ b` is real logarithm to base b. Both require numbers (E-TYPE otherwise). `0 ** 0 = 1`; zero to a negative power yields `+inf`; negative bases to nonintegral powers yield NaN. Integral exponent means the stored binary64 is exactly integral, without the safe-index limit. Log requires a>=0, b>0, b!=1; invalid domains yield NaN, with `0 */ b` equal to -inf for b>1 and +inf for 0<b<1. For valid finite inputs `1 */ b = 0` and `a */ a = 1`. Overflow yields signed infinity; subnormals/underflow to zero are allowed, with zero normalization. Both MUST use §16.5's fixed binary64 algorithm, not platform/version-dependent pow/log. They approximate real operations without correctly-rounded guarantees; mathematically equivalent expressions need not be bit-identical. Other numerical functions/complex values belong to libraries.
 
 `**` associates right and binds tighter than its left unary sign, while allowing a signed exponent. `*/` shares `* / // %` precedence and associates left.
 
@@ -381,7 +381,7 @@ Pure in this version describes computational results and business effects: with 
 
 These names follow core resolution, non-overriding, and positional-argument rules; they are not new keywords. They are allowed in fn, closures, recursion, higher-order callbacks, pipelines, guards, proposal arguments, carry exits, and other Pure positions. Ordinary core runtime type checks apply. log does not validate a level enumeration. Projects may wrap formatting and fields in pure fn. Their computational effect is Pure; they do not weaken RetOps or introduce barriers, provider admission, CallID, Claims, or journal records. Argument effects MUST still be merged: a perform within a Flow print argument still contributes its execution effect; performs in ordinary fn remain E-PURITY, while those in @{...} count as Pure under the §10.3 explicit promise.
 
-Each actually evaluated valid diagnostic call makes one emission attempt and normally returns null. Unselected branches do not emit. Declaration, completion, static checking, and builds do not execute diagnostics. Disabling output MUST retain ordinary argument evaluation order and checks; print(1/0) still raises its argument's E-NUMBER. Compilers MUST NOT use result purity alone to delete, merge, cache, or speculate diagnostic calls in ways that change emission attempts on the executed path. Pure-value optimization must preserve these attempts and argument errors.
+Each actually evaluated valid diagnostic call makes one emission attempt and normally returns null. Unselected branches do not emit. Declaration, completion, static checking, and builds do not execute diagnostics. Disabling output MUST retain ordinary argument evaluation order and checks; print(1/0) still evaluates its argument and displays inf. Compilers MUST NOT use result purity alone to delete, merge, cache, or speculate diagnostic calls in ways that change emission attempts on the executed path. Pure-value optimization must preserve these attempts and argument errors.
 
 Receivers accept fixed events, return no delivery status to LIP, do not synchronously call back into LIP, and expose no program-readable count or cache. Closure, full queues, and delivery faults do not become program errors, retries, cancellation, or control choices. Runtime buffering MUST be bounded and lossy; business computation does not wait for an external receiver. Diagnostic rendering is also bounded and may truncate long/deep values. Functions, effects, and native references use opaque displays without execution, implicit native_data, or external attribute reads. Queues retain independent text and positions rather than business values, closures, ASTs, or resources.
 
@@ -402,7 +402,7 @@ This example returns 6 with diagnostics enabled, disabled, or full; diagnostic o
 
 ### 3.3. NaN and infinite numbers
 
-`nan` is a non-overridable number literal, neither null, string, nor an external property. It is valid in static Data, number/number?/any annotations, containers, Claims, and entry/Host values. Normalize every native quiet/signaling NaN, regardless of sign/payload, to binary64 bits `0x7ff8000000000000` before it enters LIP; no payload remains observable. `inf` is also a non-overridable number literal: binary64 positive infinity (bits 0x7ff0000000000000). `-inf` is its unary-negative form (bits 0xfff0000000000000). Native NaN and signed infinities may enter the same Data positions. Finite-operand domain errors, division by zero, and overflow do not silently become nan/inf.
+`nan` is a non-overridable number literal, neither null, string, nor an external property. It is valid in static Data, number/number?/any annotations, containers, Claims, and entry/Host values. Normalize every native quiet/signaling NaN, regardless of sign/payload, to binary64 bits `0x7ff8000000000000` before it enters LIP; no payload remains observable. `inf` is also a non-overridable number literal: binary64 positive infinity (bits 0x7ff0000000000000). `-inf` is its unary-negative form (bits 0xfff0000000000000). Native NaN and signed infinities may enter the same Data positions. Finite-operand division by zero, overflow, and invalid power/log domains yield NaN or signed infinity as specified in §3; they are numeric values, not control-flow errors.
 
 NaN detection composes existing comparison without another core function. Below, is_nan denotes this ordinary helper fn, which programs declare before use:
 
@@ -417,7 +417,7 @@ fn is_nan(x:number)->bool { x != x }
 
 Language equality differs from identity consistency: C(nan) is fixed (§16.1). Redelivery of the same NaN contribution at one JoinID is idempotent; canonical NaN arguments at one CallID permit replay. Neither merges with null, string "nan", or another value.
 
-The following rules apply to `inf` and `-inf`. Check operand types first, then the power identities and NaN rules above, then this table, before entering finite algorithms. After NaN propagation, a zero divisor for `/ // %` always raises E-NUMBER, including `inf / 0`. Operands still evaluate in the usual strict order.
+The following rules apply to `inf` and `-inf`. Check operand types first, then the power identities and NaN rules above, then this table, before entering finite algorithms. After NaN propagation, `/` by zero follows IEEE-754 and `//`/`%` by zero yield NaN, including `inf / 0` yielding inf. Operands still evaluate in the usual strict order.
 
 | Case | Result |
 |---|---|
@@ -431,7 +431,7 @@ The following rules apply to `inf` and `-inf`. Check operand types first, then t
 | `a ** b`, a infinite and b finite/nonzero | 0 if b<0; if b>0, inf, except a negative infinite base with an odd integral exponent yields -inf; nonintegral b yields positive inf |
 | `a */ b` with infinity | First require a>0, b>0, b!=1; a=b=inf yields nan; only a=inf yields inf for b>1 or -inf for b<1; only b=inf yields 0 |
 
-Here abs is mathematical notation, not a new core function. Existing `a ** 0 = 1` and `1 ** b = 1` precede NaN/infinity rules: `inf ** 0 = 1`, `(-1) ** inf = 1`, and `0 ** -inf = inf`. Finite negative bases with finite nonintegral exponents still raise E-NUMBER; finite algorithms do not convert overflow to inf. Floor division/remainder use the one-sided limits as a finite divisor approaches the specified signed infinity, as in Python. Never apply exact finite rational algorithms to infinities or require finite remainder identities for infinite operands.
+Here abs is mathematical notation, not a new core function. Existing `a ** 0 = 1` and `1 ** b = 1` precede NaN/infinity rules: `inf ** 0 = 1`, `(-1) ** inf = 1`, and `0 ** -inf = inf`. Finite negative bases with finite nonintegral exponents yield NaN; finite algorithms convert overflow to signed infinity. Floor division/remainder use the one-sided limits as a finite divisor approaches the specified signed infinity, as in Python. Never apply exact finite rational algorithms to infinities or require finite remainder identities for infinite operands.
 
 `str(inf)` and `str(-inf)` are exactly "inf" and "-inf"; container display recursively uses these bare texts. parse_number accepts exactly lowercase "inf", "+inf", and "-inf", but rejects "Inf" and "Infinity". Infinity is not a safe integer: index/slice positions raise E-INDEX, range raises E-VALUE, and native integer parameters reject it. Go float32/float64 and Python float preserve its sign. Ordinary JSON rejects nonfinite numbers; lossless transport follows §16.6. Detection needs no new core function: an ordinary `fn is_inf(x:number)->bool { x == inf || x == -inf }` suffices. C preserves the distinct infinity bits, so Claim/journal identities distinguish signs, NaN, null, and strings.
 
@@ -786,7 +786,7 @@ Ready(n) = DataDepsCompleted(n) ∧ GatesOpen(n) ∧ ContextActive(n)
 
 WorkerAdmission counts active computation/provider calls, not all Running contexts. Waiting containers/permit waiters release allowance; resumable Running cursors compete for it once children/resources and gate/context/After/order conditions permit, without returning to Pending or repeating their prefix. Coordinate permits/admission so waiters cannot exhaust workers needed to release resources. With no errors/budgets/cancellation and eventual resource availability, scheduling and permits MUST be fair.
 
-Sequential mode advances one leaf evaluation/cursor at a time, selecting the smallest Position among ready/resumable work; waiting ancestors do not compete or occupy workers. Multiple containers may remain Running. Every mode preserves Earlier order. Node effects combine under §5: fn-body performs count as Pure; other performs use registry/Ops. Concurrent ReadOnly requires at least one perform outside fn bodies and every possible operation at those sites to be Concurrent ReadOnly. Write/Unknown/nonconcurrent ReadOnly nodes are barriers: wait for every earlier node containing performs outside fn bodies to succeed/normally skip; later nodes containing such performs cannot cross unsettled earlier barriers. Concurrent ReadOnly may overlap. Pure/join nodes are not blocked solely by external barriers. Actual fn calls still obey Host Concurrent/resource permits under §10.3; Pure grants no concurrency permission. A pure node is not itself an external barrier: an independent later read may start before an earlier pure E-NUMBER is observed. The earlier ErrorKey still wins, and the started read is retained. Within one node, expressions/arguments remain strictly left to right.
+Sequential mode advances one leaf evaluation/cursor at a time, selecting the smallest Position among ready/resumable work; waiting ancestors do not compete or occupy workers. Multiple containers may remain Running. Every mode preserves Earlier order. Node effects combine under §5: fn-body performs count as Pure; other performs use registry/Ops. Concurrent ReadOnly requires at least one perform outside fn bodies and every possible operation at those sites to be Concurrent ReadOnly. Write/Unknown/nonconcurrent ReadOnly nodes are barriers: wait for every earlier node containing performs outside fn bodies to succeed/normally skip; later nodes containing such performs cannot cross unsettled earlier barriers. Concurrent ReadOnly may overlap. Pure/join nodes are not blocked solely by external barriers. Actual fn calls still obey Host Concurrent/resource permits under §10.3; Pure grants no concurrency permission. A pure node is not itself an external barrier: an independent later read may start before an earlier pure nonfinite value is observed. The earlier ErrorKey still wins, and the started read is retained. Within one node, expressions/arguments remain strictly left to right.
 
 OrderAllows MUST account for possible work in uninstantiated earlier loop/branch/child regions, not just created/Ready nodes. A barrier after a producer loop waits for completion/normal gate closure, including future iterations. Earlier barriers constrain later parallel regions. Structural prefixes/static regions establish this in all modes. Node-local performs admit left to right; conservative summaries may reduce overlap but never reorder. Child summaries constrain caller regions until complete; yielding workers does not release sibling barriers. Ancestor exclusion prevents self-completion waits while descendants inherit all outside prerequisites and local cursor order. Writes cannot pass earlier concurrent reads. Infinite earlier producers may permanently delay barriers; change graph structure rather than weaken order.
 
@@ -1343,7 +1343,7 @@ Error objects differ from Skipped causes. Reject statically known invalid progra
 | Runtime Error | Condition |
 |---|---|
 | E-TYPE / E-ARITY / E-SCHEMA | Dynamic value/argument/input/result mismatch |
-| E-VALUE / E-NUMBER / E-INDEX | Invalid native data/transport, numeric domain/zero division or finite-operand overflow, bounds/missing keys; canonical NaN and signed infinities are themselves valid |
+| E-VALUE / E-INDEX | Invalid native data/transport or bounds/missing keys; canonical NaN, signed infinities, and arithmetic nonfinite results are valid |
 | E-FAIL / E-MATCH-NO-ARM | fail or expression match without an arm |
 | E-BUDGET / E-CAPABILITY / E-OPERATION | Budget/permission/registration failure |
 | E-CLAIM-CONFLICT / E-DEPENDENCY | Changed same-JoinID value or unusable dependency |
@@ -1477,7 +1477,7 @@ a/b below are stored binary64 operands from §2 literals. Floor division compute
 | 5e-324 | 1 | 0 | 5e-324 |
 | -5e-324 | 5e-324 | -1 | 0 |
 
-Literal 2e-324 rounds to zero, 3e-324 to bits=1. Basic arithmetic MUST NOT flush subnormals, and arithmetic/literals normalize zero. For finite operands, zero divisors/nonfinite quotients are E-NUMBER. Interpreter/generated Go/boundary codecs MUST agree.
+Literal 2e-324 rounds to zero, 3e-324 to bits=1. Basic arithmetic MUST NOT flush subnormals, and arithmetic/literals normalize zero. For finite operands, zero divisors and nonfinite quotients follow §3.3. Interpreter/generated Go/boundary codecs MUST agree.
 
 ### 16.4. Core conformance cases
 
@@ -1526,10 +1526,10 @@ For each independent row below, reset bindings/journal. worker aliases `import p
 | `[0][[0,1]]` / `[0][::0]` | E-INDEX / E-VALUE, no partial result | core evaluation/generated |
 | Gather/slice then project a function/effect list | Preserve values and select finite described origins; eligible request candidates permit parallel | core static/dynamic |
 | `{len([0]);}` / `{len([0]);null}` | 1 / null; terminal semicolon is padding | core |
-| `if false {1/0} else {7}` | 7, no E-NUMBER or execution budget for unselected branch | core, varied Ready order |
+| `if false {1/0} else {7}` | 7, no numeric error or execution budget for unselected branch | core, varied Ready order |
 | `flow Main()->number {if false {x=1/0};return 7}` | x is unselected_gate, no root/F/cut, output 7 | core scheduling |
 | `[1/x for x in [0,2] if x!=0]` | [0.5], skip body for zero | core |
-| `[x for x in [1] if 1/0==0]` | Guard E-NUMBER, not false | core |
+| `[x for x in [1] if 1/0==0]` | Guard evaluates NaN==0 as false; NaN is not a control-flow error | core |
 | `[perform effect worker.read(x) for x in [0,1,2] if x>0]` | [1,2]; EvalPath indices 1/2, not 0/1 | core identity |
 | `"10"<"9"` / `"a"<"aa"` / `1<"2"` | true / true / E-TYPE, static when known | core |
 | `parse_number("+1e-3")` / `parse_number("-0")` / `parse_number("3e-324")` | 0.001 / 0 / bits=1 | core |
@@ -1678,7 +1678,7 @@ The §3.2 diagnostics also MUST satisfy these composition vectors. Bounded diagn
 | Input / environment | Required result | Profile |
 |---|---|---|
 | `fn twice(x:number)->number{log("debug",x);x*2}`, input 3 | Enabled/disabled/full/closed buffers all return 6; receiver faults cannot change computation | core diagnostics |
-| `print(1/0)`, output disabled | Still E-NUMBER; argument evaluation cannot be removed | core evaluation |
+| `print(1/0)`, output disabled | Still displays inf; argument evaluation cannot be removed | core evaluation |
 | Diagnostics in unselected branches; declaration/compilation only | Zero emission attempts | core paths |
 | Known ReadOnly request builder containing diagnostics, executed in parallel | Preserve RetOps; actual reads may overlap; journal records only perform | core summaries |
 | `print(perform effect store.commit())` in parallel body / ordinary fn / @{...} fn | E-PARALLEL / E-PURITY / accepted under the explicit promise; actual writes violate it and Host checks remain enforced | core effects |
@@ -1691,13 +1691,13 @@ NaN and native calls explicitly promised pure through @{...} additionally MUST s
 |---|---|---|
 | `nan`, `-nan`, native NaNs with different signs/payloads | One canonical number, is_nan true, C=037ff8000000000000 | core numbers |
 | `inf`, `-inf`, native Go/Python infinities | number; C=037ff0000000000000 and 03fff0000000000000 | core numbers |
-| `inf-inf`, `0*inf`, `inf/inf`; `inf/0`; `1e308*2` | nan, nan, nan; E-NUMBER; E-NUMBER | core numbers |
+| `inf-inf`, `0*inf`, `inf/inf`; `inf/0`; `1e308*2` | nan, nan, nan; inf; inf | core numbers |
 | `(-inf)**3`, `(-inf)**0.5`, `0**-inf`, `inf*/inf` | -inf, inf, inf, nan | core numbers |
 | `-1//inf`, `-1%inf`, `inf//2`, `inf%2` | -1, inf, nan, nan | core numbers |
 | `parse_number(str(-inf))`; `xs[inf]`; `range(inf)` | -inf; E-INDEX; E-VALUE | core boundaries |
 | Signed infinities through native arguments/results, entry, and c-hex; JSON encoding | Preserve signs/C; JSON rejects, completion facts retained | core transport |
 | `nan == nan`, `nan != nan`, `[nan] == [nan]`, `nan < 0`, `nan >= 0` | false, true, false, false, false | core comparison |
-| `nan / 0`, `nan % 0`, `nan */ 1`, `nan ** 0`, `1 ** nan` | nan, nan, nan, 1, 1; `0/0` and `0**-1` remain E-NUMBER | core numbers |
+| `nan / 0`, `nan % 0`, `nan */ 1`, `nan ** 0`, `1 ** nan` | nan, nan, nan, 1, 1; `0/0` is nan and `0**-1` is inf | core numbers |
 | `is_nan(parse_number(str(nan)))`; `parse_number("NaN")`; `is_nan(null)` | true; E-VALUE; E-TYPE | core functions |
 | `xs[nan]`, `xs[:nan]`, `range(nan)`, `nan + "x"` | E-INDEX, E-INDEX, E-VALUE, E-TYPE | core boundaries |
 | match nan literal, number type, and is_nan guard | Literal never matches; type/guard can select; unselected arm invokes nothing | core control |
@@ -1719,9 +1719,9 @@ NaN and native calls explicitly promised pure through @{...} additionally MUST s
 
 This normative reference is shared by interpreter/codegen/independent implementations and is not a dependency on a Go release. Go-style pseudocode is not LIP source. float64 means binary64; every numericAdd/Sub/Mul/Div independently rounds nearest/ties-to-even without reassociation/FMA. Hex constants specify exact values. Assignments/comparisons/booleans/loops run in code order. int is a signed integer sufficient for the exponents, uint64 is unsigned 64-bit, and >>/& are descriptive integer operations, not new LIP operators.
 
-math.Abs is absolute value; Floor is mathematical floor; Frexp gives exact `(m,k)` with x=m·2^k and 0.5≤|m|<1 for nonzero x. Sqrt is correctly rounded nearest/ties-to-even square root. Ldexp rounds m·2^k to binary64, including subnormals/zero/overflow. Inf(1) is an internal overflow sentinel for this finite-operand algorithm, rejected as E-NUMBER. Existing infinite operands follow §3.3 before entering this algorithm. Conversions follow code; loop indices are exactly representable. Proven bit-equivalent optimizations are permitted, never tolerance-based acceptance of different bits.
+math.Abs is absolute value; Floor is mathematical floor; Frexp gives exact `(m,k)` with x=m·2^k and 0.5≤|m|<1 for nonzero x. Sqrt is correctly rounded nearest/ties-to-even square root. Ldexp rounds m·2^k to binary64, including subnormals/zero/overflow. Inf(1) is the signed-infinity overflow result of this finite-operand algorithm. Existing infinite operands follow §3.3 before entering this algorithm. Conversions follow code; loop indices are exactly representable. Proven bit-equivalent optimizations are permitted, never tolerance-based acceptance of different bits.
 
-Handle nonfinite operands under §3.3 first, then apply §3 finite-domain checks. corePower accepts validated finite operands, coreLog positive finite operands, and coreExp is internal to corePower. `**` uses corePower; `*/` handles §3 exact cases then numericDiv(coreLog(a),coreLog(b)). Reject final nonfinite values and normalize zero. Log uses fixed 24-term series/exponent decomposition; exp uses a fixed 24-term series/power-of-two scale; power uses scaled exponentiation by squaring and square root/reciprocal for ±0.5. None become source builtins.
+Handle nonfinite operands under §3.3 first, then apply §3 finite-domain checks. corePower accepts validated finite operands, coreLog positive finite operands, and coreExp is internal to corePower. `**` uses corePower; `*/` handles §3 exact cases then numericDiv(coreLog(a),coreLog(b)). Preserve NaN/infinity results and normalize zero. Log uses fixed 24-term series/exponent decomposition; exp uses a fixed 24-term series/power-of-two scale; power uses scaled exponentiation by squaring and square root/reciprocal for ±0.5. None become source builtins.
 
 ```go
 func numericAdd(a, b float64) float64 { return float64(a + b) }
@@ -1831,7 +1831,7 @@ func corePower(x, y float64) float64 {
 }
 ```
 
-All paths MUST match these outcomes; bits denotes normalized unsigned binary64 encoding. Domain errors produce no successful value.
+All paths MUST match these outcomes; bits denotes normalized unsigned binary64 encoding. Numeric domain errors and overflow produce NaN/infinity values; type errors still produce no successful value.
 
 | Expression | Required result |
 |---|---|
@@ -1839,8 +1839,10 @@ All paths MUST match these outcomes; bits denotes normalized unsigned binary64 e
 | `(-2) ** 3` | -8 |
 | `2 ** -1074` | bits=1, smallest positive subnormal |
 | `2 ** -1075`, `(-2) ** -1075` | 0 |
-| `2 ** 1024`, `0 ** -1`, `(-2) ** 0.5` | E-NUMBER |
-| `0 */ 2`, `2 */ 1`, `2 */ 0`, `2 */ -2` | E-NUMBER |
+| `2 ** 1024`, `0 ** -1`, `(-2) ** 0.5` | inf, inf, nan |
+| `3 / 0`, `-3 / 0`, `0 / 0` | inf, -inf, nan |
+| `222 ** 8888`, `nan * inf` | inf, nan |
+| `0 */ 2`, `2 */ 1`, `2 */ 0`, `2 */ -2` | -inf, nan, nan, nan |
 | `0.25 */ 2`, `8 */ 0.5` | -2, -3 |
 | `2 ** 0.5`, `4 ** -0.5` | bits=0x3ff6a09e667f3bcd, 0.5 |
 | `5e-324 ** 0.5` | Exact 2^-537, bits=0x1e60000000000000 |
@@ -1967,7 +1969,7 @@ calls” counts entries into a provider, not proposal construction or diagnostic
 | Empty source with an `@` callback containing Write/Unknown native calls | Perform marked-body static checks, but enter no callback and admit no provider/resource |
 | parallel source contains Write/Unknown while body contains only r | Evaluate source completely and sequentially first; body may admit r; source effects are not hidden or overlapped by body |
 | parallel source fails, cancels, or exhausts budget | Instantiate no iteration; retain completed source facts; body produces no dynamic error, join, or provider |
-| Earlier independent pure node raises E-NUMBER while later independent r node runs | The r call may start first; earlier ErrorKey remains primary and the started call is retained |
+| Earlier independent pure node produces a nonfinite value while later independent r node runs | The r call may start first; earlier ErrorKey remains primary and the started call is retained |
 | Earlier argument performs Write and a later argument fails | Retain completed Write facts; stop later arguments/body/return check in the local cursor |
 | Body Write succeeds but return annotation fails, with an independent later node | Retain Write journal/fact; publish no return; later node follows only its own dependencies/barriers |
 | Pipeline value is ready but previous region is unfinished | Later named arguments/body/child Flow wait for complete previous success; no early return is passed |

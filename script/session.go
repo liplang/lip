@@ -691,7 +691,7 @@ var sessionBuiltinHelp = map[string]string{
 	"has":          "has(value:object, key:string) -> bool\nTest whether the object has this key.",
 	"put":          "put(value:object, key:string, item:any) -> object\nReturn a new object with the field added or replaced.",
 	"split":        "split(value:string, separator:string) -> list\nSplit a string on a nonempty separator.",
-	"parse_number": "parse_number(value:string) -> number\nParse complete finite binary64 number text or nan, inf, +inf, -inf.",
+	"parse_number": "parse_number(value:string) -> number\nParse complete binary64 number text or nan, inf, +inf, -inf.",
 }
 
 // Interactive conveniences lower into ordinary proposals, perform, blocks and

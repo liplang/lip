@@ -94,7 +94,7 @@ func TestDiagnosticPhases(t *testing.T) {
 	if d, ok := err.(*Diagnostic); !ok || d.Phase != "static" {
 		t.Fatal(err)
 	}
-	p, err := Compile(`flow Main(n:number)->number{return 1/n}`, Host{})
+	p, err := Compile(`flow Main(n:any)->number{f=[fn(x:any)->string{x}][0];return f(n)}`, Host{})
 	if err != nil {
 		t.Fatal(err)
 	}

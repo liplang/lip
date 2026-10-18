@@ -24,7 +24,7 @@ type exampleCase struct {
 var examples = []exampleCase{
 	{path: "basics/01_hello.lip", want: `"Hello, LIP!"`},
 	{path: "basics/02_bindings.lip", want: `{"subtotal":36,"total":31}`},
-	{path: "basics/03_arithmetic.lip", want: `{"division":3.5,"grouped":20,"inverse_power":0.125,"logarithm":3,"logic":true,"negative_base":9,"negative_power":-9,"power":8,"power_chain":512,"quotient":-2,"remainder":1,"sum":14}`},
+	{path: "basics/03_arithmetic.lip", want: `{"divide_by_zero":"inf","division":3.5,"grouped":20,"invalid_log":"nan","invalid_power":"nan","inverse_power":0.125,"logarithm":3,"logic":true,"nan_mix":"nan","negative_base":9,"negative_power":-9,"overflow":"inf","power":8,"power_chain":512,"quotient":-2,"remainder":1,"sum":14,"zero_over_zero":"nan"}`},
 	{path: "basics/04_containers.lip", want: `{"every_other":[1,3,5,7],"fields":["name","role"],"first":"Ada","has_age":false,"last":"Lin","names":["Ada","Lin","Sam"],"original_role":"reader","reversed":["Lin","Ada"],"selected":["Lin","Ada","Lin"],"updated":{"name":"Ada","role":"writer"}}`},
 	{path: "basics/05_strings_numbers.lip", want: `{"display":"score=0.8","length":3,"lexical_order":true,"middle":"𐀀","score":0.8,"words":["red","","blue"]}`},
 	{path: "basics/22_multiline_strings.lip", want: `{"html":"\u000a<main>\u000a  <h1 title=\"Welcome\">Hello, LIP!</h1>\u000a</main>\u000a","prompt":"Read \"carefully\".\u000a# This is text, not a comment.\u000a","quotes":"Embedded triple quotes: \"\"\""}`},
@@ -300,14 +300,14 @@ func TestWebExamplesInterpreterAndGo(t *testing.T) {
 	}
 }
 
-func TestGoBackendNumericErrorsAndBudget(t *testing.T) {
+func TestGoBackendNumericBoundariesAndBudget(t *testing.T) {
 	cases := []struct {
 		source string
 		flags  []string
 	}{
 		{`flow Main()->object{return {q:1//0.1,r:1%0.1,negative:-1e-17%1,subnormal:parse_number("3e-324")}}`, nil},
 		{`flow Main()->number{return if false {1/0} else {7}}`, nil},
-		{`flow Main()->number{x=0;return 1/x}`, nil},
+		{`flow Main()->string{return str(1/0)}`, nil},
 		{`flow Main()->number{return parse_number("01")}`, nil},
 		{`flow Main()->number{return {for {}; 1}}`, []string{"-steps", "20"}},
 		{`fn identity(x:any?)->any?{x} flow Main()->any?{return map([null,3,"hello"],identity)}`, nil},
@@ -437,8 +437,8 @@ func generatedHost()(Host,error){
 }
 
 func TestGoBackendPowerLogarithm(t *testing.T) {
-	p, err := Compile(`flow Main(a:any,b:any,kind:string)->number {
- return if kind == "power" { a ** b } else { a */ b }
+	p, err := Compile(`flow Main(a:any,b:any,kind:string)->string {
+ return str(if kind == "power" { a ** b } else { a */ b })
 }`, Host{})
 	if err != nil {
 		t.Fatal(err)

@@ -4,6 +4,12 @@
 
 Version: 1.0 final. Date: 2026-10-15.
 
+> Historical-version note: 1.0 retains the finite-number contract used by older
+> implementations for compatibility audits. The current implementation follows the
+> 1.2 specification: `number` covers the complete IEEE-754 binary64 domain, and
+> division by zero, overflow, and power/log boundaries produce `nan` or `inf` under
+> §3.3 rather than `E-NUMBER`.
+
 ## 0. Scope, terminology, and conventions
 
 This document defines the complete LIP 1.0 language and execution contract. The English and Chinese editions describe the same specification, with matching section numbers. Sections 1–9, 12–15, and the appendices in §16 define core conformance; §10 defines its mandatory Host boundary. The HTTP Host profile in §12.1 and the durable crash-recovery profile in §11 are optional. Neither is required for core conformance. Language semantics, identity encodings, and core conformance cases are defined here without requiring implementation documentation.

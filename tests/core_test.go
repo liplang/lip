@@ -536,25 +536,29 @@ func TestPowerLogarithmSpecVectors(t *testing.T) {
 		{"2 ** 0.5", math.Sqrt(2)}, {"27 ** (1/3)", 3},
 		{"2 */ 3", math.Float64frombits(0x3fe430939835353d)},
 		{"10 */ 2", math.Float64frombits(0x400a934f0979a372)},
+		{"3 / 0", math.Inf(1)}, {"-3 / 0", math.Inf(-1)},
+		{"3 / -0", math.Inf(1)}, {"-3 / -0", math.Inf(-1)},
+		{"0 / 0", math.NaN()}, {"222 ** 8888", math.Inf(1)},
+		{"(-222) ** 8889", math.Inf(-1)},
+		{"(-1) ** 0.5", math.NaN()}, {"0 ** -1", math.Inf(1)},
+		{"0 */ 2", math.Inf(-1)}, {"0 */ 0.5", math.Inf(1)},
+		{"0 */ 1", math.NaN()}, {"2 */ -0", math.NaN()}, {"2 */ 0", math.NaN()},
 		{"if false { (-2) ** 0.5 } else { 7 }", 7},
 	}
 	for _, tt := range cases {
 		t.Run(tt.source, func(t *testing.T) {
 			r := runSource(t, "flow Main()->number { return "+tt.source+" }", Host{}, Options{})
-			if actual := math.Float64bits(num(r.Output)); actual != math.Float64bits(tt.want) {
+			got := num(r.Output)
+			if math.IsNaN(tt.want) {
+				if !math.IsNaN(got) {
+					t.Fatalf("got %.17g, want NaN", got)
+				}
+				return
+			}
+			if actual := math.Float64bits(got); actual != math.Float64bits(tt.want) {
 				t.Fatalf("got %.17g (%016x), want %.17g (%016x)", num(r.Output), actual, tt.want, math.Float64bits(tt.want))
 			}
 		})
-	}
-	for _, expr := range []string{"0 ** -1", "(-2) ** 0.5", "2 ** 1024", "0 */ 2", "-2 */ 2", "2 */ 0", "2 */ 1", "2 */ -2"} {
-		p, err := Compile("flow Main()->number {return "+expr+"}", Host{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = p.Run(context.Background(), nil, Options{})
-		if err == nil || !strings.Contains(err.Error(), "E-NUMBER") {
-			t.Fatalf("%s: %v", expr, err)
-		}
 	}
 	for _, expr := range []string{`"2" ** 3`, `8 */ true`} {
 		_, err := Compile("flow Main()->number {return "+expr+"}", Host{})

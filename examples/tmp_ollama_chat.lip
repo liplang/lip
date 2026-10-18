@@ -360,7 +360,8 @@ flow OpenStore() -> object {
     return runtime
 }
 
-# 先检查算术范围，让模型的除零/溢出请求成为可修正的工具结果。
+# 应用层先检查算术范围，把模型的除零/溢出请求转换为可修正的工具结果；
+# 这是业务策略，不改变语言本身返回 nan/inf 的 IEEE-754 规则。
 fn Arithmetic(operation: string, a: number, b: number) -> object {
     limit = 1.7976931348623157e308
     aa = if a < 0 { -a } else { a }
