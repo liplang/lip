@@ -72,13 +72,13 @@ Flow 本身不是值，调用图无环，活动 store 不跨实例传递；请�
 
 | 对象 | 规则 |
 |---|---|
-| Data | null、bool、number（完整 binary64，包括正负无穷与规范 NaN）、UTF-8 string、list、string-keyed object |
+| Data | null、bool、number（完整 binary64，包括正负无穷与规范 NaN）、Unicode scalar char、UTF-8 string、list、string-keyed object |
 | fn | 捕获不可变值的纯闭包；允许第 3.2 节单向诊断和第 10.3 节 @{...} 显式承诺纯性的原生调用；支持递归、互递归和函数值 |
 | effect | 已解析 operation 与已固定 Data 参数组成的不可变 proposal |
 | Flow | 具名图定义；不可变绑定、控制结构和子 Flow 调用降低得到依赖图；不是普通值 |
 | Claim store | 一次 Flow run 内只通过 join 增长的信息槽位 |
 
-普通值 V 递归定义为 null、bool、number、string、list<V>、object<string,V>、fn 或 effect。
+普通值 V 递归定义为 null、bool、number、char、string、list<V>、object<string,V>、fn 或 effect。
 Data 是其中递归不含 fn/effect 的子域。普通容器和同一 run 内的 Flow 输入/输出可以包含任意 V，包括 fn、effect 及其嵌套容器。
 跨 Host 的参数/结果、入口协议输入/输出及 Claim 贡献必须是 Data。Claim store 不是普通值，不存在可任意传递的
 store handle。变量只绑定一次；内层可遮蔽普通值，但不得遮蔽 Claim store 名称。
@@ -102,7 +102,10 @@ Flow 定义不属于 V 或 Data，也不是 function。不能把 Flow 放入容�
 for in parallel break continue with next effect perform export true false null nan inf void`。`go/python/host/lip` 在
 import 后为上下文关键字；类型名只在类型/pattern 位置有专用含义。`claim`、import alias
 与第 3 节核心函数名不得重定义。其他同一作用域的重复声明为静态错误。
-string 使用普通双引号 `"..."` 或 ASCII 三引号 `"""..."""`。普通字符串的裸换行与
+char 使用单引号 `'...'`，必须恰好包含一个 Unicode scalar；支持 `\'`、`\\`、`\n`、`\r`、`\t` 和
+`\u{HEX}` 转义，拒绝 surrogate、超过 U+10FFFF 的值和多 scalar 内容。char 是独立类型，按
+Unicode code point 比较；`str(char)` 得到包含该 scalar 的 string。char 使用单引号，不能作为
+string 的替代，也不与 string/list 隐式混用。string 使用普通双引号 `"..."` 或 ASCII 三引号 `"""..."""`。普通字符串的裸换行与
 tab 非法；三引号字符串允许物理换行与 tab，LF/CRLF 均产生一个 LF，裸 CR 非法。
 两种形式都只支持 `\"`、`\\`、`\n`、`\r`、`\t`、`\u{HEX}` 转义；HEX 为 1–6 位
 十六进制且必须为 Unicode 标量，拒绝 surrogate 和超过 U+10FFFF 的值。不进行 Unicode
@@ -140,7 +143,7 @@ static_field ::= (field_name | string) ":" static_data
 params     ::= "(" [parameter ("," parameter)* [","]] ")"
 parameter  ::= id ":" type
 type       ::= "null" | type_name ["?"]
-type_name  ::= "any" | "bool" | "number" | "string" | "list" | "object"
+type_name  ::= "any" | "bool" | "number" | "char" | "string" | "list" | "object"
              | "function" | "effect"
 
 statements ::= padding [stmt (sep stmt)* padding]
@@ -156,7 +159,7 @@ arm_stmt   ::= patterns ["if" expr] "=>" (block | stmt)
 arm_sep    ::= "," | sep
 patterns   ::= pattern ("," pattern)*
 pattern    ::= literal | ["+" | "-"] number | concrete_type | "_"
-concrete_type ::= "bool" | "number" | "string" | "list" | "object"
+concrete_type ::= "bool" | "number" | "char" | "string" | "list" | "object"
                 | "function" | "effect"
 
 expr       ::= pipeline
@@ -212,7 +215,7 @@ list       ::= "[" [expr ("," expr)* [","]] "]"
              | "[" expr "for" id "in" expr ["if" expr] "]"
 object     ::= "{" [field ("," field)* [","]] "}"
 field      ::= (field_name | string) ":" expr
-literal    ::= number | string | "true" | "false" | "null" | "nan" | "inf"
+literal    ::= number | char | string | "true" | "false" | "null" | "nan" | "inf"
 ```
 
 file 的分支按模块顶层的声明种类唯一选择：出现任一 export、flow 声明或 data_decl
@@ -496,8 +499,9 @@ mutable 对象必须复制为 Data，或转为第 10 节的 Host 资源引用，
 `==`/`!=` 按类型和递归结构比较，object 忽略存储顺序；function/effect 不支持比较。
 递归比较遇到 function/effect 也报 `E-TYPE`，不使用指针地址判等。null 只等于 null，
 bool 与 number 不相等。对象字段/索引不产生隐式绑定，重复 object 字段报静态错误。
-大小比较接受两个 number 或两个 string；string 按 UTF-8 bytes 字典序（前缀较短者在前），
-与 keys 一致，不使用 locale 或 Unicode normalization；混合类型报 E-TYPE。
+大小比较接受两个 number、两个 char 或两个 string；char 按 Unicode code point 数值比较，
+string 按 UTF-8 bytes 字典序（前缀较短者在前），与 keys 一致，不使用 locale 或 Unicode
+normalization；混合类型报 E-TYPE。char 不参与算术或 string/list 的隐式转换。
 逻辑操作只接受 bool。`+` 接受两个 number 或两个 string，
 没有其他隐式类型转换。参数、字段、元素、算术子表达式从左到右求值；Error 后不继续
 求值右侧。`&&`、`||`、if/match 未选分支不求值。
@@ -588,9 +592,15 @@ Host 资源按其注册的原生索引协议访问。
 | str(value) | 1 | Data → string；string 原值，其余为无空白规范显示；含非有限数时按第 3.3 节扩展 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | 安全整数、非零 step → 半开 number list；默认 start=0、step=1 |
 | map(xs,f) | 2 | list、纯一元 function → 按输入顺序的新 list |
+| mapcat(xs,f) | 2 | list、纯一元 function（每次返回 list）→ 按输入顺序映射并一层合并为新 list |
 | fold(xs,seed,f) | 3 | list、V、纯二元 function → V；严格左折叠，空 list 返回 seed |
 | fail(message) | 1 | string → E-FAIL，没有成功值 |
-| concat(a,b) | 2 | 两个 list → 顺序拼接的新 list；append 用 concat(a,[v]) |
+| concat(a,b) | 2 | 两个同类 list 或两个 string → 顺序拼接的新值；append 用 concat(a,[v]) |
+| allcat(parts) | 1 | 非空 list 中的一层同类 list 或 string parts → 顺序合并；不递归展开，list/string 不混合 |
+| to_chars(s) | 1 | string → 按 Unicode scalar 顺序生成 list<char> |
+| from_chars(chars) | 1 | 只含 char 的 list → string；其他元素报 E-TYPE |
+| to_codepoint(c) | 1 | char → Unicode code point number |
+| from_codepoint(n) | 1 | safe integer number → Unicode scalar char；surrogate、越界和非有限数报 E-VALUE |
 | slice(v,start,stop) / slice(v,start,stop,step) | 3/4 | 与方括号切片同规则；null 表示省略分量 |
 | keys(o) | 1 | object → UTF-8 bytes 排序的 string list |
 | has(o,k) | 2 | object、string → bool；缺键返回 false |
@@ -613,6 +623,16 @@ parse_number 接受整段 ASCII 文本：恰为小写 `"nan"`、`"inf"`、`"+inf
 不接受空白、前导零、hex、`"NaN"`、`"+nan"`、`"-nan"`、Infinity 或尾部字符；非法文本/溢出报 E-VALUE，类型不符
 报 E-TYPE。nearest/ties-to-even、次正规数/下溢和零规范化与字面量一致，不使用 Host 的
 宽松数字 parser。`parse_number(str(n)) == n` 对所有非 NaN number 成立；NaN 的往返用 is_nan 验证。
+
+`allcat` 只展开外层 parts：`allcat([[1],[2,3]])` 为 `[1,2,3]`，不会递归展开
+嵌套 list。它要求 parts 非空且每一项同为 list 或同为 string；`concat([1],[2])` 与
+`concat("a","b")` 保留为两个参数的拼接函数，list 与 string 不能混用。`to_chars` 和
+`from_chars` 使用 Unicode scalar（不是 grapheme cluster）；`from_codepoint` 只接受有限
+safe integer 且拒绝 surrogate。char 可作为参数、返回值、list 元素和 match pattern，但
+不参与 number 算术。普通 JSON 将 char 表示为只含一个 Unicode scalar 的 string；需要保留
+char 类型身份时使用第 16.6 节的 c-hex/canonical 编码。
+`mapcat(xs,f)` 是 `allcat(map(xs,f))` 的 list 专用组合；回调每次必须返回 list，结果只合并一层，
+不把 string 当作 list 片段，也不递归展开嵌套 list。
 
 列表过滤、缺键默认值、对象合并、字符串拼接及包含判断由纯函数组合这些操作实现。
 例如下列 filter/get/merge_objects 普通函数同时适用于 Flow 与其他 fn：
@@ -2736,7 +2756,10 @@ entry_input 的根是逻辑 EntryInput 对象；argument 的根是绑定前实�
 C(v)：null/false/true 为单字节 0x00/0x01/0x02；number 为 0x03 加 -0 归零、NaN 统一为 `0x7ff8000000000000` 后的八字节
 大端 binary64；string 为 0x04、八字节大端无符号 UTF-8 长度与内容；list 为 0x05、
 八字节大端无符号元素数与各 C(element)；object 为 0x06、八字节大端无符号字段数与
-按 UTF-8 bytes 键序的 C(key),C(value)。大小超过编码/Host 预算必须失败。
+按 UTF-8 bytes 键序的 C(key),C(value)；char 为 0x07 加八字节大端无符号 Unicode
+code point。char 只允许 Unicode scalar，不能编码 surrogate 或超过 U+10FFFF 的值。
+大小超过编码/Host 预算必须失败。普通 JSON 将 char 显示为一个 scalar 的 string，只有
+c-hex/canonical 保留 char 与 string 的类型区别。
 tuple 转成 Data list，不用 Host 自定义 repr；位置 ordinal/index 使用十进制 string：
 
 以下 wire 结构用于传输和编码。PositionPairs 和 EvalPathPairs 分别由 Position 和

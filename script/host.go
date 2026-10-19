@@ -34,7 +34,7 @@ type Schema struct {
 
 func validSchema(s Schema, seen map[visitKey]bool) bool {
 	typ := strings.TrimSuffix(s.Type, "?")
-	if !strings.Contains(" any null bool number string list object ", " "+typ+" ") || typ == "" {
+	if !strings.Contains(" any null bool number string char list object ", " "+typ+" ") || typ == "" {
 		return false
 	}
 	if s.Items != nil {

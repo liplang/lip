@@ -601,7 +601,7 @@ func nativeValueShapeSeen(v Value, active map[*function]bool) nativeShape {
 
 func nativeSchemaShape(schema Schema) nativeShape {
 	switch strings.TrimSuffix(schema.Type, "?") {
-	case "null", "bool", "number", "string":
+	case "null", "bool", "number", "string", "char":
 		return nativeShape{}
 	case "list":
 		item := nativeShape{native: true}
@@ -1405,7 +1405,7 @@ func lowerNative(ctx context.Context, s *syntax, host Host, saved map[string]Val
 			// return cannot itself be such a receiver. Keep any explicitly known
 			// nested provenance; unknown contents use explicit receiver effects.
 			switch strings.TrimSuffix(f.result, "?") {
-			case "list", "number", "string", "bool", "null", "function", "effect":
+			case "list", "number", "string", "char", "bool", "null", "function", "effect":
 				result.native = false
 			}
 			f.nativeResult, f.nativeParams = nativeShapePointer(nativeRuntimeShape(result)), params

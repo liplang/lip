@@ -76,7 +76,7 @@ native_release(value) releases a native reference.
 :vars shows saved values; :history shows input; :del name[,name...] unbinds
 names; :reset clears the session; :cancel discards a draft; :quit exits.
 :run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output]
-     [-data-encoding json|c-hex] [-project DIR] [-frames N] file.lip
+     [-data-encoding json|c-hex] [-project DIR] [-steps N] [-frames N] file.lip
      runs a complete file with static modules.
 Quote paths containing spaces or JSON with single/double quotes; no shell runs.
 :run inherits -host and uses independent file bindings.
@@ -103,6 +103,7 @@ carries can preserve a known request. Open projections, dynamic calls, and
 general carries stay Unknown; parallel still requires every candidate to be
 Concurrent ReadOnly.
 Non-tail calls default to 10,000 active frames; -frames changes the budget.
+REPL instruction steps are unlimited by default; -steps changes the budget.
 Exhaustion reports E-BUDGET; the next cell can still run.
 -parallel accepts nonnegative integers; zero uses one. It limits active
 evaluations without preallocating workers, and :run inherits the limit unless
@@ -140,6 +141,7 @@ func repl(ctx context.Context, args []string) error {
 	quiet := flags.Bool("quiet", !terminal(os.Stdin) || !terminal(os.Stdout), "hide prompts (automatic for pipes)")
 	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	project := flags.String("project", "", "project root for static LIP imports (default: current directory)")
+	steps := flags.Int64("steps", 0, "instruction step budget per cell and :run (0 means unlimited)")
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget per cell and :run (0 uses default)")
 	parallel := flags.Int("parallel", 4, "maximum active leaf evaluations per cell and :run (0 uses one)")
 	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
@@ -158,7 +160,11 @@ func repl(ctx context.Context, args []string) error {
 	if *parallel < 0 {
 		return fmt.Errorf("-parallel must be nonnegative (0 uses one)")
 	}
+	if *steps < 0 {
+		return fmt.Errorf("-steps must be nonnegative (0 means unlimited)")
+	}
 	options := interactiveOptions()
+	options.MaxSteps = *steps
 	options.MaxFrames = *frames
 	options.Parallelism = *parallel
 	host := script.Host{}
@@ -282,6 +288,7 @@ func repl(ctx context.Context, args []string) error {
 					runArgs := []string{
 						"run", "-host", *hostName,
 						"-parallel", strconv.Itoa(*parallel),
+						"-steps", strconv.FormatInt(*steps, 10),
 						"-frames", strconv.Itoa(*frames),
 						"-trace=" + strconv.FormatBool(*trace),
 					}

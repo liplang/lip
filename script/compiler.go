@@ -202,6 +202,71 @@ func lex(src string) ([]token, error) {
 				return nil, at(diagnostic("E-LEX", "unterminated string"), t)
 			}
 			t.kind, t.text, t.value = "string", strings.Clone(src[start:l.i]), textValue(b.String())
+		} else if c == '\'' {
+			l.advance()
+			var b strings.Builder
+			closed := false
+			for l.i < len(src) {
+				c = src[l.i]
+				if c == '\'' {
+					l.advance()
+					closed = true
+					break
+				}
+				if c < 32 {
+					return nil, at(diagnostic("E-LEX", "bare control character in char literal"), t)
+				}
+				if c != '\\' {
+					r, _ := utf8.DecodeRuneInString(src[l.i:])
+					b.WriteRune(r)
+					l.advance()
+					continue
+				}
+				l.advance()
+				if l.i >= len(src) {
+					break
+				}
+				c = src[l.i]
+				l.advance()
+				switch c {
+				case '\'', '\\':
+					b.WriteByte(c)
+				case 'n':
+					b.WriteByte('\n')
+				case 'r':
+					b.WriteByte('\r')
+				case 't':
+					b.WriteByte('\t')
+				case 'u':
+					if l.i >= len(src) || src[l.i] != '{' {
+						return nil, at(diagnostic("E-LEX", "Unicode escape requires braces"), t)
+					}
+					l.advance()
+					begin := l.i
+					for l.i < len(src) && isHex(src[l.i]) {
+						l.advance()
+					}
+					if l.i-begin < 1 || l.i-begin > 6 || l.i >= len(src) || src[l.i] != '}' {
+						return nil, at(diagnostic("E-LEX", "invalid Unicode escape"), t)
+					}
+					n, _ := strconv.ParseUint(src[begin:l.i], 16, 32)
+					l.advance()
+					if n > utf8.MaxRune || n >= 0xd800 && n <= 0xdfff {
+						return nil, at(diagnostic("E-LEX", "escape is not a Unicode scalar"), t)
+					}
+					b.WriteRune(rune(n))
+				default:
+					return nil, at(diagnostic("E-LEX", "unknown char escape"), t)
+				}
+			}
+			if !closed {
+				return nil, at(diagnostic("E-LEX", "unterminated char literal"), t)
+			}
+			rs := []rune(b.String())
+			if len(rs) != 1 {
+				return nil, at(diagnostic("E-LEX", "char literal must contain exactly one Unicode scalar"), t)
+			}
+			t.kind, t.text, t.value = "char", strings.Clone(src[start:l.i]), charValue(rs[0])
 		} else {
 			matched := false
 			for _, op := range []string{"<+", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "//", "**", "*/", "|>"} {
@@ -577,7 +642,7 @@ func (p *parser) staticData() Value {
 	case "inf":
 		p.take()
 		return infValue()
-	case "number", "string", "true", "false", "null":
+	case "number", "string", "char", "true", "false", "null":
 		p.take()
 		if t.kind == "true" || t.kind == "false" {
 			return BoolValue(t.kind == "true")
@@ -735,7 +800,7 @@ func (p *parser) typeName(void bool) string {
 	if t.kind == "null" {
 		return "null"
 	}
-	if !strings.Contains(" any bool number string list object function effect ", " "+name+" ") && !(void && name == "void") {
+	if !strings.Contains(" any bool number string char list object function effect ", " "+name+" ") && !(void && name == "void") {
 		p.fail(t, "unknown type "+name)
 	}
 	if p.accept("?") {
@@ -950,7 +1015,7 @@ func (p *parser) matchArms(mode string) []arm {
 				pat.value = nanValue()
 			case "inf":
 				pat.value = infValue()
-			case "number", "string":
+			case "number", "string", "char":
 				pat.value = t.value
 			case "true", "false":
 				pat.value = BoolValue(t.kind == "true")
@@ -965,7 +1030,7 @@ func (p *parser) matchArms(mode string) []arm {
 			case "id", "effect":
 				if t.text == "_" {
 					pat.wildcard = true
-				} else if strings.Contains(" bool number string list object function effect ", " "+t.text+" ") {
+				} else if strings.Contains(" bool number string char list object function effect ", " "+t.text+" ") {
 					pat.typ = t.text
 				} else {
 					p.fail(t, "invalid pattern")
@@ -1171,7 +1236,7 @@ func (p *parser) primary() *expression {
 		e.tag, e.value = "lit", nanValue()
 	case "inf":
 		e.tag, e.value = "lit", infValue()
-	case "number", "string":
+	case "number", "string", "char":
 		e.tag = "lit"
 		e.value = t.value
 	case "true", "false":

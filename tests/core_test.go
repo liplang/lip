@@ -529,6 +529,14 @@ func TestPureOperations(t *testing.T) {
 		`keys({"\u{10000}":1,"\u{e000}":2})`: `["","𐀀"]`, `split("a,,b,",",")`: `["a","","b",""]`, `slice("a𐀀b",1,2)`: `"𐀀"`, `parse_number("-0")`: "0", `put({},"x",3)`: "{\"x\":3}", `"10" < "9"`: "true",
 		`map(["Ada"], fn(name:any)->string { "hello " + name })`: `["hello Ada"]`,
 		`map(["Ada"], fn(name:any)->any { name + "!" })`:         `["Ada!"]`,
+		`from_chars(to_chars("A𐀀"))`:                             `"A𐀀"`,
+		`to_codepoint('𐀀')`:                                      `65536`,
+		`str(from_codepoint(65))`:                                `"A"`,
+		`concat([1], [2,3])`:                                     `[1,2,3]`,
+		`concat("ab", "cd")`:                                     `"abcd"`,
+		`allcat([[1], [2,3], []])`:                               `[1,2,3]`,
+		`allcat(["ab", "", "cd"])`:                               `"abcd"`,
+		`mapcat([1,2], fn(x:number)->list{[x,x]})`:               `[1,1,2,2]`,
 	}
 	for expr, want := range cases {
 		t.Run(expr, func(t *testing.T) {
@@ -537,6 +545,91 @@ func TestPureOperations(t *testing.T) {
 				t.Fatalf("got %s want %s", got, want)
 			}
 		})
+	}
+}
+
+func TestCharAllcatBoundaries(t *testing.T) {
+	cases := map[string]string{
+		`match 'x' {'x' => 1, char => 2, _ => 3}`: "1",
+		`match '𐀀' {'x' => 1, char => 2, _ => 3}`: "2",
+		`'A' < '𐀀'`:                             "true",
+		`from_chars(['A', from_codepoint(65)])`: `"AA"`,
+		`allcat([id("a"), "b"])`:                `"ab"`,
+	}
+	for expr, want := range cases {
+		source := "fn id(x:any)->any{x}\nflow Main()->any{return " + expr + "}"
+		r := runSource(t, source, Host{}, Options{})
+		if got := display(t, r.Output); got != want {
+			t.Fatalf("%s: got %s want %s", expr, got, want)
+		}
+	}
+	for _, source := range []string{
+		`flow Main()->any{return 'ab'}`,
+		`flow Main()->any{return '\u{d800}'}`,
+		`flow Main()->any{return '\u{110000}'}`,
+		`flow Main()->any{return concat("a", [1])}`,
+		`flow Main()->any{return allcat(["a", [1]])}`,
+		`flow Main()->any{return allcat([])}`,
+		`flow Main()->string{return from_chars([1])}`,
+		`flow Main()->list{return mapcat([1], fn(x:number)->string{"x"})}`,
+	} {
+		if _, err := Compile(source, Host{}); err == nil {
+			t.Fatalf("invalid source accepted: %s", source)
+		}
+	}
+	for _, tc := range []struct {
+		source, code string
+	}{
+		{`fn id(x:any)->any{x}
+flow Main()->any{return allcat([id("a"), [1]])}`, "E-TYPE"},
+		{`flow Main()->any{return from_codepoint(55296)}`, "E-VALUE"},
+		{`flow Main()->any{return from_codepoint(1114112)}`, "E-VALUE"},
+		{`flow Main()->any{return from_codepoint(4294967296)}`, "E-VALUE"},
+		{`flow Main()->any{return from_codepoint(65.5)}`, "E-VALUE"},
+		{`flow Main()->any{return from_codepoint(inf)}`, "E-VALUE"},
+		{`fn id(x:any)->any{x}
+flow Main()->any{return mapcat([1], fn(x:number)->any{id("x")})}`, "E-TYPE"},
+	} {
+		p, err := Compile(tc.source, Host{})
+		if err != nil {
+			t.Fatalf("dynamic boundary became static error: %v", err)
+		}
+		_, err = p.Run(context.Background(), nil, Options{})
+		if d, ok := err.(*Diagnostic); !ok || d.Code != tc.code {
+			t.Fatalf("source %s: got %v, want %s", tc.source, err, tc.code)
+		}
+	}
+	charValue, err := CharValue('A')
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := Canonical(charValue)
+	if err != nil || hex.EncodeToString(encoded) != "070000000000000041" {
+		t.Fatalf("canonical char: %x %v", encoded, err)
+	}
+	decoded, err := DecodeCanonical(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equal, err := Equal(charValue, decoded)
+	if err != nil || !equal {
+		t.Fatalf("canonical char round trip: %v %v", equal, err)
+	}
+	json, err := EncodeJSON(charValue)
+	if err != nil || string(json) != `"A"` {
+		t.Fatalf("char JSON: %s %v", json, err)
+	}
+}
+
+func TestCharAllcatGeneratedProgram(t *testing.T) {
+	p, err := Compile(`flow Main()->object{return {chars:from_chars(to_chars("A𐀀")),joined:allcat(["a","b"]),mapped:mapcat([1,2],fn(x:number)->list{[x,x]})}}`, Host{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, _ := buildNative(t, p, GoOptions{})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || stderr != "" || strings.TrimSpace(stdout) != `{"chars":"A𐀀","joined":"ab","mapped":[1,1,2,2]}` {
+		t.Fatalf("generated char/allcat program: stdout=%q stderr=%q err=%v", stdout, stderr, err)
 	}
 }
 

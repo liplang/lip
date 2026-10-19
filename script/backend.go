@@ -674,6 +674,8 @@ func valueLiteral(v Value) string {
 		return "number(" + strconv.FormatFloat(v.n, 'g', -1, 64) + ")"
 	case String:
 		return "textValue(" + quote(v.s) + ")"
+	case Char:
+		return "charValue(" + strconv.FormatInt(int64(v.r), 10) + ")"
 	case List:
 		items := make([]string, len(v.l))
 		for i, value := range v.l {

@@ -99,7 +99,7 @@ func (s *Session) Complete(prefix string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names := map[string]bool{}
-	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import export as lip go python host true false null nan inf any bool number string list object function void claim claim.snapshot") {
+	for _, name := range strings.Fields("flow fn return if else match for in parallel break continue with next effect perform import export as lip go python host true false null nan inf any bool number string char list object function void claim claim.snapshot") {
 		names[name] = true
 	}
 	for name := range builtinArity {
@@ -676,22 +676,28 @@ The REPL displays expression and binding results. fmt.Print/Printf/Println retur
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
 
 var sessionBuiltinHelp = map[string]string{
-	"print":        "print(value) -> null\nEmit a bounded diagnostic display without computational feedback; allowed in fn. CLI output goes to stderr.",
-	"log":          "log(level:string, value) -> null\nEmit a labelled diagnostic; delivery failure does not change computation. Allowed in fn.",
-	"telemetry":    "telemetry(name:string, fields:object) -> null\nEmit a one-way diagnostic event; no acknowledgement or exactly-once guarantee. Allowed in fn.",
-	"len":          "len(value) -> number\nReturn the Unicode scalar count, list length, or object field count.",
-	"str":          "str(value) -> string\nReturn strings unchanged; display other Data without whitespace, including nan and inf.",
-	"range":        "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",
-	"map":          "map(xs, f) -> list\nCall pure unary f in order and return the results.",
-	"fold":         "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed, and an accumulator-identity callback preserves seed for an unknown-length list.",
-	"fail":         "fail(message:string)\nEnd evaluation with E-FAIL.",
-	"concat":       "concat(a:list, b:list) -> list\nReturn a new list concatenating both inputs.",
-	"slice":        "slice(value, start:number?, stop:number? [, step:number?])\nSlice a list or string, excluding stop, just like value[start:stop:step]. Negative bounds are relative to length and clip; null selects defaults. Step defaults to 1 and cannot be zero; slice(value,null,null,-1) reverses.",
-	"keys":         "keys(value:object) -> list\nReturn string keys sorted by UTF-8 bytes.",
-	"has":          "has(value:object, key:string) -> bool\nTest whether the object has this key.",
-	"put":          "put(value:object, key:string, item:any) -> object\nReturn a new object with the field added or replaced.",
-	"split":        "split(value:string, separator:string) -> list\nSplit a string on a nonempty separator.",
-	"parse_number": "parse_number(value:string) -> number\nParse complete binary64 number text or nan, inf, +inf, -inf.",
+	"print":          "print(value) -> null\nEmit a bounded diagnostic display without computational feedback; allowed in fn. CLI output goes to stderr.",
+	"log":            "log(level:string, value) -> null\nEmit a labelled diagnostic; delivery failure does not change computation. Allowed in fn.",
+	"telemetry":      "telemetry(name:string, fields:object) -> null\nEmit a one-way diagnostic event; no acknowledgement or exactly-once guarantee. Allowed in fn.",
+	"len":            "len(value) -> number\nReturn the Unicode scalar count, list length, or object field count.",
+	"str":            "str(value) -> string\nReturn strings unchanged; display other Data without whitespace, including nan and inf.",
+	"range":          "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",
+	"map":            "map(xs, f) -> list\nCall pure unary f in order and return the results.",
+	"mapcat":         "mapcat(xs, f) -> list\nCall pure unary f for each list item; each result must be a list, then concatenate one level.",
+	"fold":           "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed, and an accumulator-identity callback preserves seed for an unknown-length list.",
+	"fail":           "fail(message:string)\nEnd evaluation with E-FAIL.",
+	"concat":         "concat(a:list|string, b:list|string) -> list|string\nReturn a new sequence concatenating two same-kind inputs.",
+	"allcat":         "allcat(parts:list) -> list|string\nConcatenate one level of same-kind list or string parts; mixed kinds and an empty parts list are errors.",
+	"to_chars":       "to_chars(value:string) -> list\nReturn the Unicode scalar values as char elements.",
+	"from_chars":     "from_chars(value:list) -> string\nBuild a string from a list containing only char values.",
+	"to_codepoint":   "to_codepoint(value:char) -> number\nReturn the Unicode code point number.",
+	"from_codepoint": "from_codepoint(value:number) -> char\nConvert a safe Unicode scalar number to char.",
+	"slice":          "slice(value, start:number?, stop:number? [, step:number?])\nSlice a list or string, excluding stop, just like value[start:stop:step]. Negative bounds are relative to length and clip; null selects defaults. Step defaults to 1 and cannot be zero; slice(value,null,null,-1) reverses.",
+	"keys":           "keys(value:object) -> list\nReturn string keys sorted by UTF-8 bytes.",
+	"has":            "has(value:object, key:string) -> bool\nTest whether the object has this key.",
+	"put":            "put(value:object, key:string, item:any) -> object\nReturn a new object with the field added or replaced.",
+	"split":          "split(value:string, separator:string) -> list\nSplit a string on a nonempty separator.",
+	"parse_number":   "parse_number(value:string) -> number\nParse complete binary64 number text or nan, inf, +inf, -inf.",
 }
 
 // Interactive conveniences lower into ordinary proposals, perform, blocks and
@@ -1015,7 +1021,7 @@ func sessionHelpFunction(t token, param string) *expression {
 		} else if value.k == Effect {
 			text = fmt.Sprintf("effect %s %q %s\nExternal request; not yet performed. Use perform to execute it.", value.p.contract.Operation.Language, value.p.contract.Operation.Path, value.p.contract.Operation.Member)
 		} else {
-			descriptions := map[Kind]string{Null: "Null value.", Bool: "Boolean true / false.", Number: "Finite binary64 number.", String: "Immutable UTF-8 string; scalar indices and slices count Unicode scalars: s[-1], s[::-1]; use len / split / slice.", List: "Immutable list; use a[-1], a[[2,0,-1]], a[start:stop:step], or a[::-1]. Index lists preserve order and duplicates; slice bounds clip; step cannot be zero. Use len / map / fold / slice.", Object: "Immutable object with string keys; read with .field or [key]; use keys / has / put."}
+			descriptions := map[Kind]string{Null: "Null value.", Bool: "Boolean true / false.", Number: "Finite binary64 number.", String: "Immutable UTF-8 string; scalar indices and slices count Unicode scalars: s[-1], s[::-1]; use len / split / slice / to_chars.", Char: "One Unicode scalar value; use to_codepoint / from_codepoint and from_chars.", List: "Immutable list; use a[-1], a[[2,0,-1]], a[start:stop:step], or a[::-1]. Index lists preserve order and duplicates; slice bounds clip; step cannot be zero. Use len / map / mapcat / fold / slice / allcat.", Object: "Immutable object with string keys; read with .field or [key]; use keys / has / put."}
 			text += "\n" + descriptions[value.k]
 		}
 		return evalResult{value: textValue(text)}, nil

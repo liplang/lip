@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "slice": {3, 4}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}, "print": {1}, "log": {2}, "telemetry": {2}}
+var builtinArity = map[string][]int{"len": {1}, "str": {1}, "range": {1, 2, 3}, "map": {2}, "mapcat": {2}, "fold": {3}, "fail": {1}, "concat": {2}, "allcat": {1}, "to_chars": {1}, "from_chars": {1}, "to_codepoint": {1}, "from_codepoint": {1}, "slice": {3, 4}, "keys": {1}, "has": {2}, "put": {3}, "split": {2}, "parse_number": {1}, "print": {1}, "log": {2}, "telemetry": {2}}
 
 type bindingInfo struct {
 	info    analysis
@@ -1646,8 +1646,8 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 			}
 			a.typ = "bool"
 		case "<", "<=", ">", ">=":
-			if x.typ != "any" && y.typ != "any" && (x.typ != y.typ || x.typ != "number" && x.typ != "string") {
-				c.error(e.tok, "E-TYPE", "comparison requires two numbers or two strings")
+			if x.typ != "any" && y.typ != "any" && (x.typ != y.typ || x.typ != "number" && x.typ != "string" && x.typ != "char") {
+				c.error(e.tok, "E-TYPE", "comparison requires two numbers, strings, or chars")
 			}
 			a.typ = "bool"
 		default:
@@ -1979,16 +1979,50 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				if binding.builtin != "" {
 					c.checkArity(e, binding.builtin, nil, env)
 					switch binding.builtin {
-					case "len", "parse_number":
+					case "len", "parse_number", "to_codepoint":
 						a.typ = "number"
 					case "str":
 						a.typ = "string"
+					case "from_codepoint":
+						a.typ = "char"
+					case "from_chars":
+						a.typ = "string"
+					case "to_chars":
+						a.typ = "list"
 					case "print", "log", "telemetry":
 						a.typ = "null"
 					case "has":
 						a.typ = "bool"
-					case "range", "map", "concat", "keys", "split":
+					case "range", "map", "mapcat", "keys", "split":
 						a.typ = "list"
+					case "allcat":
+						a.typ = "any"
+						if len(e.args) == 1 && e.args[0].expr.tag == "list" && len(e.args[0].expr.elems) > 0 {
+							kind := ""
+							known := true
+							for _, part := range e.args[0].expr.elems {
+								typ := normalizeType(part.info.typ)
+								if typ != "list" && typ != "string" {
+									known = false
+									break
+								}
+								if kind == "" {
+									kind = typ
+								} else if kind != typ {
+									known = false
+									break
+								}
+							}
+							if known && kind != "" {
+								a.typ = kind
+							}
+						}
+					case "concat":
+						if len(e.args) == 2 && normalizeType(e.args[0].expr.info.typ) == normalizeType(e.args[1].expr.info.typ) {
+							a.typ = e.args[0].expr.info.typ
+						} else {
+							a.typ = "any"
+						}
 					case "put":
 						a.typ = "object"
 					case "slice":
@@ -2108,7 +2142,7 @@ func (c *checker) checkArity(e *expression, builtin string, f *expression, env *
 			c.error(e.tok, "E-ARITY", "wrong core arity")
 		}
 		if valid {
-			c.builtinTypes(e, builtin)
+			c.builtinTypes(e, builtin, env)
 			if builtin == "map" || builtin == "fold" {
 				index, arity := 1, 1
 				if builtin == "fold" {
@@ -2333,6 +2367,37 @@ func concatDesc(left, right *staticDesc) *staticDesc {
 		return listPrefixDesc(slots, element)
 	}
 	return listDesc(nil, element)
+}
+
+func concatAllDesc(parts *staticDesc) *staticDesc {
+	slots, tail, ok := listShape(parts)
+	if !ok || tail || len(slots) == 0 {
+		return nil
+	}
+	var result *staticDesc
+	for _, part := range slots {
+		if part == nil {
+			return nil
+		}
+		if part.kind == descPlain && part.typ == "string" {
+			if result != nil && !(result.kind == descPlain && result.typ == "string") {
+				return nil
+			}
+			result = plainDesc("string")
+			continue
+		}
+		if part.kind != descList {
+			return nil
+		}
+		if result == nil {
+			result = part
+		} else if result.kind == descList {
+			result = concatDesc(result, part)
+		} else {
+			return nil
+		}
+	}
+	return result
 }
 
 func mapDesc(source, callback *staticDesc) *staticDesc {
@@ -2661,6 +2726,24 @@ func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 			}
 		}
 		return mapDesc(e.args[0].expr.info.desc, callback)
+	case "mapcat":
+		if len(e.args) != 2 {
+			return nil
+		}
+		callback := e.args[1].expr.info.desc
+		if e.args[1].expr.tag == "id" && env != nil {
+			if binding, ok := env.find(e.args[1].expr.name); ok && binding.fn != nil {
+				callback = binding.fn.info.desc
+				if callback == nil {
+					callback = callableDesc(binding.fn, nil)
+				}
+			}
+		}
+		mapped := mapDesc(e.args[0].expr.info.desc, callback)
+		if slots, tail, ok := listShape(mapped); ok && !tail && len(slots) == 0 {
+			return listDesc([]*staticDesc{}, nil)
+		}
+		return concatAllDesc(mapped)
 	case "fold":
 		if len(e.args) != 3 {
 			return nil
@@ -2679,7 +2762,23 @@ func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 		if len(e.args) != 2 {
 			return nil
 		}
+		if e.args[0].expr.info.typ == "string" && e.args[1].expr.info.typ == "string" {
+			return plainDesc("string")
+		}
 		return concatDesc(e.args[0].expr.info.desc, e.args[1].expr.info.desc)
+	case "allcat":
+		if len(e.args) == 1 {
+			return concatAllDesc(e.args[0].expr.info.desc)
+		}
+		return nil
+	case "to_chars":
+		return listDesc(nil, plainDesc("char"))
+	case "from_chars":
+		return plainDesc("string")
+	case "to_codepoint":
+		return plainDesc("number")
+	case "from_codepoint":
+		return plainDesc("char")
 	case "slice":
 		if len(e.args) != 3 && len(e.args) != 4 {
 			return nil
@@ -2732,8 +2831,63 @@ func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 	return nil
 }
 
-func (c *checker) builtinTypes(e *expression, name string) {
-	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "concat": {"list", "list"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}, "log": {"string", "any"}, "telemetry": {"string", "object"}}
+func (c *checker) builtinTypes(e *expression, name string, env *scope) {
+	types := map[string][]string{"range": {"number"}, "map": {"list", "function"}, "mapcat": {"list", "function"}, "fold": {"list", "any", "function"}, "fail": {"string"}, "allcat": {"list"}, "to_chars": {"string"}, "from_chars": {"list"}, "to_codepoint": {"char"}, "from_codepoint": {"number"}, "keys": {"object"}, "has": {"object", "string"}, "put": {"object", "string", "any"}, "split": {"string", "string"}, "parse_number": {"string"}, "log": {"string", "any"}, "telemetry": {"string", "object"}}
+	if name == "mapcat" && len(e.args) == 2 {
+		result := ""
+		if e.args[1].expr.tag == "fn" {
+			result = e.args[1].expr.typ
+		} else if e.args[1].expr.tag == "id" && env != nil {
+			if binding, ok := env.find(e.args[1].expr.name); ok && binding.fn != nil {
+				result = binding.fn.typ
+			}
+		}
+		if result != "" && normalizeType(result) != "list" && normalizeType(result) != "any" {
+			c.error(e.args[1].expr.tok, "E-TYPE", "mapcat callback must return list")
+		}
+	}
+	if name == "concat" {
+		for _, arg := range e.args {
+			typ := normalizeType(arg.expr.info.typ)
+			if typ != "any" && typ != "list" && typ != "string" {
+				c.error(arg.expr.tok, "E-TYPE", "concat requires two lists or two strings")
+			}
+		}
+		if len(e.args) == 2 {
+			a, b := normalizeType(e.args[0].expr.info.typ), normalizeType(e.args[1].expr.info.typ)
+			if a != "any" && b != "any" && a != b {
+				c.error(e.tok, "E-TYPE", "concat requires matching list or string arguments")
+			}
+		}
+		return
+	}
+	if name == "allcat" && len(e.args) == 1 && e.args[0].expr.tag == "list" {
+		parts := e.args[0].expr.elems
+		if len(parts) == 0 {
+			c.error(e.tok, "E-TYPE", "allcat requires a nonempty parts list")
+		} else {
+			kind := ""
+			for _, part := range parts {
+				typ := normalizeType(part.info.typ)
+				if typ != "list" && typ != "string" && typ != "any" {
+					c.error(part.tok, "E-TYPE", "allcat parts must be lists or strings")
+					continue
+				}
+				if typ != "any" {
+					if kind == "" {
+						kind = typ
+					} else if kind != typ {
+						c.error(part.tok, "E-TYPE", "allcat parts must have matching kinds")
+					}
+				}
+			}
+		}
+	}
+	if name == "from_chars" && len(e.args) == 1 && e.args[0].expr.tag == "list" {
+		for _, part := range e.args[0].expr.elems {
+			c.require(part.tok, part.info, "char")
+		}
+	}
 	if name == "len" || name == "slice" {
 		typ := e.args[0].expr.info.typ
 		if typ != "any" && typ != "string" && typ != "list" && (name == "slice" || typ != "object") {

@@ -145,7 +145,7 @@ func printCommandHelp(w io.Writer, command string) {
 		fmt.Fprintln(w, "  lipc repl")
 		fmt.Fprintln(w, "  printf '1 + 2\\n:quit\\n' | lipc repl -quiet")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Options: -host demo, -project DIR, -frames N, -parallel N, -trace=false, -quiet.")
+		fmt.Fprintln(w, "Options: -host demo, -project DIR, -steps N (0 unlimited), -frames N, -parallel N, -trace=false, -quiet.")
 	case "learn":
 		fmt.Fprintln(w, "Usage: lipc learn [options]")
 		fmt.Fprintln(w)

@@ -27,10 +27,11 @@ const (
 	Object
 	Function
 	Effect
+	Char
 )
 
 func (k Kind) String() string {
-	return [...]string{"null", "bool", "number", "string", "list", "object", "function", "effect"}[k]
+	return [...]string{"null", "bool", "number", "string", "list", "object", "function", "effect", "char"}[k]
 }
 
 // Value is immutable. Constructors and accessors never expose mutable storage.
@@ -39,6 +40,7 @@ type Value struct {
 	b bool
 	n float64
 	s string
+	r rune
 	l []Value
 	o map[string]Value
 	f *function
@@ -66,7 +68,14 @@ func StringValue(s string) (Value, error) {
 	}
 	return Value{k: String, s: s}, nil
 }
-func textValue(s string) Value    { return Value{k: String, s: s} }
+func textValue(s string) Value { return Value{k: String, s: s} }
+func CharValue(r rune) (Value, error) {
+	if r < 0 || r > utf8.MaxRune || r >= 0xd800 && r <= 0xdfff {
+		return Value{}, diagnostic("E-VALUE", "char is not a Unicode scalar")
+	}
+	return Value{k: Char, r: r}, nil
+}
+func charValue(r rune) Value      { v, _ := CharValue(r); return v }
 func ListValue(xs ...Value) Value { return Value{k: List, l: append([]Value(nil), xs...)} }
 func ObjectValue(fields map[string]Value) (Value, error) {
 	o := make(map[string]Value, len(fields))
@@ -291,6 +300,8 @@ func (v Value) Native() (any, error) {
 		return v.n, nil
 	case String:
 		return v.s, nil
+	case Char:
+		return string(v.r), nil
 	case List:
 		xs := make([]any, len(v.l))
 		for i, x := range v.l {
@@ -449,6 +460,8 @@ func Equal(a, b Value) (bool, error) {
 		return a.n == b.n, nil
 	case String:
 		return a.s == b.s, nil
+	case Char:
+		return a.r == b.r, nil
 	case List:
 		if len(a.l) != len(b.l) {
 			return false, nil
@@ -513,6 +526,9 @@ func encodeCanonical(b *bytes.Buffer, v Value) {
 		b.WriteByte(4)
 		put(uint64(len(v.s)))
 		b.WriteString(v.s)
+	case Char:
+		b.WriteByte(7)
+		put(uint64(v.r))
 	case List:
 		b.WriteByte(5)
 		put(uint64(len(v.l)))
@@ -593,6 +609,15 @@ func (d *canonicalDecoder) value(depth int) (Value, error) {
 			return Value{}, err
 		}
 		return StringValue(string(b))
+	case 7:
+		n, err := d.size()
+		if err != nil {
+			return Value{}, err
+		}
+		if n > utf8.MaxRune || n >= 0xd800 && n <= 0xdfff {
+			return Value{}, diagnostic("E-VALUE", "invalid canonical char")
+		}
+		return CharValue(rune(n))
 	case 5, 6:
 		n, err := d.size()
 		if err != nil {
@@ -695,6 +720,9 @@ func Display(v Value) (string, error) {
 	if v.k == String {
 		return v.s, nil
 	}
+	if v.k == Char {
+		return string(v.r), nil
+	}
 	var b strings.Builder
 	displayJSON(&b, v)
 	return b.String(), nil
@@ -721,6 +749,19 @@ func displayJSON(b *strings.Builder, v Value) {
 	case String:
 		b.WriteByte('"')
 		for _, r := range v.s {
+			if r == '"' || r == '\\' {
+				b.WriteByte('\\')
+				b.WriteRune(r)
+			} else if r < 32 {
+				fmt.Fprintf(b, "\\u%04x", r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+		b.WriteByte('"')
+	case Char:
+		b.WriteByte('"')
+		for _, r := range string(v.r) {
 			if r == '"' || r == '\\' {
 				b.WriteByte('\\')
 				b.WriteRune(r)
@@ -1245,12 +1286,20 @@ func DiagnosticHint(code, message string) string {
 		return "LIP keeps numbers and other types separate. When input is text, use parse_number(text) at the boundary and handle invalid numeric text; other types need explicit logic instead of implicit conversion."
 	case strings.Contains(message, "expected string") || strings.Contains(message, "requires string"):
 		return "This position requires a string. Use a string literal or str(value) for an explicit Data-to-text conversion; LIP does not coerce numbers automatically."
+	case strings.Contains(message, "expected char") || strings.Contains(message, "requires char"):
+		return "This position requires a char. Use a single-scalar literal such as 'A', to_chars/from_chars for strings, or from_codepoint/to_codepoint for explicit code point conversion."
 	case strings.Contains(message, "expected list") || strings.Contains(message, "requires list") || strings.Contains(message, "comprehension requires list") || strings.Contains(message, "carry requires list"):
 		return "This position requires a list. Use a list literal, range, map, or concat; an object, string, or scalar is not converted implicitly."
+	case strings.Contains(message, "concat requires") || strings.Contains(message, "invalid concat arguments"):
+		return "concat accepts two lists or two strings of the same kind. Use allcat for a nonempty list of same-kind sequence parts; list and string values cannot be mixed."
+	case strings.Contains(message, "allcat requires") || strings.Contains(message, "invalid allcat arguments"):
+		return "allcat accepts a nonempty list whose parts are all lists or all strings, and flattens exactly one level. Check each part's kind explicitly."
+	case strings.Contains(message, "mapcat callback must return list") || strings.Contains(message, "invalid mapcat arguments"):
+		return "mapcat accepts a list and a unary function whose result is a list. It maps in order and flattens the returned lists exactly one level."
 	case strings.Contains(message, "expected object") || strings.Contains(message, "requires object"):
 		return "This position requires an object. Use an object literal {key:value} or construct a new object with put; LIP does not coerce other containers."
-	case strings.Contains(message, "comparison requires matching number/string") || strings.Contains(message, "comparison requires two numbers or two strings"):
-		return "Ordered comparisons accept two numbers or two strings of the same type. Convert input explicitly before comparing; use == or != for equality."
+	case strings.Contains(message, "comparison requires matching number/string") || strings.Contains(message, "comparison requires two numbers or two strings") || strings.Contains(message, "comparison requires two numbers, strings, or chars"):
+		return "Ordered comparisons accept two numbers, two strings, or two chars of the same type. Convert input explicitly before comparing; use == or != for equality."
 	case strings.Contains(message, "function/effect equality is undefined"):
 		return "Functions and effect proposals have no equality operation. Compare their Data inputs or results, or perform the proposal and compare its returned Data."
 	case strings.Contains(message, "arithmetic requires numbers"):
@@ -1306,7 +1355,7 @@ func DiagnosticHint(code, message string) string {
 	case strings.Contains(message, "export requires a declaration"):
 		return "export applies to a declaration such as export fn or export flow. It cannot prefix a call, binding, or ordinary statement."
 	case strings.Contains(message, "unknown type") || strings.Contains(message, "void cannot be nullable"):
-		return "Use only LIP's declared types: any, bool, number, string, list, object, function, effect, or void where allowed. Nullable syntax is type?; void? is not valid."
+		return "Use only LIP's declared types: any, bool, number, char, string, list, object, function, effect, or void where allowed. Nullable syntax is type?; void? is not valid."
 	case strings.Contains(message, "leading zero in number"):
 		return "LIP number literals do not allow leading zeroes. Write 0 for zero, 0.5 for a fraction, or 12 for an integer."
 	case strings.Contains(message, "fraction requires digits"):
@@ -1315,8 +1364,10 @@ func DiagnosticHint(code, message string) string {
 		return "An exponent must contain digits after e or E, for example 1e3 or 1.5e-2."
 	case strings.Contains(message, "invalid number suffix") || strings.Contains(message, "number overflow") || strings.Contains(message, "non-finite number"):
 		return "Use a complete finite number literal with LIP's decimal syntax. For nan or infinity, use the explicit nan, inf, or -inf literals."
-	case strings.Contains(message, "unknown string escape") || strings.Contains(message, "Unicode escape requires braces"):
-		return "Strings use escapes such as \\\" \\\\ \\n, \\r, \\t, and \\u{...}. Check the backslash spelling and put braces around Unicode code points."
+	case strings.Contains(message, "unknown string escape") || strings.Contains(message, "unknown char escape") || strings.Contains(message, "Unicode escape requires braces"):
+		return "Strings and chars use escapes such as \\\" \\\\ \\n, \\r, \\t, and \\u{...}. Check the backslash spelling and put braces around Unicode code points."
+	case strings.Contains(message, "char literal must contain exactly one") || strings.Contains(message, "bare control character in char literal") || strings.Contains(message, "unterminated char literal"):
+		return "A char literal uses single quotes and contains exactly one Unicode scalar, for example 'A' or '\\u{1F600}'. Use a string literal for multiple scalars."
 	case strings.Contains(message, "unterminated string") || strings.Contains(message, "unterminated multiline string"):
 		return "Close the string with its matching quote. Multiline strings use triple quotes: \"\"\"text\"\"\"."
 	case strings.Contains(message, "expected statement separator"):
@@ -1324,7 +1375,7 @@ func DiagnosticHint(code, message string) string {
 	case code == "E-PURITY":
 		return "This position must be pure and repeatable. Move external work into a Flow, construct an effect without executing it, or call a fn whose body explicitly promises pure native computation with @{...}."
 	case code == "E-SCHEMA":
-		return "This boundary accepts only LIP Data: null, bool, number, string, list, or object. Consume functions/effects inside LIP and convert native values through an explicit adapter."
+		return "This boundary accepts only LIP Data: null, bool, number, char, string, list, or object. Consume functions/effects inside LIP and convert native values through an explicit adapter."
 	case code == "E-ARITY":
 		return "Check the declared signature and argument order. LIP validates arity before evaluating arguments or executing external work."
 	case code == "E-OPERATION":

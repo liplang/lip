@@ -46,13 +46,13 @@ Specification and engineering release versions are managed separately. §17 reco
 
 | Object | Rule |
 |---|---|
-| Data | null, bool, number (finite binary64, signed infinities, or canonical NaN), UTF-8 string, list, string-keyed object |
+| Data | null, bool, number (finite binary64, signed infinities, or canonical NaN), Unicode-scalar char, UTF-8 string, list, string-keyed object |
 | fn | Pure closure over immutable values, allowing §3.2 diagnostics and §10.3 native calls explicitly promised pure through @{...}; recursion, mutual recursion, and function values are supported |
 | effect | Immutable proposal containing a resolved operation and fixed Data arguments |
 | Flow | Named graph definition lowered from bindings, control structures, and child calls; not an ordinary value |
 | Claim store | Information slot growing only through join during a run |
 
-Ordinary values V recursively comprise null, bool, number, string, list<V>, object<string,V>, fn, and effect. Data excludes fn/effect recursively. Ordinary containers and same-run Flow inputs/results MAY contain any V, including fn, effect, and nested containers. Host arguments/results, entry protocol inputs/outputs, and Claim contributions MUST be Data. Stores are not values or transferable handles. Names bind once; inner scopes may shadow ordinary values but not store names. Flows are neither V, Data, nor function values: they cannot be contained, captured as values, aliased, passed, returned, or supplied to map/fold. Their targets resolve statically under §2.1.
+Ordinary values V recursively comprise null, bool, number, char, string, list<V>, object<string,V>, fn, and effect. Data excludes fn/effect recursively. Ordinary containers and same-run Flow inputs/results MAY contain any V, including fn, effect, and nested containers. Host arguments/results, entry protocol inputs/outputs, and Claim contributions MUST be Data. Stores are not values or transferable handles. Names bind once; inner scopes may shadow ordinary values but not store names. Flows are neither V, Data, nor function values: they cannot be contained, captured as values, aliased, passed, returned, or supplied to map/fold. Their targets resolve statically under §2.1.
 
 `effect` constructs requests; `perform` interprets them. Every Go/Python call, external property read, random draw, clock read, business log, storage access, and network access uses perform. The §3.2 core diagnostics only emit information and are not business operations. Pure core/local fn calls are direct; external operations are not. The generic adapter profile in §10 may lower convenient direct syntax to perform before core checking; it still uses the same boundary.
 
@@ -63,6 +63,7 @@ Files MUST be valid UTF-8 without BOM. LF/CRLF, spaces/tabs, `#` line comments, 
 Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. Reserved words are `import as flow fn return if else match for in parallel break continue with next effect perform export true false null nan inf void`. `go/python/host/lip` are contextual after import; type names have special meaning only in type/pattern positions. `claim`, import aliases, and §3 core function names cannot be redefined. Other duplicate same-scope declarations are static errors.
 
 Strings use `"..."` or ASCII `"""..."""`. Bare newline/tab are invalid in ordinary strings; triple-quoted strings allow them, normalize LF/CRLF to LF, and reject bare CR. Both forms support only `\"`, `\\`, `\n`, `\r`, `\t`, and `\u{HEX}` with 1–6 hexadecimal digits denoting a Unicode scalar, excluding surrogates and values above U+10FFFF. No Unicode normalization occurs. Triple quotes take lexical precedence and end at the first unescaped three consecutive ASCII double quotes; one/two internal quotes are text, and escaped quotes can represent three literal quotes. `#`, brackets, and operators inside strings are text. No trimming, automatic dedentation, interpolation, raw/f-string prefixes, or backslash-newline continuation inside strings is provided. An unclosed triple quote is E-LEX; interactive tools may collect more lines and MUST treat embedded `:help` and similar text as string content. Both forms produce the same UTF-8 string type, encoding, comparison, and Host boundary.
+Char literals use single quotes and MUST contain exactly one Unicode scalar. They support `\'`, `\\`, `\n`, `\r`, `\t`, and `\u{HEX}` escapes, and reject surrogates, values above U+10FFFF, and multiple scalars. Char is a distinct type ordered by Unicode code point; `str(char)` returns a string containing that scalar. Char is not an implicit string/list or number conversion.
 
 The reserved literals nan and inf are also allowed as field names, including `np.nan`, `np.inf`, and `{nan:nan,inf:inf}`; this does not allow variables named nan or inf.
 
@@ -87,7 +88,7 @@ static_field ::= (field_name | string) ":" static_data
 params     ::= "(" [parameter ("," parameter)* [","]] ")"
 parameter  ::= id ":" type
 type       ::= "null" | type_name ["?"]
-type_name  ::= "any" | "bool" | "number" | "string" | "list" | "object"
+type_name  ::= "any" | "bool" | "number" | "char" | "string" | "list" | "object"
              | "function" | "effect"
 
 statements ::= padding [stmt (sep stmt)* padding]
@@ -103,7 +104,7 @@ arm_stmt   ::= patterns ["if" expr] "=>" (block | stmt)
 arm_sep    ::= "," | sep
 patterns   ::= pattern ("," pattern)*
 pattern    ::= literal | ["+" | "-"] number | concrete_type | "_"
-concrete_type ::= "bool" | "number" | "string" | "list" | "object"
+concrete_type ::= "bool" | "number" | "char" | "string" | "list" | "object"
                 | "function" | "effect"
 
 expr       ::= pipeline
@@ -159,7 +160,7 @@ list       ::= "[" [expr ("," expr)* [","]] "]"
              | "[" expr "for" id "in" expr ["if" expr] "]"
 object     ::= "{" [field ("," field)* [","]] "}"
 field      ::= (field_name | string) ":" expr
-literal    ::= number | string | "true" | "false" | "null" | "nan" | "inf"
+literal    ::= number | char | string | "true" | "false" | "null" | "nan" | "inf"
 ```
 
 The file mode is chosen uniquely from module-level declarations: any export, Flow, or data declaration selects `declarations`; otherwise use `fn_decl* statements`, whose statements may be empty. A root with only imports/ordinary fn therefore has an implicit empty main; a dependency merely supplies declarations. Tokens inside bodies do not choose the mode. Declaration mode cannot mix top-level statements, and legacy statement mode cannot declare static data. All imports precede every declaration/statement, including exported data.
@@ -276,7 +277,7 @@ Valued entries use only value with their validated result; void entries, includi
 
 ## 3. Values and core operations
 
-All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers or two strings; other comparisons are E-TYPE. `+` accepts two numbers or two strings, never implicit conversion. Numbers are binary64, including §3.3 signed infinities and canonical NaN; normalize negative zero to zero. Handle nonfinite operands under §3.3 first; IEEE-754 results, including NaN and signed infinities, are values.
+All values are immutable. Constructors/operators evaluate operands left to right; only selected branches of if/match and required operands of `&&`/`||` evaluate. Logical operands and conditions must be bool, without truthiness. Equality is structural on Data; comparing fn/effect or containers containing them is E-TYPE. Objects ignore field order for equality; duplicate decoded keys are invalid. Strings compare lexicographically by UTF-8 bytes, without normalization. Ordering accepts two numbers, two chars, or two strings; chars compare by Unicode code point, and other mixed comparisons are E-TYPE. Char does not participate in arithmetic or implicit string/list/number conversion. `+` accepts two numbers or two strings, never implicit conversion. Numbers are binary64, including §3.3 signed infinities and canonical NaN; normalize negative zero to zero. Handle nonfinite operands under §3.3 first; IEEE-754 results, including NaN and signed infinities, are values.
 
 Data is a finite acyclic value tree: lists preserve order, objects have unique keys and canonical UTF-8 key order. Native mutable objects must be copied to Data or represented by declared Host references, never directly shared. Equality is typed and structural: null equals only null, and bool never equals number; fn/effect are not comparable even inside containers. Field/index access creates no implicit binding. Stop operand evaluation after an error.
 
@@ -333,9 +334,15 @@ The table and §3.2 diagnostics form the complete non-overridable core functions
 | str(value) | 1 | Data → string; strings unchanged, other Data as compact canonical display, extended for nonfinite numbers under §3.3 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | Safe integers, nonzero step → half-open number list; defaults start=0, step=1 |
 | map(xs,f) | 2 | list, pure unary function → results in input order |
+| mapcat(xs,f) | 2 | list, pure unary function returning a list → map in input order and concatenate one level into a new list |
 | fold(xs,seed,f) | 3 | list, V, pure binary function → strict left fold; empty list returns seed |
 | fail(message) | 1 | string → E-FAIL, no successful value |
-| concat(a,b) | 2 | Two lists → concatenation; append is concat(a,[v]) |
+| concat(a,b) | 2 | Two lists or two strings of the same kind → concatenation; append is concat(a,[v]) |
+| allcat(parts) | 1 | Nonempty parts list of same-kind lists or strings → one-level concatenation; no recursive flattening or mixed kinds |
+| to_chars(s) | 1 | string → list<char> in Unicode-scalar order |
+| from_chars(chars) | 1 | list containing only chars → string; other elements are E-TYPE |
+| to_codepoint(c) | 1 | char → Unicode code point number |
+| from_codepoint(n) | 1 | safe-integer number → Unicode-scalar char; nonfinite, out-of-range, or surrogate values are E-VALUE |
 | slice(v,start,stop) / slice(v,start,stop,step) | 3/4 | Same rules as bracket slicing; null denotes an omitted component |
 | keys(o) | 1 | object → string list sorted by UTF-8 bytes |
 | has(o,k) | 2 | object, string → bool; missing key is false |
@@ -346,6 +353,16 @@ The table and §3.2 diagnostics form the complete non-overridable core functions
 Core functions reject named arguments and check declared arity statically when known and dynamically through function values. They may be passed as pure function values. map calls f(element); fold calls f(accumulator,element), using §5's callable/arity/type checks even on empty inputs when statically known. Unguarded comprehensions are ordered map; guards follow §6.2. Flow comprehensions containing perform run sequentially like list literals. range checks size budget before allocation and computes length/elements with exact integers before converting to number, without floating-point loops. len MUST return a safe integer or explicitly fail, never round an incorrect length.
 
 slice uses exactly the bracket slicing rules above, including negative bounds, clipping, nullable components, and a nonzero optional step. `slice(v,null,null,-1)` equals `v[::-1]`. has/put require string keys. Empty split separator is E-VALUE; `split("",",")=[""]` and `split("a,,b,",",")=["a","","b",""]`. There are no hidden parameters.
+
+`allcat` flattens exactly one outer parts list: `allcat([[1],[2,3]])` is `[1,2,3]`,
+with no recursive flattening. Parts MUST be nonempty and all lists or all strings; `concat([1],[2])`
+and `concat("a","b")` remain the two-argument forms, and lists and strings cannot be mixed.
+`to_chars` and `from_chars` use Unicode scalars, not grapheme clusters. `from_codepoint` accepts
+only finite safe integers and rejects surrogates. Char may be a parameter, result, list element,
+or match pattern, but does not participate in number arithmetic. Ordinary JSON represents a char
+as a one-scalar string; c-hex/canonical encoding is required to preserve the char/string type identity.
+`mapcat(xs,f)` is the list-only composition `allcat(map(xs,f))`: every callback result MUST be a list,
+the result is flattened one level, and nested lists are not recursively expanded.
 
 parse_number accepts exactly lowercase "nan", "inf", "+inf", "-inf", or an optional ASCII sign followed by exactly §2's number token. Reject whitespace, leading zeroes, hex, "NaN", "+nan", "-nan", Infinity, and trailing text. Invalid text/overflow is E-VALUE; wrong type E-TYPE. Rounding, subnormals, underflow, and zero normalization match literals, not permissive Host parsers. `parse_number(str(n)) == n` holds for every non-NaN number; test NaN round trips with is_nan.
 
@@ -1464,7 +1481,7 @@ Call-related diagnostics retain §10 provider_fact/validation and terminal disti
 
 ### 16.1. Canonical data and identity encoding
 
-C(v): null/false/true are bytes 0x00/0x01/0x02. number is 0x03 plus eight big-endian binary64 bytes after zero normalization and NaN normalization to 0x7ff8000000000000. string is 0x04, eight-byte unsigned big-endian UTF-8 length, then bytes. list is 0x05, eight-byte unsigned element count, then each C(element). object is 0x06, eight-byte unsigned field count, then C(key),C(value) sorted by UTF-8 key bytes. Exceeding encoding/Host budgets MUST fail. Tuples become Data lists, never private repr. Ordinals/indices use decimal strings.
+C(v): null/false/true are bytes 0x00/0x01/0x02. number is 0x03 plus eight big-endian binary64 bytes after zero normalization and NaN normalization to 0x7ff8000000000000. string is 0x04, eight-byte unsigned big-endian UTF-8 length, then bytes. list is 0x05, eight-byte unsigned element count, then each C(element). object is 0x06, eight-byte unsigned field count, then C(key),C(value) sorted by UTF-8 key bytes. char is 0x07 plus an eight-byte unsigned big-endian Unicode code point; it MUST be a Unicode scalar, excluding surrogates and values above U+10FFFF. Exceeding encoding/Host budgets MUST fail. Ordinary JSON displays char as a one-scalar string; only c-hex/canonical preserves the distinction from string. Tuples become Data lists, never private repr. Ordinals/indices use decimal strings.
 
 PositionPairs/EvalPathPairs encode each integer pair as two decimal strings. decimal emits unsigned ASCII without leading zeroes, zero as `"0"`. SHA256 returns 32 digest bytes; lowerhex emits two lowercase hex characters per byte. positional/named are Request arguments:
 

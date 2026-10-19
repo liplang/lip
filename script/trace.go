@@ -154,6 +154,13 @@ func traceText(value Value) string {
 			} else {
 				write(strconv.Quote(text))
 			}
+		case Char:
+			text := string(v.r)
+			if depth == 0 {
+				write(text)
+			} else {
+				write(strconv.Quote(text))
+			}
 		case Function:
 			write("<function>")
 		case Effect:

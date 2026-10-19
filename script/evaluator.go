@@ -188,8 +188,10 @@ func (v *evaluator) eval(e *expression, env *environment, tail bool) (r evalResu
 				less, equal = a.n < b.n, a.n == b.n
 			} else if a.k == String && b.k == String {
 				less, equal = a.s < b.s, a.s == b.s
+			} else if a.k == Char && b.k == Char {
+				less, equal = a.r < b.r, a.r == b.r
 			} else {
-				err = diagnostic("E-TYPE", "comparison requires matching number/string")
+				err = diagnostic("E-TYPE", "comparison requires matching number/string/char")
 				break
 			}
 			switch e.name {
@@ -822,8 +824,11 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 		}
 		return Value{}, diagnostic("E-FAIL", xs[0].s)
 	case "concat":
-		if xs[0].k != List || xs[1].k != List {
+		if xs[0].k != xs[1].k || xs[0].k != List && xs[0].k != String {
 			return wrong()
+		}
+		if xs[0].k == String {
+			return textValue(xs[0].s + xs[1].s), nil
 		}
 		if err := v.run.reserveElements(int64(len(xs[0].l)) + int64(len(xs[1].l))); err != nil {
 			return Value{}, err
@@ -832,6 +837,81 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 		out = append(out, xs[0].l...)
 		out = append(out, xs[1].l...)
 		return ListValue(out...), nil
+	case "allcat":
+		if xs[0].k != List || len(xs[0].l) == 0 {
+			return wrong()
+		}
+		kind := xs[0].l[0].k
+		if kind != List && kind != String {
+			return wrong()
+		}
+		if kind == String {
+			var out strings.Builder
+			for _, part := range xs[0].l {
+				if part.k != String {
+					return wrong()
+				}
+				out.WriteString(part.s)
+			}
+			return textValue(out.String()), nil
+		}
+		total := int64(0)
+		for _, part := range xs[0].l {
+			if part.k != List {
+				return wrong()
+			}
+			total += int64(len(part.l))
+		}
+		if err := v.run.reserveElements(total); err != nil {
+			return Value{}, err
+		}
+		out := make([]Value, 0, int(total))
+		for _, part := range xs[0].l {
+			out = append(out, part.l...)
+		}
+		return ListValue(out...), nil
+	case "to_chars":
+		if xs[0].k != String {
+			return wrong()
+		}
+		rs := []rune(xs[0].s)
+		if err := v.run.reserveElements(int64(len(rs))); err != nil {
+			return Value{}, err
+		}
+		out := make([]Value, len(rs))
+		for i, r := range rs {
+			out[i] = charValue(r)
+		}
+		return ListValue(out...), nil
+	case "from_chars":
+		if xs[0].k != List {
+			return wrong()
+		}
+		var out strings.Builder
+		for _, x := range xs[0].l {
+			if x.k != Char {
+				return wrong()
+			}
+			out.WriteRune(x.r)
+		}
+		return textValue(out.String()), nil
+	case "to_codepoint":
+		if xs[0].k != Char {
+			return wrong()
+		}
+		return number(float64(xs[0].r)), nil
+	case "from_codepoint":
+		if xs[0].k != Number {
+			return wrong()
+		}
+		i, err := indexInteger(xs[0])
+		if err != nil {
+			return Value{}, diagnostic("E-VALUE", "code point must be a safe integer")
+		}
+		if i < 0 || i > utf8.MaxRune || i >= 0xd800 && i <= 0xdfff {
+			return Value{}, diagnostic("E-VALUE", "code point is not a Unicode scalar")
+		}
+		return CharValue(rune(i))
 	case "keys":
 		if xs[0].k != Object {
 			return wrong()
@@ -917,7 +997,7 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 			out[i] = number(float64(start + int64(i)*step))
 		}
 		return ListValue(out...), nil
-	case "map", "fold":
+	case "map", "mapcat", "fold":
 		if xs[0].k != List {
 			return wrong()
 		}
@@ -978,6 +1058,14 @@ func (v *evaluator) builtin(name string, xs []Value, locations ...token) (Value,
 			}
 			if name == "fold" {
 				seed = value
+			} else if name == "mapcat" {
+				if value.k != List {
+					return wrong()
+				}
+				if err := v.run.reserveElements(int64(len(value.l))); err != nil {
+					return Value{}, err
+				}
+				out = append(out, value.l...)
 			} else {
 				out = append(out, value)
 			}
