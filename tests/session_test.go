@@ -134,7 +134,7 @@ func TestSessionPreservesProposalOps(t *testing.T) {
 	}
 }
 
-func TestSessionCarryProposalRemainsUnknown(t *testing.T) {
+func TestSessionCarryProposalIdentity(t *testing.T) {
 	var calls atomic.Int64
 	host := testHost(func(_ context.Context, r Request) Response {
 		calls.Add(1)
@@ -154,13 +154,11 @@ func TestSessionCarryProposalRemainsUnknown(t *testing.T) {
 			t.Fatal(source, err)
 		}
 	}
-	if _, err := s.Eval(ctx, `for i in [1] parallel {perform p}`, Options{Parallelism: 7}); err == nil {
-		t.Fatal("carry proposal was incorrectly admitted to parallel")
-	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
-		t.Fatal(err)
+	if _, err := s.Eval(ctx, `for i in [1] parallel {perform p}`, Options{Parallelism: 7}); err != nil {
+		t.Fatal("carry identity proposal was rejected", err)
 	}
-	if calls.Load() != 0 {
-		t.Fatal("rejected carry proposal reached provider")
+	if calls.Load() != 1 {
+		t.Fatal("carry identity proposal did not reach provider", calls.Load())
 	}
 }
 

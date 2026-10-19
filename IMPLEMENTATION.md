@@ -20,7 +20,7 @@
 | 4：契约、诊断与适配 | 从同一源码/registry 向嵌入 API、CLI/REPL、帮助与补全提供只读视图；在 `values.go`、`host.go`、`adapters.go` 贯通结构化 reason、部分候选、边界 path 与完成事实 | 未知与禁止明确区分；签名/可空/可缺省一致；多错顺序稳定；静态查看零新增执行；权限撤销、过期引用、known_fault 重放零重复写入；展示开关不改预算/身份/主错误 |
 | 5：组合验收与发布准备 | 将全部规范向量和既有应用回归贯通解释器、实际 Go 程序与适用 REPL；同步示例、帮助、课程、README 和本页证据 | 相关回归及 `make test`、`make race`、`make vet` 通过，明确环境跳过项；清理生成物并完成 core 声明审查后再决定发布版本号 |
 
-已将原有“容器投影/参数转发必为 Unknown”的回归迁移为 1.2 正向用例；真正未知、写入、不可并发读取和 carry 结果继续作为拒绝用例。每个正向用例都同时验证静态零调用、实际 provider 行为和生成程序结果。
+已将原有“容器投影/参数转发必为 Unknown”的回归迁移为 1.2 正向用例；真正未知、写入、不可并发读取和一般 carry 结果继续作为拒绝用例，容器 slot、空 concat、Prefix slice、fold accumulator identity、推导式 identity 和 carry state identity 作为正向用例。每个正向用例都同时验证静态零调用、实际 provider 行为和生成程序结果。
 
 每阶段的验收记录须注明规范条款、执行路径、具体输出/错误归属、provider 调用次数及必需先后关系。并行重叠用会合/事件证明；声明置换与动作源码重排分别检查。独立模型只验证半格、投影、候选笛卡尔积、错误阶段、Claim 冲突和递归固定点的规范代数，不能替代解释器/生成程序验收。已有 1.1 回归和文档/数值附录通过只说明基线仍有效，不能代替新能力验收。可选 durable 的实现及并行写、共享可变状态不纳入这条主线。
 
@@ -52,7 +52,7 @@
 
 同一测试通过纯请求构造函数执行跨模块子 Flow 的并行读取，并检查 Write 和容器投影产生的 Unknown 请求在编译阶段拒绝并行，Host 零调用。Flow 不作为普通值传给 map/fold，活动 Claim 不跨子 Flow 传递，完整快照通过 Data 组合。静态已知函数返回请求的 Ops 按规范传播；通用原生操作的合约仍为 Unknown。业务 Result 由显式控制门解释；多步 Flow 不自动获得事务或崩溃恢复。
 
-纯函数返回请求的分析使用独立的有限 operation 联合依赖图，具名函数预先分配摘要节点，函数尾表达式连接返回来源；可达性计算得到递归联合方程的最小固定点。摘要不保留源码树、环境或业务值，不运行函数，也不按实参专门化。参数来源以有限 `Param/ParamOps` 节点保留，调用点再替换为实际请求摘要；尚未完成的递归/前向边若需要未建模的参数位置置换则保守回退 Unknown，避免把错误位置当成已知请求。`FunctionProposalSummaries` 覆盖具名/匿名函数、简单别名、不可变捕获、管道、分支、多层前向调用、互递归、条件/返回函数和闭合容器取出的函数；`FunctionProposalUnknownAndUnsafe` 保留开放容器、carry、动态函数和未知形参的保守边界，并检查写入、不可并发读取及实参效果不会被返回摘要掩盖。`FunctionProposalClosedValuesAndRecursiveParameters` 额外验证 `[request][0]`、条件/返回函数和递归 effect 参数在 parallel 中保留已知只读请求。`FunctionProposalSchedulingAndGo` 用 provider 会合验证普通图及显式 parallel 的真实读取重叠和前后写入 barrier，对照解释器与实际生成的可执行文件。Go 后端携带检查后的效果/并发元数据，运行时不重新分析函数。
+纯函数返回请求的分析使用独立的有限 operation 联合依赖图，具名函数预先分配摘要节点，函数尾表达式连接返回来源；可达性计算得到递归联合方程的最小固定点。摘要不保留源码树、环境或业务值，不运行函数，也不按实参专门化。参数来源以有限 `Param/ParamOps` 节点保留，调用点再替换为实际请求摘要；尚未完成的递归/前向边若需要未建模的参数位置置换则保守回退 Unknown，避免把错误位置当成已知请求。描述合并和摘要缓存 key 必须区分 exact/unknown list、open/closed object、参数 operation 和映射实参，不能因结构碰撞改变结果。`FunctionProposalSummaries` 覆盖具名/匿名函数、简单别名、不可变捕获、管道、分支、多层前向调用、互递归、条件/返回函数和闭合容器取出的函数；`FunctionProposalUnknownAndUnsafe` 保留开放容器、一般 carry、动态函数和未知形参的保守边界，并检查写入、不可并发读取及实参效果不会被返回摘要掩盖。`FunctionProposalClosedValuesAndRecursiveParameters` 额外验证 `[request][0]`、条件/返回函数和递归 effect 参数在 parallel 中保留已知只读请求。`FunctionProposalSchedulingAndGo` 用 provider 会合验证普通图及显式 parallel 的真实读取重叠和前后写入 barrier，对照解释器与实际生成的可执行文件。Go 后端携带检查后的效果/并发元数据，运行时不重新分析函数。
 
 `FunctionProposalRuntimeBoundaries` 检查构造函数封装后的授权拒绝仍为零 provider 调用，已完成 Write 的 schema fault 重放不重试，以及跨 cell 捕获的旧 snapshot 请求仍受原 run 的资源生命周期限制。生成 Go 的调度回归同时覆盖容器取函数、条件函数、返回函数和递归参数摘要，确保解释器与生成程序使用同一准入结论。
 
@@ -101,7 +101,7 @@ HTTP 只接受显式 Host 合约，不提供请求级通用 Native bridge。普�
 
 ## 正确性与 Host 集成边界
 
-REPL 保存 proposal 原有的规范 Ops 和静态已知函数的返回摘要。能够证明的固定字段/下标投影、条件函数和返回函数跨 cell 与别名继续保留摘要；无法证明的开放投影、动态调用和 carry 结果仍为 Unknown，不能凭保存值的实际函数或 operation 身份补强摘要。成功函数声明、别名和捕获保留摘要，失败 cell 不提交新摘要，删除或复用名字不改变旧闭包。`SessionPreservesProposalOps` 与 `SessionFunctionProposalSummaries` 检查上述边界和 provider 调用次数。
+REPL 保存 proposal 原有的规范 Ops 和静态已知函数的返回摘要。能够证明的固定字段/下标投影、条件函数、返回函数和 state-identity carry 跨 cell 与别名继续保留摘要；无法证明的开放投影、动态调用和一般 carry 结果仍为 Unknown，不能凭保存值的实际函数或 operation 身份补强摘要。成功函数声明、别名和捕获保留摘要，失败 cell 不提交新摘要，删除或复用名字不改变旧闭包。`SessionPreservesProposalOps` 与 `SessionFunctionProposalSummaries` 检查上述边界和 provider 调用次数。
 
 list/string 单值索引支持负安全整数，list 的索引列表保留顺序与重复项。方括号切片与 `slice(v,start,stop[,step])` 共用精确整数归一化、边界裁剪、null 默认值和负步长；这取代此前只接受非负且严格边界的 slice 规则。核心求值与原生 Data 投影共用 helper，Go 资源支持单值/列表索引和切片，Python 资源收到原生 slice。新 list 在分配前检查预算，循环检查取消与指令预算；选出的 function/effect 保持原值，已证明的闭合请求来源保留规范 Ops，开放或未追踪来源仍为 Unknown。
 

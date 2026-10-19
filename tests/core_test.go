@@ -510,19 +510,51 @@ flow Main()->number {
 		t.Fatalf("valid projection union: report=%+v err=%v", report, err)
 	}
 
-	// A map result has unknown length.  concat must not inherit the known
-	// prefix slots from its left operand: the unknown suffix may put a plain
-	// number at index zero, so the perform must remain behind an Unknown
-	// barrier.
+	// A known map result keeps its slots, and an unknown right suffix cannot
+	// invalidate a proven left prefix at index zero.
 	_, err = Compile(`import host "worker"
 flow Main()->void {
  for x in [1] parallel {
-  p=concat([effect worker.read()],map([1],fn(x:number)->number{x}))[0]
+	  p=concat([effect worker.read()],map(range(x),fn(x:number)->number{x}))[0]
+  perform p
+ }
+}`, host)
+	if err != nil {
+		t.Fatalf("known concat prefix was not admitted: err=%v", err)
+	}
+	// An unknown left side still hides index zero, even when the right side is
+	// statically finite.
+	_, err = Compile(`import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+	  p=concat(map(range(x),fn(x:number)->number{x}),[effect worker.read()])[0]
   perform p
  }
 }`, host)
 	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
-		t.Fatalf("unknown concat length was admitted: err=%v", err)
+		t.Fatalf("unknown concat prefix was admitted: err=%v", err)
+	}
+	for name, source := range map[string]string{
+		"map_slots": `import host "worker"
+flow Main()->void {for x in [1] parallel {perform map(range(1),fn(n:number)->effect{effect worker.read()})[0]}}`,
+		"keys_slots": `import host "worker"
+flow Main()->void {for x in [1] parallel {perform map(keys({a:1}),fn(k:string)->effect{effect worker.read()})[0]}}`,
+		"split_slots": `import host "worker"
+flow Main()->void {for x in [1] parallel {perform map(split("a,b",","),fn(k:string)->effect{effect worker.read()})[0]}}`,
+		"comprehension_slots": `import host "worker"
+flow Main()->void {for x in [1] parallel {perform [effect worker.read() for n in [1]][0]}}`,
+		"empty_fold_seed": `import host "worker"
+flow Main()->void {for x in [1] parallel {p=fold([],effect worker.read(),fn(a:effect,b:number)->effect{a});perform p}}`,
+		"bounded_fold_seed": `import host "worker"
+flow Main()->void {for x in [1] parallel {p=fold([1,2],effect worker.read(),fn(a:effect,b:number)->effect{a});perform p}}`,
+		"empty_carry_init": `import host "worker"
+flow Main()->void {for x in [1] parallel {p=for n in [] with q=effect worker.read() {next q};perform p}}`,
+		"empty_unknown_slice": `import host "worker"
+flow Main(xs:list)->void {for x in [1] parallel {p=concat([effect worker.read()],slice(xs,0,0))[0];perform p}}`,
+	} {
+		if _, err := Compile(source, host); err != nil {
+			t.Fatalf("%s lost static request precision: %v", name, err)
+		}
 	}
 	if _, err := Compile(`import host "worker"
 flow Main(index:any)->void {
@@ -608,6 +640,116 @@ flow Main()->void {
 		t.Fatal("partially incompatible map callback was admitted to parallel")
 	} else if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
 		t.Fatalf("partial map callback diagnostic: %v", err)
+	}
+
+	// Known map slots and identity comprehensions retain their individual
+	// request provenance.  The second slot is a Write, so aggregating the
+	// source element before mapping would incorrectly reject the first one.
+	writeHost := host
+	write := host.Contracts[0]
+	write.Operation.Member = "write"
+	write.Effect = WriteEffect
+	writeHost.Contracts = append(append([]Contract(nil), host.Contracts...), write)
+	identitySource := `import host "worker"
+fn identity(p:effect)->effect {p}
+flow Main()->void {
+ for x in [1] parallel {
+  p=map([effect worker.read(),effect worker.write()],identity)[0]
+  perform p
+ }
+}`
+	if _, err := Compile(identitySource, writeHost); err != nil {
+		t.Fatalf("map per-slot provenance was lost: %v", err)
+	}
+	if _, err := Compile(strings.Replace(identitySource, ")[0]", ")[1]", 1), writeHost); err == nil {
+		t.Fatal("map write slot was admitted to parallel")
+	}
+
+	// A known left prefix remains known when the right list has no tracked
+	// shape, and a positive slice wholly inside that prefix is exact.
+	prefixSource := `import host "worker"
+flow Main(xs:list)->void {
+ for x in [1] parallel {
+  p=slice(concat([effect worker.read()],xs),0,1)[0]
+  perform p
+ }
+}`
+	if _, err := Compile(prefixSource, host); err != nil {
+		t.Fatalf("prefix concat/slice lost provenance: %v", err)
+	}
+	if _, err := Compile(strings.Replace(prefixSource, "slice(concat([effect worker.read()],xs),0,1)", "slice(concat([effect worker.read()],xs),null,1)", 1), host); err != nil {
+		t.Fatalf("omitted positive slice start lost provenance: %v", err)
+	}
+	if _, err := Compile(strings.Replace(prefixSource, "slice(concat([effect worker.read()],xs),0,1)", "slice(concat([effect worker.read()],xs),0,null)", 1), host); err == nil {
+		t.Fatal("slice with unknown stop was admitted to parallel")
+	}
+
+	identityComprehension := `import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+  p=[q for q in [effect worker.read(),effect worker.write()]][0]
+  perform p
+ }
+}`
+	if _, err := Compile(identityComprehension, writeHost); err != nil {
+		t.Fatalf("identity comprehension lost slot provenance: %v", err)
+	}
+	if _, err := Compile(strings.Replace(identityComprehension, "][0]", "][1]", 1), writeHost); err == nil {
+		t.Fatal("identity comprehension write slot was admitted to parallel")
+	}
+
+	// An accumulator identity is independent of an unknown source length.
+	foldSource := `import host "worker"
+flow Main(xs:list)->void {
+ for x in [1] parallel {
+  p=fold(xs,effect worker.read(),fn(a:effect,b:any)->effect{a})
+  perform p
+ }
+}`
+	if _, err := Compile(foldSource, host); err != nil {
+		t.Fatalf("fold accumulator identity was not inferred: %v", err)
+	}
+	foldConcatSource := `import host "worker"
+flow Main(xs:list)->void {
+ for x in [1] parallel {
+  p=fold(xs,[effect worker.read()],fn(a:list,b:any)->list{concat(a,[])})[0]
+  perform p
+ }
+}`
+	if _, err := Compile(foldConcatSource, host); err != nil {
+		t.Fatalf("concat identity did not compose with fold identity: %v", err)
+	}
+
+	// The same state identity applies to a non-empty or unknown finite source;
+	// the no-source carry form remains conservative because it may not terminate.
+	carrySource := `import host "worker"
+flow Main(xs:list)->void {
+ for x in [1] parallel {
+  p=for n in xs with q=effect worker.read() {next q}
+  perform p
+ }
+}`
+	if _, err := Compile(carrySource, host); err != nil {
+		t.Fatalf("carry state identity was not inferred: %v", err)
+	}
+	carryBranchSource := `import host "worker"
+flow Main(xs:list)->void {
+ for x in [1] parallel {
+  p=for n in xs with q=effect worker.read() {if n==0 {next q} else {break q}}
+  perform p
+ }
+}`
+	if _, err := Compile(carryBranchSource, host); err != nil {
+		t.Fatalf("carry branch state identity was not inferred: %v", err)
+	}
+	if _, err := Compile(`import host "worker"
+flow Main()->void {
+ for x in [1] parallel {
+  p=for with q=effect worker.read() {next q}
+  perform p
+ }
+}`, host); err == nil {
+		t.Fatal("non-terminating carry identity was admitted to parallel")
 	}
 }
 

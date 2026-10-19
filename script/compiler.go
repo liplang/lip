@@ -379,6 +379,9 @@ type staticDesc struct {
 	rest    *staticDesc
 	closed  bool
 	slots   []*staticDesc
+	// tail means slots is a known prefix followed by an unknown number of
+	// elements.  A non-nil slots slice with tail=false is an exact list.
+	tail    bool
 	element *staticDesc
 	parts   []*staticDesc
 }
@@ -394,6 +397,11 @@ type operationSummary struct {
 	parameter bool
 	param     int
 	sources   []*operationSummary
+	// mapped is a provisional/recursive call edge.  Its target summary is
+	// interpreted with args substituted for the target's abstract parameters
+	// when the caller supplies concrete descriptions.
+	mapped *operationSummary
+	args   []*staticDesc
 }
 
 type function struct {

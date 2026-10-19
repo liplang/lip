@@ -93,7 +93,7 @@ func TestFunctionProposalUnknownAndUnsafe(t *testing.T) {
 		{"unknown_contract", `fn bad(x:number)->effect {effect worker.unknown(x)}`, "", "bad(x)"},
 		{"unselected_write", `fn bad(x:number)->effect {if true {effect worker.read(x)} else {effect worker.write(x)}}`, "", "bad(x)"},
 		{"function_parameter", `fn bad(f:function,x:number)->effect {f(x)}`, "", "bad(request,x)"},
-		{"carry_request", `fn bad(x:number)->effect {for i in [0] with p=effect worker.read(x) {next p}}`, "", "bad(x)"},
+		{"carry_request", `fn bad(x:number)->effect {for i in [0] with p=effect worker.read(x) {next effect worker.write(x)}}`, "", "bad(x)"},
 		{"empty_recursive_component", `fn bad(x:number)->effect {bad(x)}`, "", "bad(x)"},
 		{"recursive_unknown_parameter", `fn bad(n:number,p:effect)->effect {if n==0 {p} else {bad(n-1,p)}}`, "", "bad(2,effect worker.unknown(x))"},
 		{"recursive_parameter_swap", `fn bad(n:number,p:effect,q:effect)->effect {if n==0 {p} else {bad(n-1,q,p)}}`, "", "bad(2,effect worker.read(x),effect worker.write(x))"},
@@ -135,6 +135,7 @@ func TestFunctionProposalClosedValuesAndRecursiveParameters(t *testing.T) {
 		{"conditional_function", ``, `f=if true {request} else {request}`, "f(x)"},
 		{"returned_function", `fn maker()->function {request}`, `f=maker()`, "f(x)"},
 		{"recursive_parameter", `fn recursive(n:number,p:effect)->effect {if n==0 {p} else {recursive(n-1,p)}}`, ``, "recursive(3,effect worker.read(x))"},
+		{"recursive_parameter_swap", `fn recursive_swap(n:number,p:effect,q:effect)->effect {if n==0 {p} else {recursive_swap(n-1,q,p)}}`, ``, "recursive_swap(3,effect worker.read(x),effect worker.read(x))"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

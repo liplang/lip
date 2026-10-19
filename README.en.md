@@ -33,9 +33,13 @@ flow Research(question:string)->object {
 
     context = [row.value for row in evidence]
     draft = perform ask("Answer this question from the evidence: " + str(context))
+    return {question: question, context: context, draft: draft}
+}
+
+flow Review(input:object)->object {
     # state is this round's immutable snapshot. next takes the complete
     # snapshot for the following round; break returns the loop value.
-    answer = for with state = {text: draft, round: 0} {
+    answer = for with state = {text: input.draft, round: 0} {
         review = perform ask("Review this answer and say DONE or REVISE: " + state.text)
         next_state = if review == "DONE" {
             {text: state.text, round: state.round + 1}
@@ -46,11 +50,13 @@ flow Research(question:string)->object {
         if review == "DONE" || state.round >= 2 { break next_state }
         else { next next_state }
     }
-    return {question: question, answer: answer.text, evidence: context}
+    return {question: input.question, answer: answer.text, evidence: input.context}
 }
 
-flow Main(question:string)->object { return Research(question) }
+flow Main(question:string)->object { return question |> Research |> Review }
 ```
+
+The agent is split into two Flows: `Research` runs the parallel searches and creates a draft, while `Review` receives its complete result and runs the carried review loop. `Main` connects them with `question |> Research |> Review`; the pipeline waits for each stage to complete before starting the next one.
 
 `for with state = initial` is a carried-value expression. The first round sees `initial`,
 `next e` makes the value of `e` the next round's `state`, and `break e` returns the value of `e`.
@@ -59,7 +65,7 @@ Each `state` binding is immutable, so this is an explicit `stateₙ → stateₙ
 value expression directly, rather than assigning to `state`. Without a source, it keeps
 transitioning until a branch breaks.
 
-The three searches can overlap. Reading `evidence` waits for all selected producers and returns a complete, position-ordered snapshot. Each review round reads the previous immutable state. The model, search service, and database remain Host capabilities; LIP describes their order, concurrency, evidence, and stopping condition.
+The three searches can overlap. Reading `evidence` waits for all selected producers and returns a complete, position-ordered snapshot. Each `Review` round reads the previous immutable state. The model, search service, and database remain Host capabilities; LIP describes their order, concurrency, evidence, and stopping condition.
 
 ## Why the features form one system
 

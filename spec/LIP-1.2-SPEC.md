@@ -879,7 +879,7 @@ RHS）都不得包含结构化子 Flow 调用；纯 Flow 的 Summary 不授予
 
 parallel 的接受条件必须检查子 Flow 内全部传递的、位于 fn body 外的 perform 的规范 Ops，而不是只看返回
 类型或 Flow 名。仅 Pure/join/已证明 Concurrent ReadOnly 的子图可以进入 parallel；
-Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使用第 5.1–5.3 节的规范描述；无依据的动态来源与 carry 结果仍为 Unknown。
+Write、Unknown 或不可并发 ReadOnly 均静态 E-PARALLEL。结构摘要使用第 5.1–5.3 节的规范描述；无依据的动态来源与未被第 5.2 节有限规则覆盖的 carry 结果仍为 Unknown。
 
 下列规则中 op 是已解析 operation，args 是实参表达式集合，p 是 proposal 表达式。
 `args : Data ! Pure` 表示每个实参均纯求值且结果属于 Data。横线以上为前提，以下为
@@ -933,15 +933,17 @@ Recorded perform。这不把活动 store 误当成随时固定的变量。
 ```text
 D ::= Unknown(reason) | Plain(type) | Param(i, type) | Request(operations)
     | Callable(origin, captures) | Object(fields, rest)
-    | List(slots, element) | Union(D, ...)
+    | List(slots, tail, element) | Union(D, ...)
 ```
 
 origin 标识定义时冻结源码快照中的语言 fn 或核心函数声明/表达式，不是地址或未限定
 名称。不同模块/cell 中局部 site 或名字相同的声明仍是不同 origin。captures 只含捕获值
 的抽象描述；递归捕获以绑定到同一词法快照的声明引用表示，不递归展开捕获函数，也不
 按后来复用的名称查找。Object 的 fields 按已知 string 键索引，rest 为未知键处的描述或 Closed；
-Closed 表示正常结果中不存在其他键。List 的 slots 为已知长度的按位置描述，或 Absent；
-element 为任一元素的保守联合，空列表在元素被使用处按 Unknown 处理。
+Closed 表示正常结果中不存在其他键。List 的 slots 为已知按位置描述；`tail=false`
+表示长度精确，`tail=true` 表示这些 slots 是已知前缀、后面仍有未知长度的尾部，
+`slots=Absent` 表示没有可证明的位置。element 为任一元素的保守联合，空列表在元素
+被使用处按 Unknown 处理。
 描述没有运行时对象所有权，也不得保留运行环境、业务值或整个源码树。
 静态字段名和字面量下标属于源码选择信息，不构成对运行时值的采样。
 
@@ -973,8 +975,8 @@ Unknown element 和 Absent slots；无外形的 object 使用 Unknown rest。固
 
 ### 5.2. 描述的传播与调用
 
-以下表定义全部可增强请求与可调用信息的路径。未列出的核心操作和 carry/fold 结果
-只保留可证明的普通类型，其他信息为 Unknown。不得以私有优化放行本表仍为 Unknown
+以下表定义全部可增强请求与可调用信息的路径。未列出的核心操作以及本表有限规则之外的
+carry/fold 结果只保留可证明的普通类型，其他信息为 Unknown。不得以私有优化放行本表仍为 Unknown
 的 perform，也不得执行函数、加载原生模块或检查运行时闭包来构造描述。
 
 | 表达式或边界 | 规范传播 |
@@ -985,14 +987,17 @@ Unknown element 和 Absent slots；无外形的 object 使用 Unknown rest。固
 | object/list 构造 | 为包含请求、可调用值或已追踪结构的位置保留描述；纯位置可共享 Plain 描述 |
 | 固定字段或字面量整数下标 | 各候选分别选择；字段不在 fields 中时使用 rest，Closed 时除外；负下标按该候选自身已知长度归一，slots 为 Absent 时取 element；缺失位置为 NoResult |
 | 动态下标或字段键 | 闭合对象取全部字段、列表取 element 的联合；开放对象还联合 rest；没有正常候选则 Unknown |
-| 索引列表与切片 | 各候选 slots 已知时，按源码安全整数字面量列表或切片字面量界限依第 3 节选择；否则返回 List(Absent,原 element)；字面量空 gather 即使 slots 未知也为空，不执行 selector 来推断 |
+| 索引列表与切片 | 各候选 slots 已知时，按源码安全整数字面量列表或切片字面量界限依第 3 节选择；否则返回 `List(Absent,false,原 element)`；字面量空 gather 即使 slots 未知也为空，不执行 selector 来推断 |
 | if/match、value-block | 联合全部尾值候选；局部绑定按顺序传递；静态分析不求值 guard，运行时仍按第 6 节求值 |
-| 推导式 | source 的 element 作为迭代值描述，body 描述作为结果 element；不展开运行时轮次或按 guard 过滤候选 |
+| 推导式 | source 的 element 作为迭代值描述，body 描述作为结果 element；无 guard 时复制 source 的 exact slots 或已知前缀；若 body 直接返回迭代变量，则逐位置保留对应 slot；有 guard 时长度退化为 Absent；不按 guard 过滤候选 |
 | 顺序/并行普通 for | 迭代作用域绑定 source 的 element 描述，不按轮次专门化或按 guard 过滤；局部绑定不外泄；carry 状态/结果仍保守 |
-| `concat`、`slice` | concat 联合 element，双方 slots 已知则按序连接；slice 同切片；不改变实参求值 |
+| `concat`、`slice` | concat 联合 element；空 exact list 为恒等元，即使另一侧只有 Plain/Param 的 list 形状也保留该侧描述；已知左侧 slots 与未知右侧拼接时保留左前缀，双方 exact 时按序连接；Prefix 的 slice 在所有实际选择位置都落入已知前缀、stop 为安全非负字面量、start 可省略或为安全非负字面量且步长为正时保留 exact slots，否则按未知形状处理；不改变实参求值 |
 | `put` | 已知键覆盖对应字段；动态键将写入值联合进每个已知字段及 rest，Closed 的 rest 改为该值，原对象不变 |
 | 普通 fn 调用、静态子 Flow 返回值、管道阶段 | 使用下面规定的实参描述传递；执行效果仍单独计算 |
-| `map` | 使用下面的回调规则，以 source 的 element 为一个抽象实参，返回 List(Absent,回调结果描述)；静态空 source 返回空 List，不传递回调 body |
+| `map` | 使用下面的回调规则；对每个已知 source slot 分别以该 slot 作为抽象实参应用回调，未知尾部以 source element 应用并保留为 tail；静态空 source 返回空 List，不传递回调 body |
+| `fold` | 空 exact source 返回 seed 的描述；若全部 callback candidate 的正常返回直接是 accumulator 参数 0，则任何已知为 list 的 source 都返回 seed；其他有限 exact source 在本版 64 轮预算内按回调返回描述逐轮抽象执行，预算外或未知尾部为 Unknown |
+| 有 source 且所有正常出口保持原状态的 `carry`，以及空 exact source 的有限 `carry` | 返回 init 的描述；carry body 仍完整检查。前者只识别每个 `next`/`break` 出口直接返回同一个状态 binding，不建立一般跨轮状态摘要；source-free carry 不适用该规则 |
+| `range`、`keys`、字面量 `split` | 安全整数字面量的 `range`、闭合 object 的 `keys`、以及两个 string literal 的 `split` 在本版 4096 个静态 slot 预算内产生 exact slots；超出预算或输入形状未知时保留 element、slots=Absent |
 | `perform`、入口输入、无描述的参数或外部结果 | 不从运行时结果推导请求或可调用来源；普通类型/原生返回来源仍由实际合约和第 10 节处理 |
 
 表中的容器传播针对 list/object；string 的索引与切片保留 Plain(string)，原生 receiver
@@ -1001,9 +1006,10 @@ Unknown element 和 Absent slots；无外形的 object 使用 Unknown rest。固
 界限，不包括求值一般算术或 fn。标量字面量经普通参数/binding 转发后，后续引用不因此
 成为字面量 selector。字面量选择得到空索引列表/切片时返回空 List，不是请求；闭合空
 容器没有动态投影候选。任一 gather 下标无效时，该候选的整个投影为 NoResult，不返回
-部分选择列表。静态空 source 仅指已知长度为零的 slots，不执行 range、guard 或算术
-来证明为空；推导式此时也返回空 List，不传递 body。索引、切片、字段访问的实际错误仍遵守第 3 节；
-静态描述只覆盖正常返回路径，不能删去 selector、实参、错误、诊断或真实调用。
+部分选择列表。静态空 source 仅指 `tail=false` 且 slots 长度为零，不执行 range、guard 或算术
+来证明为空；推导式、map 和空 fold/carry 此时分别返回空 List、空 List、seed/init 的描述，
+不传递回调或 carry body 的动态执行。索引、切片、字段访问的实际错误仍遵守第 3 节；
+静态描述只覆盖正常返回路径，不能删去 selector、实参、错误、诊断或真实调用。Prefix slice 的精确规则不得根据未知总长度、负边界或省略 stop 推断未追踪位置；不满足条件时仍返回 Unknown 形状。
 
 容器操作先逐候选应用，再联合结果。固定键 put 只替换该字段；后续固定覆盖可恢复
 该字段精度，但不清除其他字段/rest 的来源。动态键还保留新增字段的可能性。核心函数
@@ -1047,8 +1053,11 @@ map/fold 的外层实参和 callback 检查按本节调用阶段执行，空列�
 回调是带 `@` 的函数，空输入也不调用其中的原生 provider。若外层 source/seed 检查与
 callback callable/arity 同时失败，按外层声明参数顺序和 callable→arity 的阶段顺序选择
 主错误，并保留其余原因。
-map 返回增强要求全部候选按上述规则接受该一个抽象实参；fold 即使 source 静态为空
-也不推导跨轮状态。返回注解本身不创造请求或可调用来源。
+map 返回增强要求每个已知 slot 上的全部候选都接受该 slot 的抽象实参；未知尾部才使用
+联合 element。有限 fold 的每一步都要求全部候选接受当前 accumulator/item 描述；只要有一步无法证明，整个 fold 退化为 Unknown。Accumulator identity 只在全部候选返回
+参数 0 时成立，不因返回注解或 guard 过滤候选。空 fold 不调用回调，也不需要回调返回描述。
+carry identity 仍须在完整检查 body、出口纯性、名称和类型后确认；它只保留返回值描述，
+不删除 body 的实际效果、错误、预算或控制流。返回注解本身不创造请求或可调用来源。
 
 静态 Flow 调用使用同样的实参到返回位置传递，记为 `RetInfo(F,A)`；Flow 调用图无环。
 这不把 Flow 变成值，也不在调用方按实参重写子图的执行效果：`Summary(F)` 仍在声明
@@ -1063,7 +1072,8 @@ map 返回增强要求全部候选按上述规则接受该一个抽象实参；f
 绑定/括号/简单别名/不可变捕获保留信息，if/match 联合全部候选，value-block 分析尾值。
 函数返回值引用参数时保留 `Param(i,type)`；返回的请求摘要可保留 `ParamOps(i)`，由调用点
 按实际抽象实参替换。只通过具名声明、直接匿名 fn 及其简单别名解析的调用连接 callee 方程；
-未解析的动态 callee、开放容器、carry 与核心结果仍为 Unknown。只计算返回的请求；未返回的
+未解析的动态 callee、开放容器、一般 carry 与核心结果仍为 Unknown；仅 §5.2 的状态恒等
+carry 规则可以保留 init 描述。只计算返回的请求；未返回的
 构造不进入方程。
 对有限 operation 集合、参数摘要和 Unknown 取最小固定点，内部空集为 bottom，Unknown 为 top。
 `R={worker.read}∪R` 得到 `{worker.read}`；`R=ParamOps(0)∪R` 在调用点传入 `worker.read`
@@ -1080,10 +1090,12 @@ Flow 返回传递沿无环调用图分析；进入 fn 时仍遵守同一 Active 
 运行时递归次数，也不把递归本身当作 Flow 图循环。
 联合各候选时使用独立的 Active 分支，不能用先到候选影响后到候选。
 
-若尚未完成的递归/前向摘要边需要把 effect 参数映射到不同的参数位置，而当前有限摘要图没有
-可验证的映射边，实现必须保守回退 Unknown；不得把目标函数的参数位置直接当作调用者位置来
-取得并行资格。已知摘要完成后，普通调用仍按实际参数描述重新绑定；同位置的递归转发（如下面
-`retry`）可以保留 `ParamOps`。
+递归/前向摘要边记录有限的参数位置映射。调用 `f(..., q, p)` 产生一条带映射的摘要边，
+固定点求解时先把目标的 `ParamOps(i)` 替换为该边的第 i 个抽象实参，再继续遍历有限图；
+映射可循环但不得按运行时递归次数展开。映射边缺少参数、目标不是已解析声明或抽象实参
+本身为 Unknown 时才回退 Unknown；不得把目标函数的参数位置直接当作调用者位置。已知摘要
+完成后，普通调用仍按实际参数描述重新绑定，同位置与交换位置的递归转发均可保留
+`ParamOps`。
 
 先在调用方上下文计算抽象实参，再加入 callee origin，因此 `identity(identity(p))`
 不把前后两个已经结束的传递误判为递归重入。构造闭包不进入 body；传递已知回调才
@@ -1224,6 +1236,10 @@ next/break 的 e 必须 Pure，可引用已完成 perform 值；未选出口不�
 停止迭代，不进入下一轮。普通 for 的 break 仍无值，continue 只用于普通 for；carry
 用 next s 表示保持状态继续，二者不混用。s 的源类型为 any，转移值仍是普通 V，实际
 操作及 fn/Flow 结果按类型规则检查；没有共享可变变量。
+
+静态描述可以在完整检查 body 后识别有限的状态恒等模式：source 存在且每个正常的
+`next`/`break` 出口都直接返回同一个状态 binding 时，正常返回值的描述为 init。该规则
+不改变循环执行、出口求值、效果、错误或预算；无 source 的 carry 不适用，因为它可能不终止。
 
 携带值可同时包含 list 与 object。逐轮追加列表使用 `concat(s.items,[item])`，
 增加或覆盖对象字段使用 `put(s.index,key,item)`，再通过 next 传递组合后的新状态。
@@ -2654,7 +2670,7 @@ reason 使用下列稳定含义；文案和分层排版可变化：
 | dynamic_target | 无法取得完整的有限可调用目标或兼容签名 |
 | open_shape | 容器的 rest/元素中仍有未知来源 |
 | recursive_boundary | 第 5.3 节重复 fn origin 的回退无法证明所需信息 |
-| carry_boundary | carry/fold 的跨轮结果不提供该静态信息 |
+| carry_boundary | carry 的跨轮结果，或未满足有限 exact fold 规则的 fold 结果，不提供该静态信息 |
 | unsupported_transfer | 未列入第 5.2 节传播表的操作不提供该信息 |
 | type_mismatch | 已知类型或候选不能提供所要求的值类别 |
 | arity_mismatch | 已知签名不满足实参结构 |
@@ -3371,7 +3387,7 @@ ReadOnly，commit 为 Write；未显式登记的通用 bridge 保留 Unknown。�
 | 普通图循环 for p in [r,r]，与 for p in [r,w] | 迭代变量保留 source element 候选；前者允许 parallel，后者拒绝，不按轮次或常量 guard 删除候选 |
 | map/推导式的 source 为已知空列表，回调有静态已知错误 arity | map 仍静态拒绝 arity；回调/body/guard 无 perform 或诊断；合法空结果不提供请求元素 |
 | 空 map/fold source 上回调的签名真实未知 | 外层实参求值后检查实际 callable/arity；body 调用数和 fn activation 增量均为零 |
-| 空 source 的 fold/carry 返回读取 seed | 实际结果可为 r，静态请求返回信息仍为 Unknown(carry_boundary)，不以私有空循环专门化增强 |
+| 空 source 的 fold/carry 返回读取 seed，或 state-identity carry 返回原 state | 实际结果为 seed/init，静态描述保留 r；fold 不调用回调，carry body 仍静态检查；state-identity 只保留返回描述，不建立一般跨轮摘要 |
 | 可调用候选均匹配名称/arity，只有部分接受已知实参类型 | Unknown(dynamic_target)；不拒绝可能成功的调用，也不删除不兼容候选取得并行资格 |
 | number/string 参数的函数候选，与独立取得的 number/string 实参联合 | 保守分析组合，不把分支配对成全部失败或仅有读取；实际类型检查仍动态执行 |
 | 全部可调用候选无效，一部分 arity 错、一部分类型错 | 选择更早验证阶段的静态 E-ARITY，保留全部失败原因，不求值实参、不调用 provider |

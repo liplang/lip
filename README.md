@@ -41,10 +41,14 @@ flow Research(question:string)->object {
     context = [row.value for row in evidence]
     draft = perform ask("Answer this question from the evidence: " + str(context))
 
+    return {question: question, context: context, draft: draft}
+}
+
+flow Review(input:object)->object {
     # state 是本轮的不可变快照。next 后面写“下一轮的完整状态”，
     # break 后面写循环的返回值；它们是控制出口，不是给 state 做赋值。
     # 携带值循环就是 agent 的 plan → act → observe → decide。
-    answer = for with state = {text: draft, round: 0} {
+    answer = for with state = {text: input.draft, round: 0} {
         review = perform ask("Review this answer and say DONE or REVISE: " + state.text)
         next_state = if review == "DONE" {
             {text: state.text, round: state.round + 1}
@@ -56,11 +60,13 @@ flow Research(question:string)->object {
         else { next next_state }
     }
 
-    return {question: question, answer: answer.text, evidence: context}
+    return {question: input.question, answer: answer.text, evidence: input.context}
 }
 
-flow Main(question:string)->object { return Research(question) }
+flow Main(question:string)->object { return question |> Research |> Review }
 ```
+
+这里把 agent 拆成两个 Flow：`Research` 并行检索并生成初稿，`Review` 接收前者的完整结果，执行携带值复核。`Main` 用 `question |> Research |> Review` 把两个阶段连接起来；管道会等前一阶段完整成功后，才把结果交给下一阶段。
 
 这里的 `for with state = initial` 是一个携带值表达式：第一轮看到 `initial`，`next e`
 把表达式 `e` 作为下一轮的 `state`，`break e` 则立即返回 `e`。每一轮的 `state`
@@ -68,7 +74,7 @@ flow Main(question:string)->object { return Research(question) }
 `break` 是“结束并产出结果”，两者后面都直接接一个值表达式。无 source 的写法会一直转移，
 直到某个分支 `break`。
 
-运行时，三个检索动作可以重叠；读取 `evidence` 时会等待所有已选 producer，按结构位置得到完整快照；模型复核每轮读取上轮不可变状态。模型、搜索和数据库仍是 Host 的能力，LIP 只表达它们之间的顺序、并发、证据和结束条件。把 `agent.search` 改成数据库查询或 Python 检索器，程序结构不变。
+运行时，三个检索动作可以重叠；读取 `evidence` 时会等待所有已选 producer，按结构位置得到完整快照；`Review` 的模型复核每轮读取上轮不可变状态。模型、搜索和数据库仍是 Host 的能力，LIP 只表达它们之间的顺序、并发、证据和结束条件。把 `agent.search` 改成数据库查询或 Python 检索器，程序结构不变。
 
 ## 为什么这些特性刚好构成一个系统
 

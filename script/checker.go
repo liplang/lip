@@ -69,6 +69,91 @@ func callableDesc(fn *expression, ret *staticDesc) *staticDesc {
 func listDesc(slots []*staticDesc, element *staticDesc) *staticDesc {
 	return &staticDesc{kind: descList, typ: "list", slots: slots, element: element}
 }
+func listPrefixDesc(slots []*staticDesc, element *staticDesc) *staticDesc {
+	return &staticDesc{kind: descList, typ: "list", slots: slots, tail: true, element: element}
+}
+func exactList(d *staticDesc) bool {
+	return d != nil && d.kind == descList && d.slots != nil && !d.tail
+}
+
+// listShape joins only candidates that all expose a finite prefix.  Different
+// exact lengths become a common prefix with an unknown tail; any untracked
+// candidate makes the shape unavailable.
+func listShape(d *staticDesc) (slots []*staticDesc, tail bool, ok bool) {
+	if d == nil {
+		return nil, false, false
+	}
+	if d.kind == descList {
+		if d.slots == nil {
+			return nil, false, false
+		}
+		return append([]*staticDesc(nil), d.slots...), d.tail, true
+	}
+	if d.kind != descUnion || len(d.parts) == 0 {
+		return nil, false, false
+	}
+	first := true
+	for _, part := range d.parts {
+		partSlots, partTail, partOK := listShape(part)
+		if !partOK {
+			return nil, false, false
+		}
+		if first {
+			slots, tail, first = partSlots, partTail, false
+			continue
+		}
+		oldLen := len(slots)
+		if len(partSlots) < oldLen {
+			slots = slots[:len(partSlots)]
+		}
+		for i := range slots {
+			slots[i] = unionDesc(slots[i], partSlots[i])
+		}
+		tail = tail || partTail || len(partSlots) != oldLen
+	}
+	return slots, tail, true
+}
+
+const maxStaticRangeSlots = 4096
+
+func rangeDesc(args []argument) *staticDesc {
+	numbers := make([]int64, len(args))
+	for i, arg := range args {
+		n, ok := staticIndex(arg.expr)
+		if !ok {
+			return listDesc(nil, plainDesc("number"))
+		}
+		numbers[i] = n
+	}
+	start, end, step := int64(0), int64(0), int64(1)
+	switch len(numbers) {
+	case 1:
+		end = numbers[0]
+	case 2:
+		start, end = numbers[0], numbers[1]
+	case 3:
+		start, end, step = numbers[0], numbers[1], numbers[2]
+	default:
+		return nil
+	}
+	if step == 0 {
+		return listDesc(nil, plainDesc("number"))
+	}
+	count := int64(0)
+	if step > 0 && start < end {
+		count = (end-start-1)/step + 1
+	} else if step < 0 && start > end {
+		count = (start-end-1)/(-step) + 1
+	}
+	if count > maxStaticRangeSlots {
+		return listDesc(nil, plainDesc("number"))
+	}
+	slots := make([]*staticDesc, count)
+	for i := range slots {
+		slots[i] = plainDesc("number")
+	}
+	return listDesc(slots, plainDesc("number"))
+}
 func objectDesc(fields map[string]*staticDesc, rest *staticDesc, closed bool) *staticDesc {
 	return &staticDesc{kind: descObject, typ: "object", fields: fields, rest: rest, closed: closed}
 }
@@ -112,19 +197,48 @@ func descParts(d *staticDesc) []*staticDesc {
 func sameDesc(a, b *staticDesc) bool {
 	type pair struct{ a, b *staticDesc }
 	seen := map[pair]bool{}
+	var eq func(*staticDesc, *staticDesc) bool
 	var eqSummary func(*operationSummary, *operationSummary) bool
+	summarySeen := map[struct{ a, b *operationSummary }]bool{}
 	eqSummary = func(x, y *operationSummary) bool {
 		if x == nil || y == nil {
 			return x == y
 		}
-		if x.parameter || y.parameter {
-			return x.parameter == y.parameter && x.param == y.param && len(x.sources) == len(y.sources)
+		p := struct{ a, b *operationSummary }{x, y}
+		if summarySeen[p] {
+			return true
 		}
-		xops, xknown := resolvedOperations(x)
-		yops, yknown := resolvedOperations(y)
-		return xknown == yknown && sort.StringsAreSorted(xops) && sort.StringsAreSorted(yops) && strings.Join(xops, "\x00") == strings.Join(yops, "\x00")
+		summarySeen[p] = true
+		if x.operation != y.operation || x.parameter != y.parameter || x.param != y.param || (x.mapped == nil) != (y.mapped == nil) || len(x.sources) != len(y.sources) || len(x.args) != len(y.args) {
+			return false
+		}
+		if !eqSummary(x.mapped, y.mapped) {
+			return false
+		}
+		for i := range x.args {
+			if !eq(x.args[i], y.args[i]) {
+				return false
+			}
+		}
+		// Sources form a union, so their construction order is not part of the
+		// description.  Match them as an unordered finite multiset while the
+		// pair memo above handles recursive cells.
+		used := make([]bool, len(y.sources))
+		for _, xs := range x.sources {
+			matched := false
+			for j, ys := range y.sources {
+				if !used[j] && eqSummary(xs, ys) {
+					used[j] = true
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+		return true
 	}
-	var eq func(*staticDesc, *staticDesc) bool
 	eq = func(x, y *staticDesc) bool {
 		if x == nil || y == nil {
 			return x == y
@@ -143,7 +257,7 @@ func sameDesc(a, b *staticDesc) bool {
 		if !eqSummary(x.ops, y.ops) || !eq(x.ret, y.ret) || !eq(x.rest, y.rest) || !eq(x.element, y.element) {
 			return false
 		}
-		if (x.slots == nil) != (y.slots == nil) || (x.parts == nil) != (y.parts == nil) || len(x.slots) != len(y.slots) || len(x.parts) != len(y.parts) || len(x.fields) != len(y.fields) {
+		if (x.slots == nil) != (y.slots == nil) || x.tail != y.tail || (x.parts == nil) != (y.parts == nil) || len(x.slots) != len(y.slots) || len(x.parts) != len(y.parts) || len(x.fields) != len(y.fields) {
 			return false
 		}
 		for i := range x.slots {
@@ -177,8 +291,44 @@ func descOrderKey(d *staticDesc) string {
 		return "n"
 	}
 	var b strings.Builder
-	var write func(*staticDesc, map[*staticDesc]bool)
-	write = func(x *staticDesc, active map[*staticDesc]bool) {
+	var write func(*staticDesc, map[*staticDesc]bool, map[*operationSummary]bool)
+	var writeSummary func(*operationSummary, map[*staticDesc]bool, map[*operationSummary]bool)
+	writeSummary = func(s *operationSummary, active map[*staticDesc]bool, summaries map[*operationSummary]bool) {
+		if s == nil {
+			b.WriteString("?")
+			return
+		}
+		if summaries[s] {
+			b.WriteString("sr")
+			return
+		}
+		summaries[s] = true
+		b.WriteString("s[")
+		if s.parameter {
+			b.WriteString("param:")
+			b.WriteString(strconv.Itoa(s.param))
+		} else if s.operation != "" {
+			b.WriteString("op:")
+			b.WriteString(s.operation)
+		} else {
+			b.WriteString("cell")
+		}
+		if s.mapped != nil {
+			b.WriteString("|mapped:")
+			writeSummary(s.mapped, active, summaries)
+		}
+		b.WriteString("|args:")
+		for _, arg := range s.args {
+			write(arg, active, summaries)
+		}
+		b.WriteString("|sources:")
+		for _, source := range s.sources {
+			writeSummary(source, active, summaries)
+		}
+		b.WriteByte(']')
+		delete(summaries, s)
+	}
+	write = func(x *staticDesc, active map[*staticDesc]bool, summaries map[*operationSummary]bool) {
 		if x == nil {
 			b.WriteString("?")
 			return
@@ -191,6 +341,22 @@ func descOrderKey(d *staticDesc) string {
 		b.WriteByte(byte('a' + x.kind))
 		b.WriteString("[")
 		b.WriteString(x.typ)
+		if x.kind == descList {
+			if x.slots == nil {
+				b.WriteString("|slots:unknown")
+			} else if x.tail {
+				b.WriteString("|slots:prefix")
+			} else {
+				b.WriteString("|slots:exact")
+			}
+		}
+		if x.kind == descObject {
+			if x.closed {
+				b.WriteString("|closed")
+			} else {
+				b.WriteString("|open")
+			}
+		}
 		b.WriteByte('|')
 		if x.fn != nil {
 			b.WriteString("fn:")
@@ -208,23 +374,19 @@ func descOrderKey(d *staticDesc) string {
 			b.WriteString(strconv.Itoa(x.param))
 		}
 		if x.kind == descRequest {
-			if ops, known := resolvedOperations(x.ops); known {
-				b.WriteString(strings.Join(ops, ","))
-			} else {
-				b.WriteString("?")
-			}
+			writeSummary(x.ops, active, summaries)
 		}
-		write(x.ret, active)
-		write(x.rest, active)
-		write(x.element, active)
+		write(x.ret, active, summaries)
+		write(x.rest, active, summaries)
+		write(x.element, active, summaries)
 		for _, slot := range x.slots {
-			write(slot, active)
+			write(slot, active, summaries)
 		}
 		// Union parts are canonicalized when the union is built.  Re-sorting
 		// here would restart the recursive key builder and could loop on a
 		// recursive callable.
 		for _, part := range x.parts {
-			write(part, active)
+			write(part, active, summaries)
 		}
 		keys := make([]string, 0, len(x.fields))
 		for k := range x.fields {
@@ -233,12 +395,12 @@ func descOrderKey(d *staticDesc) string {
 		sort.Strings(keys)
 		for _, k := range keys {
 			b.WriteString(k)
-			write(x.fields[k], active)
+			write(x.fields[k], active, summaries)
 		}
 		b.WriteByte(']')
 		delete(active, x)
 	}
-	write(d, map[*staticDesc]bool{})
+	write(d, map[*staticDesc]bool{}, map[*operationSummary]bool{})
 	return b.String()
 }
 
@@ -351,37 +513,6 @@ func callableParts(d *staticDesc) ([]*staticDesc, bool) {
 	return out, len(out) != 0
 }
 
-// provisionalParameterSwap marks a call whose callee summary is still an
-// empty forward/recursive cell and whose effect parameter is forwarded through
-// a different positional parameter.  The compact summary graph deliberately
-// keeps same-position recursion precise; without an argument-mapping edge, a
-// swapped recursive call could otherwise read only the first parameter and
-// hide a Write/Unknown request.  Falling back to Unknown is conservative until
-// a richer finite mapping is available.
-func provisionalParameterSwap(active map[*expression]bool, fn *expression, args []*staticDesc) bool {
-	if fn == nil {
-		return false
-	}
-	cell := fn.info.returns
-	provisional := cell == nil || (!cell.parameter && cell.operation == "" && len(cell.sources) == 0)
-	if !active[fn] && !provisional {
-		return false
-	}
-	for i, p := range fn.params {
-		if normalizeType(p.typ) != "effect" {
-			continue
-		}
-		if i >= len(args) {
-			return true
-		}
-		d := args[i]
-		if d != nil && d.kind == descParam && d.param != i {
-			return true
-		}
-	}
-	return false
-}
-
 func instantiateDesc(d *staticDesc, args []*staticDesc, active map[*expression]bool) *staticDesc {
 	if d == nil {
 		return nil
@@ -399,11 +530,14 @@ func instantiateDesc(d *staticDesc, args []*staticDesc, active map[*expression]b
 		return nil
 	case descRequest:
 		// A provisional forward/recursive call points at an empty summary
-		// cell.  Keep that cell by identity so a later function check can
-		// publish its fixed point; copying an empty cell here would freeze the
-		// call as an artificial Unknown.
-		if d.ops != nil && !d.ops.parameter && d.ops.operation == "" && len(d.ops.sources) == 0 {
-			return d
+		// cell.  Keep a finite mapped edge so a later function check can publish
+		// its fixed point and recursive parameter permutations can be resolved at
+		// the outer call site.  Copying an empty cell without its arguments would
+		// freeze the call as an artificial Unknown.
+		if d.ops != nil && d.ops.mapped == nil && !d.ops.parameter && d.ops.operation == "" && len(d.ops.sources) == 0 {
+			copy := *d
+			copy.ops = &operationSummary{mapped: d.ops, args: append([]*staticDesc(nil), args...)}
+			return &copy
 		}
 		copy := *d
 		copy.ops = instantiateOperations(d.ops, args)
@@ -487,6 +621,31 @@ func staticSliceValue(e *expression) (Value, bool) {
 		return v, err == nil
 	}
 	return Value{}, false
+}
+
+// A slice with equal literal start/stop bounds is empty for every source
+// length, after the runtime's clamping rules.  This is the only source-shape
+// fact we can recover without knowing the list length; reverse slices with
+// equal bounds are empty as well, while a literal zero step is an error.
+func staticEmptySlice(bounds []argument) bool {
+	if len(bounds) < 2 || len(bounds) > 3 {
+		return false
+	}
+	start, okStart := staticSliceValue(bounds[0].expr)
+	stop, okStop := staticSliceValue(bounds[1].expr)
+	if !okStart || !okStop || start.k != Number || stop.k != Number || start.n != stop.n {
+		return false
+	}
+	if len(bounds) == 3 && bounds[2].expr != nil {
+		step, ok := staticSliceValue(bounds[2].expr)
+		if !ok {
+			return false
+		}
+		if step.k == Number && step.n == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func projectIndex(d *staticDesc, index *expression, gather bool) *staticDesc {
@@ -576,13 +735,20 @@ func projectIndex(d *staticDesc, index *expression, gather bool) *staticDesc {
 		}
 		for i, raw := range index.elems {
 			n, ok := staticIndex(raw)
-			if !ok || d.slots == nil {
+			if !ok {
+				return listDesc(nil, d.element)
+			}
+			if d.tail && n < 0 {
 				return listDesc(nil, d.element)
 			}
 			if n < 0 {
 				n += int64(len(d.slots))
 			}
 			if n < 0 || n >= int64(len(d.slots)) {
+				if d.tail && n >= int64(len(d.slots)) {
+					out[i] = d.element
+					continue
+				}
 				return noResultDesc()
 			}
 			out[i] = d.slots[n]
@@ -593,6 +759,9 @@ func projectIndex(d *staticDesc, index *expression, gather bool) *staticDesc {
 	if !ok {
 		return descElement(d)
 	}
+	if d.tail && n < 0 {
+		return descElement(d)
+	}
 	if d.slots == nil {
 		return descElement(d)
 	}
@@ -600,6 +769,9 @@ func projectIndex(d *staticDesc, index *expression, gather bool) *staticDesc {
 		n += int64(len(d.slots))
 	}
 	if n < 0 || n >= int64(len(d.slots)) {
+		if d.tail && n >= int64(len(d.slots)) {
+			return d.element
+		}
 		return noResultDesc()
 	}
 	return d.slots[n]
@@ -647,6 +819,11 @@ func descElement(d *staticDesc) *staticDesc {
 		if d.element != nil {
 			return d.element
 		}
+		if d.tail {
+			// A known prefix with no element summary has an unknown tail; the
+			// prefix slots alone must not make dynamic element access look known.
+			return nil
+		}
 		return unionDesc(d.slots...)
 	}
 	if d.kind == descUnion {
@@ -660,6 +837,17 @@ func descElement(d *staticDesc) *staticDesc {
 		return nil
 	}
 	return noResultDesc()
+}
+
+func unionListSlots(slots []*staticDesc) *staticDesc {
+	if len(slots) == 0 {
+		return nil
+	}
+	out := slots[0]
+	for _, slot := range slots[1:] {
+		out = unionDesc(out, slot)
+	}
+	return out
 }
 
 func listProjectionDesc(d *staticDesc, bounds []argument) *staticDesc {
@@ -684,6 +872,9 @@ func listProjectionDesc(d *staticDesc, bounds []argument) *staticDesc {
 		}
 		return noResultDesc()
 	}
+	if staticEmptySlice(bounds) {
+		return listDesc([]*staticDesc{}, nil)
+	}
 	if d.slots == nil {
 		return listDesc(nil, descElement(d))
 	}
@@ -694,6 +885,29 @@ func listProjectionDesc(d *staticDesc, bounds []argument) *staticDesc {
 			return listDesc(nil, descElement(d))
 		}
 		values[i] = value
+	}
+	if d.tail {
+		// A prefix can be sliced precisely when stop is a non-negative literal,
+		// start is either omitted (the length-independent default zero) or a
+		// non-negative literal, the step is positive, and stop stays within the
+		// known prefix.  Negative bounds and an omitted stop depend on the
+		// unknown total length and therefore remain conservative.
+		if len(values) != 3 || values[1].k != Number || values[1].n < 0 || values[1].n > float64(len(d.slots)) || values[0].k != Null && (values[0].k != Number || values[0].n < 0 || values[0].n > float64(len(d.slots))) || values[2].k == Number && values[2].n <= 0 {
+			return listDesc(nil, descElement(d))
+		}
+		start, step, count, err := slicePlan(len(d.slots), values)
+		if err != nil {
+			return noResultDesc()
+		}
+		slots := make([]*staticDesc, 0, count)
+		for i := int64(0); i < count; i++ {
+			pos := start + i*step
+			if pos < 0 || pos >= int64(len(d.slots)) {
+				return listDesc(nil, descElement(d))
+			}
+			slots = append(slots, d.slots[pos])
+		}
+		return listDesc(slots, unionListSlots(slots))
 	}
 	start, step, count, err := slicePlan(len(d.slots), values)
 	if err != nil {
@@ -707,15 +921,7 @@ func listProjectionDesc(d *staticDesc, bounds []argument) *staticDesc {
 		}
 		slots = append(slots, d.slots[pos])
 	}
-	var element *staticDesc
-	for _, slot := range slots {
-		if element == nil {
-			element = slot
-		} else {
-			element = unionDesc(element, slot)
-		}
-	}
-	return listDesc(slots, element)
+	return listDesc(slots, unionListSlots(slots))
 }
 
 func unionOperations(a, b *operationSummary) *operationSummary {
@@ -734,29 +940,49 @@ func instantiateOperations(root *operationSummary, args []*staticDesc) *operatio
 	if root == nil {
 		return nil
 	}
-	memo := map[*operationSummary]*operationSummary{}
-	var visit func(*operationSummary) *operationSummary
-	visit = func(s *operationSummary) *operationSummary {
+	type key struct {
+		sig string
+		n   *operationSummary
+	}
+	memo := map[key]*operationSummary{}
+	argKey := func(xs []*staticDesc) string {
+		var b strings.Builder
+		for _, x := range xs {
+			b.WriteString(descOrderKey(x))
+			b.WriteByte(0)
+		}
+		return b.String()
+	}
+	var visit func(*operationSummary, []*staticDesc) *operationSummary
+	visit = func(s *operationSummary, actual []*staticDesc) *operationSummary {
 		if s == nil {
 			return nil
 		}
 		if s.parameter {
-			if s.param < 0 || s.param >= len(args) {
+			if s.param < 0 || s.param >= len(actual) {
 				return nil
 			}
-			op, ok := descOps(args[s.param])
+			op, ok := descOps(actual[s.param])
 			if !ok {
 				return nil
 			}
 			return op
 		}
-		if cached, ok := memo[s]; ok {
+		if s.mapped != nil {
+			mappedArgs := make([]*staticDesc, len(s.args))
+			for i, x := range s.args {
+				mappedArgs[i] = instantiateDesc(x, actual, nil)
+			}
+			return visit(s.mapped, mappedArgs)
+		}
+		k := key{n: s, sig: argKey(actual)}
+		if cached, ok := memo[k]; ok {
 			return cached
 		}
 		copy := &operationSummary{operation: s.operation}
-		memo[s] = copy
+		memo[k] = copy
 		for _, source := range s.sources {
-			instantiated := visit(source)
+			instantiated := visit(source, actual)
 			if instantiated == nil {
 				return nil
 			}
@@ -764,7 +990,7 @@ func instantiateOperations(root *operationSummary, args []*staticDesc) *operatio
 		}
 		return copy
 	}
-	return visit(root)
+	return visit(root, args)
 }
 
 // Reachability computes the least union fixed point, including recursive
@@ -1300,6 +1526,41 @@ func (c *checker) carryExit(s *statement, env *scope, pure, parallel bool, loops
 	}
 	return a
 }
+
+func carryBlockPreservesState(b *block, state *staticDesc) bool {
+	return b != nil && b.exit != nil && carryExitPreservesState(b.exit, state)
+}
+
+func carryExitPreservesState(s *statement, state *staticDesc) bool {
+	if s == nil || state == nil {
+		return false
+	}
+	switch s.tag {
+	case "next", "break":
+		return s.expr != nil && s.expr.tag == "id" && s.expr.info.desc == state
+	case "if":
+		if !carryBlockPreservesState(s.body, state) {
+			return false
+		}
+		if s.other != nil && !carryExitPreservesState(s.other, state) {
+			return false
+		}
+		return s.otherwise != nil && carryBlockPreservesState(s.otherwise, state)
+	case "match":
+		if len(s.arms) == 0 {
+			return false
+		}
+		for _, arm := range s.arms {
+			if !carryBlockPreservesState(arm.body, state) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *checker) resolve(e *expression) (Contract, bool) {
 	if e.name == "claim.snapshot" {
 		return Contract{Operation: Operation{"lip", "claim", "snapshot"}, Version: "0.9", Params: []Parameter{{Name: "store", Schema: Schema{Type: "string"}}}, Result: Schema{Type: "list"}, Effect: ReadOnlyEffect, Concurrent: true}, true
@@ -1403,18 +1664,12 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		a.desc = plainDesc(a.typ)
 	case "list":
 		slots := make([]*staticDesc, 0, len(e.elems))
-		var element *staticDesc
 		for _, x := range e.elems {
 			sub(x)
 			slots = append(slots, x.info.desc)
-			if element == nil {
-				element = x.info.desc
-			} else {
-				element = unionDesc(element, x.info.desc)
-			}
 		}
 		a.typ = "list"
-		a.desc = listDesc(slots, element)
+		a.desc = listDesc(slots, unionListSlots(slots))
 	case "object":
 		names := map[string]bool{}
 		fields := map[string]*staticDesc{}
@@ -1667,15 +1922,10 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		if candidates, ok := callableParts(candidateDesc); ok {
 			var returns []*staticDesc
 			failed := make([]int, 0, len(candidates))
-			uncertain := false
 			for _, candidate := range candidates {
 				if candidate.fn != nil {
 					if phase := candidatePhase(candidate.fn, e.args); phase >= 0 {
 						failed = append(failed, phase)
-						continue
-					}
-					if provisionalParameterSwap(c.active, candidate.fn, argDescs) {
-						uncertain = true
 						continue
 					}
 					ret := candidate.ret
@@ -1689,7 +1939,7 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 					returns = append(returns, instantiateDesc(ret, argDescs, nil))
 				}
 			}
-			if !uncertain && len(failed) == 0 && len(returns) == len(candidates) && len(returns) > 0 {
+			if len(failed) == 0 && len(returns) == len(candidates) && len(returns) > 0 {
 				a.desc = unionDesc(returns...)
 				if typ := descType(a.desc); typ != "any" {
 					declared := ""
@@ -1703,11 +1953,6 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 				if ops, ok := descOps(a.desc); ok {
 					a.ops = ops
 				}
-			} else if uncertain {
-				// A provisional recursive/forward cell with a positional effect
-				// swap has no finite argument-mapping edge in this summary graph.
-				// Keep the call dynamically valid, but do not let it establish Ops.
-				a.desc, a.ops = nil, nil
 			} else if len(failed) == len(candidates) && len(failed) > 0 {
 				phase := failed[0]
 				for _, p := range failed[1:] {
@@ -1787,27 +2032,60 @@ func (c *checker) expression(e *expression, env *scope, pure, parallel bool) ana
 		if e.x != nil {
 			bodyDesc = e.x.info.desc
 		}
-		a.desc = listDesc(nil, bodyDesc)
+		shapeSlots, shapeTail, shapeOK := listShape(source.desc)
+		if shapeOK && (e.z == nil || len(shapeSlots) == 0 && !shapeTail) {
+			slots := make([]*staticDesc, len(shapeSlots))
+			if e.z == nil && e.x != nil && e.x.tag == "id" && e.x.name == e.name {
+				// Direct identity comprehensions preserve the source's individual
+				// slot descriptions.  Comparing only bodyDesc with source.element
+				// would be unsound for a constant body whose union happens to match
+				// the source element union.
+				copy(slots, shapeSlots)
+			} else {
+				for i := range slots {
+					slots[i] = bodyDesc
+				}
+			}
+			if shapeTail {
+				a.desc = listPrefixDesc(slots, bodyDesc)
+			} else {
+				a.desc = listDesc(slots, bodyDesc)
+			}
+		} else {
+			a.desc = listDesc(nil, bodyDesc)
+		}
 	case "carry":
+		var source analysis
 		if e.x != nil {
-			source := sub(e.x)
+			source = sub(e.x)
 			c.require(e.tok, source, "list")
 		}
-		sub(e.y)
+		init := sub(e.y)
+		a = mergeEffect(a, init)
 		local := env.child()
 		if e.name != "" {
 			c.declare(local, e.name, bindingInfo{info: pureInfo("any")}, e.tok)
 		}
-		c.declare(local, e.state, bindingInfo{info: pureInfo("any")}, e.tok)
+		stateInfo := pureInfo("any")
+		stateDesc := stateInfo.desc
+		c.declare(local, e.state, bindingInfo{info: stateInfo}, e.tok)
 		c.local++
 		a = mergeEffect(a, c.localBlock(e.body, local, pure, parallel, 0))
 		c.local--
 		a.typ = "any"
 		a.ops = nil
-		// carry state crosses an unbounded number of iterations; retaining a
-		// private request source here would be unsound.  The runtime result is
-		// still checked normally.
-		a.desc = nil
+		// A statically empty finite source never enters the body.  A body whose
+		// every normal exit returns the original state has the same result for
+		// every finite source.  Both cases still checked the complete body above;
+		// this only preserves the returned value descriptor.
+		identity := e.x != nil && carryBlockPreservesState(e.body, stateDesc)
+		empty := e.x != nil && exactList(source.desc) && len(source.desc.slots) == 0
+		if empty || identity {
+			a.typ = init.typ
+			a.desc = init.desc
+		} else {
+			a.desc = nil
+		}
 	}
 	if parallel && a.effect != PureEffect && (a.effect != ReadOnlyEffect || !a.concurrent) {
 		c.error(e.tok, "E-PARALLEL", "perform is not provably Concurrent ReadOnly")
@@ -2016,17 +2294,45 @@ func concatDesc(left, right *staticDesc) *staticDesc {
 		}
 		return out
 	}
+	// Empty exact lists are identities even when the other operand has no
+	// tracked shape.  Apply this before requiring both operands to be concrete
+	// list descriptors; otherwise concat([], plain(list)) needlessly loses the
+	// descriptor of its right operand (and vice versa).
+	if exactList(left) && len(left.slots) == 0 {
+		return right
+	}
+	if exactList(right) && len(right.slots) == 0 {
+		return left
+	}
+	leftUnknownList := (left.kind == descPlain || left.kind == descParam) && left.typ == "list"
+	rightUnknownList := (right.kind == descPlain || right.kind == descParam) && right.typ == "list"
+	if left.kind == descList && rightUnknownList {
+		// A known left prefix remains at the same positions after appending an
+		// unknown finite list.  Only the tail element becomes unknown.
+		if left.slots != nil {
+			return listPrefixDesc(append([]*staticDesc(nil), left.slots...), unionDesc(left.element, nil))
+		}
+		return listDesc(nil, nil)
+	}
 	if left.kind != descList || right.kind != descList {
-		if (left.kind == descPlain || left.kind == descParam) && (left.typ == "any" || left.typ == "list") || (right.kind == descPlain || right.kind == descParam) && (right.typ == "any" || right.typ == "list") {
+		if leftUnknownList || rightUnknownList {
 			return listDesc(nil, nil)
 		}
 		return noResultDesc()
 	}
-	var slots []*staticDesc
-	if left.slots != nil && right.slots != nil {
-		slots = append(append([]*staticDesc(nil), left.slots...), right.slots...)
+	element := unionDesc(left.element, right.element)
+	if left.slots != nil {
+		slots := append([]*staticDesc(nil), left.slots...)
+		if right.slots != nil && !left.tail {
+			slots = append(slots, right.slots...)
+			if right.tail {
+				return listPrefixDesc(slots, element)
+			}
+			return listDesc(slots, element)
+		}
+		return listPrefixDesc(slots, element)
 	}
-	return listDesc(slots, unionDesc(left.element, right.element))
+	return listDesc(nil, element)
 }
 
 func mapDesc(source, callback *staticDesc) *staticDesc {
@@ -2052,13 +2358,10 @@ func mapDesc(source, callback *staticDesc) *staticDesc {
 		}
 		return noResultDesc()
 	}
-	if source.slots != nil && len(source.slots) == 0 {
+	if exactList(source) && len(source.slots) == 0 {
 		return listDesc([]*staticDesc{}, nil)
 	}
 	item := descElement(source)
-	if item == nil || item.kind == descNoResult {
-		return nil
-	}
 	candidates, ok := callableParts(callback)
 	if !ok {
 		return nil
@@ -2066,24 +2369,195 @@ func mapDesc(source, callback *staticDesc) *staticDesc {
 	// A map callback is invoked with one abstract source element.  Preserve a
 	// result description only when every finite callback candidate accepts that
 	// activation; a partial mismatch is a dynamic target and must not be used
-	// to admit a request hidden in one candidate.
-	abstract := argument{expr: &expression{info: analysis{typ: descType(item), desc: item}}}
-	var ret *staticDesc
+	// to admit a request hidden in one candidate.  The item may itself be
+	// unknown: a callback that does not return it can still have a known result.
+	mapOne := func(item *staticDesc) *staticDesc {
+		abstract := argument{expr: &expression{info: analysis{typ: descType(item), desc: item}}}
+		var ret *staticDesc
+		for _, candidate := range candidates {
+			if candidate.fn == nil || candidatePhase(candidate.fn, []argument{abstract}) >= 0 || candidate.ret == nil {
+				return nil
+			}
+			one := instantiateDesc(candidate.ret, []*staticDesc{item}, nil)
+			if one == nil {
+				return nil
+			}
+			if ret == nil {
+				ret = one
+			} else {
+				ret = unionDesc(ret, one)
+			}
+		}
+		return ret
+	}
+	if source.slots != nil {
+		slots := make([]*staticDesc, len(source.slots))
+		for i := range slots {
+			slots[i] = mapOne(source.slots[i])
+		}
+		if source.tail {
+			return listPrefixDesc(slots, mapOne(source.element))
+		}
+		return listDesc(slots, unionDesc(slots...))
+	}
+	return listDesc(nil, mapOne(item))
+}
+
+func descIsParameter(d *staticDesc, index int) bool {
+	if d == nil {
+		return false
+	}
+	if d.kind == descParam {
+		return d.param == index
+	}
+	if d.kind == descUnion {
+		if len(d.parts) == 0 {
+			return false
+		}
+		for _, part := range d.parts {
+			if !descIsParameter(part, index) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func accumulatorIdentity(source, seed, callback *staticDesc) bool {
+	candidates, ok := callableParts(callback)
+	if !ok {
+		return false
+	}
 	for _, candidate := range candidates {
-		if candidate.fn == nil || candidatePhase(candidate.fn, []argument{abstract}) >= 0 {
-			return nil
-		}
-		if candidate.ret == nil {
-			return nil
-		}
-		one := instantiateDesc(candidate.ret, []*staticDesc{item}, nil)
-		if ret == nil {
-			ret = one
-		} else {
-			ret = unionDesc(ret, one)
+		if candidate.fn == nil || !descIsParameter(candidate.ret, 0) {
+			return false
 		}
 	}
-	return listDesc(nil, ret)
+	var checkSource func(*staticDesc) bool
+	checkSource = func(source *staticDesc) bool {
+		if source == nil {
+			return true
+		}
+		if source.kind == descUnion {
+			for _, part := range source.parts {
+				if !checkSource(part) {
+					return false
+				}
+			}
+			return true
+		}
+		if source.kind != descList {
+			if (source.kind == descPlain || source.kind == descParam) && (source.typ == "any" || source.typ == "list") {
+				return true
+			}
+			return false
+		}
+		checkItem := func(item *staticDesc) bool {
+			args := []argument{
+				{expr: &expression{info: analysis{typ: descType(seed), desc: seed}}},
+				{expr: &expression{info: analysis{typ: descType(item), desc: item}}},
+			}
+			for _, candidate := range candidates {
+				if candidatePhase(candidate.fn, args) >= 0 {
+					return false
+				}
+			}
+			return true
+		}
+		for _, item := range source.slots {
+			if !checkItem(item) {
+				return false
+			}
+		}
+		if source.tail && !checkItem(source.element) {
+			return false
+		}
+		return true
+	}
+	return checkSource(source)
+}
+
+// foldDesc performs a bounded abstract execution when the source has an exact
+// finite shape.  The empty case is unconditional: fold([], seed, f) returns
+// seed after the ordinary outer/callback checks have still run.  For a finite
+// non-empty source, every callable candidate must accept every activation and
+// provide a finite return description; otherwise the fold remains Unknown.
+func foldDesc(source, seed, callback *staticDesc) *staticDesc {
+	if seed == nil {
+		return nil
+	}
+	// Returning the accumulator is independent of the source length.  This is
+	// safe even for an open list, while the ordinary callback checks still run
+	// in the caller before this descriptor is used.
+	if accumulatorIdentity(source, seed, callback) {
+		return seed
+	}
+	if source == nil {
+		return nil
+	}
+	if source.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, part := range source.parts {
+			v := foldDesc(part, seed, callback)
+			if v == nil {
+				return nil
+			}
+			if !seen {
+				out, seen = v, true
+			} else {
+				out = unionDesc(out, v)
+			}
+		}
+		return out
+	}
+	if source.kind != descList {
+		if (source.kind == descPlain || source.kind == descParam) && (source.typ == "any" || source.typ == "list") {
+			return nil
+		}
+		return noResultDesc()
+	}
+	if source.slots == nil || source.tail {
+		return nil
+	}
+	if len(source.slots) == 0 {
+		return seed
+	}
+	if len(source.slots) > 64 {
+		return nil
+	}
+	candidates, ok := callableParts(callback)
+	if !ok {
+		return nil
+	}
+	var out *staticDesc
+	seen := false
+	for _, candidate := range candidates {
+		if candidate.fn == nil || candidate.ret == nil {
+			return nil
+		}
+		acc := seed
+		for _, item := range source.slots {
+			args := []argument{
+				{expr: &expression{info: analysis{typ: descType(acc), desc: acc}}},
+				{expr: &expression{info: analysis{typ: descType(item), desc: item}}},
+			}
+			if candidatePhase(candidate.fn, args) >= 0 {
+				return nil
+			}
+			acc = instantiateDesc(candidate.ret, []*staticDesc{acc, item}, nil)
+			if acc == nil {
+				return nil
+			}
+		}
+		if !seen {
+			out, seen = acc, true
+		} else {
+			out = unionDesc(out, acc)
+		}
+	}
+	return out
 }
 
 func putDesc(base *staticDesc, key *expression, value *staticDesc) *staticDesc {
@@ -2130,6 +2604,47 @@ func putDesc(base *staticDesc, key *expression, value *staticDesc) *staticDesc {
 	return objectDesc(fields, rest, false)
 }
 
+func keysDesc(d *staticDesc) *staticDesc {
+	if d == nil {
+		return listDesc(nil, plainDesc("string"))
+	}
+	if d.kind == descUnion {
+		var out *staticDesc
+		seen := false
+		for _, part := range d.parts {
+			v := keysDesc(part)
+			if !seen {
+				out, seen = v, true
+			} else {
+				out = unionDesc(out, v)
+			}
+		}
+		return out
+	}
+	if d.kind != descObject {
+		if (d.kind == descPlain || d.kind == descParam) && (d.typ == "any" || d.typ == "object") {
+			return listDesc(nil, plainDesc("string"))
+		}
+		return noResultDesc()
+	}
+	if !d.closed || d.rest != nil {
+		return listDesc(nil, plainDesc("string"))
+	}
+	keys := make([]string, 0, len(d.fields))
+	for key := range d.fields {
+		keys = append(keys, key)
+	}
+	if len(keys) > maxStaticRangeSlots {
+		return listDesc(nil, plainDesc("string"))
+	}
+	sort.Strings(keys)
+	slots := make([]*staticDesc, len(keys))
+	for i := range slots {
+		slots[i] = plainDesc("string")
+	}
+	return listDesc(slots, plainDesc("string"))
+}
+
 func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 	switch name {
 	case "map":
@@ -2146,6 +2661,20 @@ func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 			}
 		}
 		return mapDesc(e.args[0].expr.info.desc, callback)
+	case "fold":
+		if len(e.args) != 3 {
+			return nil
+		}
+		callback := e.args[2].expr.info.desc
+		if e.args[2].expr.tag == "id" && env != nil {
+			if binding, ok := env.find(e.args[2].expr.name); ok && binding.fn != nil {
+				callback = binding.fn.info.desc
+				if callback == nil {
+					callback = callableDesc(binding.fn, nil)
+				}
+			}
+		}
+		return foldDesc(e.args[0].expr.info.desc, e.args[1].expr.info.desc, callback)
 	case "concat":
 		if len(e.args) != 2 {
 			return nil
@@ -2168,8 +2697,24 @@ func builtinDesc(name string, e *expression, env *scope) *staticDesc {
 		}
 		return putDesc(e.args[0].expr.info.desc, e.args[1].expr, e.args[2].expr.info.desc)
 	case "range":
-		return listDesc(nil, plainDesc("number"))
-	case "keys", "split":
+		return rangeDesc(e.args)
+	case "keys":
+		if len(e.args) == 1 {
+			return keysDesc(e.args[0].expr.info.desc)
+		}
+		return listDesc(nil, plainDesc("string"))
+	case "split":
+		if len(e.args) == 2 && e.args[0].expr.tag == "lit" && e.args[0].expr.value.k == String && e.args[1].expr.tag == "lit" && e.args[1].expr.value.k == String {
+			parts := strings.Split(e.args[0].expr.value.s, e.args[1].expr.value.s)
+			if len(parts) > maxStaticRangeSlots {
+				return listDesc(nil, plainDesc("string"))
+			}
+			slots := make([]*staticDesc, len(parts))
+			for i := range slots {
+				slots[i] = plainDesc("string")
+			}
+			return listDesc(slots, plainDesc("string"))
+		}
 		return listDesc(nil, plainDesc("string"))
 	case "len", "parse_number":
 		return plainDesc("number")

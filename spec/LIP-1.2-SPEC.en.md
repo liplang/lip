@@ -505,7 +505,7 @@ separately require Data under §2.3; pre-run rejections are not node failures.
 
 Summary(F) conservatively combines execution effects/Concurrent flags across every branch/loop/node: performs outside fn bodies use Ops, language fn bodies count as Pure under §10.3, and child calls use callee Summary. fn arguments still contribute their caller-context effects. The acyclic call graph permits callee-first computation; constant guards do not remove candidates. No performs means Pure; Unknown remains Unknown. Child execution contributes to its caller effect; reading an already completed ordinary result is Pure. Pure summaries never remove complete-read producer dependencies or permit child calls in Pure-only positions (fn, guards, proposal/join RHS).
 
-Parallel acceptance checks every transitive child perform outside fn bodies under normative Ops, not return types or Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries consume normative descriptions under §§5.1–5.3. Unsupported dynamic origins and carry results remain Unknown.
+Parallel acceptance checks every transitive child perform outside fn bodies under normative Ops, not return types or Flow names. Only Pure/join/proven Concurrent ReadOnly graphs are accepted. Write/Unknown/nonconcurrent ReadOnly is static E-PARALLEL. Summaries consume normative descriptions under §§5.1–5.3. Unsupported dynamic origins and carry results outside the finite §5.2 rules remain Unknown.
 
 In the rules below, op is a resolved operation, args are argument expressions, and p a proposal. ε ∨ ε′ denotes the supremum of two effects. `args : Data ! Pure` means every argument is pure and Data. Ops(p) is a nonempty finite operation set or Unknown; EffectOf takes the greatest registered effect, and ResultType conservatively merges schemas, yielding Unknown/any respectively for unknown Ops. These are analysis notation, not source functions or Claim join. CallEffect(Ops(p)) is Pure only when the nearest lexical fn body is @{...}, under the §10.3 explicit promise, and equals EffectOf(Ops(p)) elsewhere. Ordinary fn bodies still reject perform with static E-PURITY.
 
@@ -536,10 +536,10 @@ The constructors below are analysis notation, introducing neither source syntax 
 ```text
 D ::= Unknown(reason) | Plain(type) | Param(i, type) | Request(operations)
     | Callable(origin, captures) | Object(fields, rest)
-    | List(slots, element) | Union(D, ...)
+    | List(slots, tail, element) | Union(D, ...)
 ```
 
-origin identifies a language fn/core function's declaration/expression in its defining frozen source snapshot, never an address or an unqualified name. Distinct module/cell declarations remain distinct even when their local sites or names coincide. captures contain abstract descriptions only. Recursive captures use declaration references bound to that same lexical snapshot, without recursively expanding captured functions or looking up a later reused name. Object fields are indexed by known string keys; rest describes other keys or is Closed, meaning no other keys in normal results. List slots are ordered descriptions of a known length or Absent; element conservatively unions all elements. An empty list's element is Unknown at use. Descriptions own no runtime objects and MUST NOT retain runtime environments, business values, or entire source trees. Static field names/literal indices are source selectors, not samples of runtime values.
+origin identifies a language fn/core function's declaration/expression in its defining frozen source snapshot, never an address or an unqualified name. Distinct module/cell declarations remain distinct even when their local sites or names coincide. captures contain abstract descriptions only. Recursive captures use declaration references bound to that same lexical snapshot, without recursively expanding captured functions or looking up a later reused name. Object fields are indexed by known string keys; rest describes other keys or is Closed, meaning no other keys in normal results. List slots are ordered descriptions of known positions; `tail=false` means exact length, `tail=true` means a known prefix followed by an unknown-length tail, and `slots=Absent` means no proven position. The element conservatively unions all elements. An empty list's element is Unknown at use. Descriptions own no runtime objects and MUST NOT retain runtime environments, business values, or entire source trees. Static field names/literal indices are source selectors, not samples of runtime values.
 
 Union retains every candidate without constant-guard pruning. Request sets union; an unknown or non-request candidate makes that position's Ops Unknown. A finite callable target set likewise requires every candidate to be known. Project each candidate container before unioning results; never impose the first candidate's structure/signature on others. Plain/Unknown descriptions may be shared; plain Data collections MUST NOT require per-element provenance records merely because they are large.
 
@@ -559,7 +559,7 @@ NoResult requires known structural absence. Unknown, any, or Plain(object/list) 
 
 ### 5.2. Description propagation and calls
 
-The following table defines every path that can strengthen request/callable information. Unlisted core operations and carry/fold results retain only provable ordinary types; other information is Unknown. Private optimization MUST NOT admit a perform that these rules leave Unknown. Constructing descriptions MUST NOT execute functions, load native modules, or inspect runtime closures.
+The following table defines every path that can strengthen request/callable information. Unlisted core operations and carry/fold results outside the finite rules listed here retain only provable ordinary types; other information is Unknown. Private optimization MUST NOT admit a perform that these rules leave Unknown. Constructing descriptions MUST NOT execute functions, load native modules, or inspect runtime closures.
 
 | Expression or boundary | Normative propagation |
 |---|---|
@@ -569,17 +569,20 @@ The following table defines every path that can strengthen request/callable info
 | Object/list construction | Retain positions containing requests, callable values, or tracked structures; pure positions may share Plain descriptions |
 | Fixed field or literal integer index | Select separately in each candidate; an absent object field uses rest unless Closed; normalize negative indices using that candidate's own known length, or use element when slots are Absent; missing positions give NoResult |
 | Dynamic index or field key | Union every closed-object field or the list element; open objects include rest; no normal candidates means Unknown |
-| Gather and slice | For each candidate with known slots, select using a source list of literal safe-integer gather indices or literal slice bounds under §3; otherwise return List(Absent,original element); a literal empty gather is empty even without known slots; do not evaluate selectors to infer values |
+| Gather and slice | For each candidate with known slots, select using a source list of literal safe-integer gather indices or literal slice bounds under §3; otherwise return `List(Absent,false,original element)`; a literal empty gather is empty even without known slots; do not evaluate selectors to infer values |
 | if/match and value blocks | Union all terminal candidates; propagate local bindings sequentially; static analysis does not evaluate guards, while runtime still does |
-| Comprehensions | Bind the source element description and use the body description as result element; never expand runtime iterations or filter candidates by guards |
+| Comprehensions | Bind the source element description and use the body description as result element; without a guard copy exact slots or a known prefix, and when the body directly returns the iteration variable retain the corresponding source slot at each position; a guard makes length Absent; never filter candidates by guards |
 | Sequential/parallel ordinary for | Bind the source element description in the iteration scope, without per-iteration specialization or guard filtering; local bindings do not escape; carry state/results remain conservative |
-| `concat`, `slice` | concat unions elements and concatenates slots if both are known; slice follows slicing; argument evaluation is unchanged |
+| `concat`, `slice` | concat unions elements; an exact empty list is an identity even when the other operand only has a Plain/Param list shape; a known left prefix survives an unknown right suffix, and two exact lists concatenate slots; a Prefix slice retains exact slots when every selected position lies in the known prefix, stop is a safe non-negative literal, start is omitted or a safe non-negative literal, and the step is positive, and otherwise remains unknown-shaped; argument evaluation is unchanged |
 | `put` | A known key replaces its field; a dynamic key unions the written description into every known field and rest, replacing Closed rest with that description; the original stays immutable |
 | Ordinary fn calls, static child results, pipeline stages | Apply the abstract-argument transfer below; execution effects remain separate |
-| `map` | Apply the callback rule below to one abstract source element; return List(Absent,callback result description); a statically empty source instead yields an empty List without transferring through the callback body |
+| `map` | Apply the callback rule separately to each known source slot using that slot as the abstract argument; apply it to the source element only for an unknown tail, retaining that tail; a statically empty source yields an empty List without transferring through the callback body |
+| `fold` | An exact empty source returns the seed description; when every callback candidate directly returns accumulator parameter 0, any source known to be a list returns the seed; otherwise a finite exact source is abstractly executed through the callback within this version's 64-step budget, while an unknown tail or budget overflow is Unknown |
+| a finite `carry` with a source whose normal exits all preserve its state, or an exact empty source | Return the init description; still check the carry body completely. The former recognizes only `next`/`break` exits that directly return the same state binding and does not create a general cross-iteration summary; source-free carry does not qualify |
+| `range`, `keys`, and literal `split` | Safe-integer-literal `range`, closed-object `keys`, and two string literals passed to `split` produce exact slots within this version's 4096-slot static budget; unknown shapes or budget overflow retain element with `slots=Absent` |
 | `perform`, entry input, undescribed parameters, external results | Never infer request/callable origins from runtime results; ordinary types/native return provenance still follow actual contracts and §10 |
 
-Container transfer rules apply to list/object; string indexing/slicing retains Plain(string), and native receivers still follow §10. Fixed keys are field selections or source string literals, never evaluated general expressions. Literal bounds mean source safe-integer number literals, unary-signed forms, and null/omitted slice bounds, not evaluation of arithmetic or fns. Forwarding a scalar literal through an ordinary parameter/binding does not make its later use a literal selector. A literal empty gather/slice produces an empty List, not a request. Any invalid gather index makes that candidate's whole projection NoResult, never a partial selected list. A closed empty container supplies no dynamic projection candidates. A statically empty source means known slots of length zero, not executing range, guards, or arithmetic to prove emptiness; comprehensions then also produce an empty List without transferring their body. Actual index/slice/field errors still follow §3. Descriptions cover normal returns only and MUST NOT erase selectors, arguments, errors, diagnostics, or actual calls.
+Container transfer rules apply to list/object; string indexing/slicing retains Plain(string), and native receivers still follow §10. Fixed keys are field selections or source string literals, never evaluated general expressions. Literal bounds mean source safe-integer number literals, unary-signed forms, and null/omitted slice bounds, not evaluation of arithmetic or fns. Forwarding a scalar literal through an ordinary parameter/binding does not make its later use a literal selector. A literal empty gather/slice produces an empty List, not a request. Any invalid gather index makes that candidate's whole projection NoResult, never a partial selected list. A closed empty container supplies no dynamic projection candidates. A statically empty source means `tail=false` with zero slots, not executing range, guards, or arithmetic to prove emptiness; comprehensions and map produce an empty List, while empty fold/carry preserve seed/init descriptions without dynamic callback/body execution. Prefix slicing never infers positions from an unknown total length, negative bounds, or an omitted stop; those cases retain an unknown shape. Actual index/slice/field errors still follow §3. Descriptions cover normal returns only and MUST NOT erase selectors, arguments, errors, diagnostics, or actual calls.
 
 Apply the table per container candidate before joining results. Fixed-key put replaces that field only; later fixed overwrite may recover its precision without cleaning unrelated fields/rest. A dynamic key also retains the possibility of adding a new field. Calling a known core function through an alias, projection, callback, or pipeline uses that core origin's table rule and actual signature; it does not enter a language fn body. Unsupported core operations remain conservative through every spelling.
 
@@ -595,6 +598,15 @@ Independently obtained callee/argument alternatives conservatively cover their C
 
 If every candidate has a provable call-boundary failure, reject statically even when failures differ. A known noncallable contributes a callable-stage failure; an unknown alternative prevents proving that all fail. Select the diagnostic from the earliest failed validation stage among those candidates: callable, then argument structure, then parameter types. Within one stage use defining SourceID UTF-8 order, numeric defining site, and declaration parameter order, with absent origins ordered as in §15.1; preserve all candidate failures as causes. This selects a static diagnostic only; it neither executes arguments nor changes actual runtime failure order. General source validation still visits arguments and branches rather than treating a bad signature as permission to omit static checks.
 
+Map/fold outer arguments and callback checks use the same call phases even for empty lists. Every
+known map slot must be accepted by every callback candidate; only an unknown tail uses the joined
+element description. Every finite fold step must be accepted by every callback candidate; one
+unprovable step makes the whole fold Unknown. Accumulator identity requires every candidate to
+return parameter 0 and never filters candidates by a guard. An empty fold needs no callback return
+description, and return annotations never create request or callable origins. Carry identity still
+requires complete body, exit-purity, name, and type checking; it preserves only the return
+description and never erases body effects, errors, budgets, or control flow.
+
 At map/fold entry, use the outer phases above and validate the actual callback callable/arity even
 for an empty list. Validate callback parameter types for actual invocations before each body;
 statically known signature/type errors still follow §3.1. Empty inputs invoke no callback body,
@@ -609,16 +621,17 @@ Static Flows transfer abstract arguments to return positions in the same way, as
 
 ### 5.3. Recursive convergence, sessions, and portable acceptance
 
-Build `BaseOps(f)` union equations and parameter-source relations for every language fn. Direct requests yield singletons; bindings/parentheses/simple aliases/immutable captures preserve information; if/match unions all candidates; value blocks analyze their tail. A returned parameter retains `Param(i,type)`, and a returned request may retain `ParamOps(i)` until a call site supplies an abstract argument description. Only calls resolved through named declarations, direct anonymous fn, and simple aliases link callee equations. Unresolved dynamic callees, open containers, carry, and core results remain Unknown. Include returned requests only, not unreturned constructions. Solve finite operation sets, parameter summaries, and Unknown by the least fixed point, with internal empty bottom and Unknown top. `R={worker.read}∪R` yields `{worker.read}`; `R=ParamOps(0)∪R` yields `{worker.read}` when the call supplies that known request; the empty solution of `R=R` becomes Unknown at use. Declaration order, union traversal order, and heuristic iteration limits MUST NOT truncate this step.
+Build `BaseOps(f)` union equations and parameter-source relations for every language fn. Direct requests yield singletons; bindings/parentheses/simple aliases/immutable captures preserve information; if/match unions all candidates; value blocks analyze their tail. A returned parameter retains `Param(i,type)`, and a returned request may retain `ParamOps(i)` until a call site supplies an abstract argument description. Only calls resolved through named declarations, direct anonymous fn, and simple aliases link callee equations. Unresolved dynamic callees, open containers, general carry, and core results remain Unknown; only the §5.2 state-identity carry rule may preserve its init description. Include returned requests only, not unreturned constructions. Solve finite operation sets, parameter summaries, and Unknown by the least fixed point, with internal empty bottom and Unknown top. `R={worker.read}∪R` yields `{worker.read}`; `R=ParamOps(0)∪R` yields `{worker.read}` when the call supplies that known request; the empty solution of `R=R` becomes Unknown at use. Declaration order, union traversal order, and heuristic iteration limits MUST NOT truncate this step.
 
 §5.2 transfer carries an Active set of fn origins along the current analysis call path, initially empty. Entering a new origin adds it, removing it after that candidate finishes. Reentering the same origin uses that fn's fixed-point summary instead of freezing the recursive call as Unknown; `Param(i)`/`ParamOps(i)` relations remain available to the outer call site. If no base return exists, or the fixed point contains only an empty cycle, retain only the declared return type and record `recursive_boundary`. This fallback cannot borrow other call-site arguments or stronger cached descriptions. Flow return transfer follows the acyclic graph and retains the same Active rule when entering fn. Every expansion path visits each finite source fn origin at most once; recursive fixed points keep a finite summary graph and never unfold runtime recursion or turn fn recursion into a Flow cycle. Union candidates use independent Active branches, never first-arrival effects.
 
-If an unfinished recursive/forward summary edge would map an effect parameter to a different
-parameter position and the finite summary graph has no verifiable mapping edge, the implementation
-MUST conservatively fall back to Unknown; it MUST NOT treat the callee's parameter positions as the
-caller's positions to gain parallel eligibility. Once the callee summary is complete, ordinary calls
-rebind descriptions by their actual arguments. Same-position recursive forwarding, as in `retry`
-below, can retain `ParamOps`.
+Recursive/forward summary edges record a finite mapping of parameter positions. A call such as
+`f(..., q, p)` carries that mapping; fixed-point traversal substitutes the edge's abstract arguments
+for the target `ParamOps(i)` before continuing through the finite graph. Mapping cycles are retained
+as graph edges rather than unfolded by runtime recursion. A missing argument, unresolved target, or
+Unknown abstract argument falls back to Unknown; the implementation MUST NOT treat callee positions
+as caller positions to gain parallel eligibility. Once the summary is complete, ordinary calls still
+rebind descriptions by their actual arguments, including swapped positions.
 
 Compute abstract argument descriptions in the caller context before adding the callee origin. Thus `identity(identity(p))` does not mistake two completed sequential transfers for recursive reentry. Constructing a closure does not enter its body; transferring a known callback does. Memoization MUST distinguish abstract arguments, captures, and the relevant Active context, or use a provably equivalent representation. A result from an empty Active context cannot replace a required recursive fallback. Cache/union candidate visitation order must not change either precision or acceptance.
 
@@ -700,6 +713,12 @@ match selects the first source-order arm whose pattern matches and Pure bool gua
 `for x in source with s = init { ... }` first evaluates/validates source as a list, then init, each once in the outer environment. Every iteration creates fresh x/s; s begins as init. Locals do not escape. Each normal path ends in next e, break e, or an if/match of such exits. next finishes current local statements and supplies the next s; break returns e. Exhaustion returns the last s; empty source returns init. No matching carry arm is Error. Source-free `for with s=init` continues until break/divergence/cancellation/budget.
 
 Exit e MUST be Pure but may reference completed observations; unselected exits do not evaluate. Error/cancellation stops iteration. Ordinary-loop break has no value and continue is only for ordinary loops; carry continues unchanged through next s. The source type of s is any; values remain V and actual operations/results obey normal checks. There is no shared mutable state.
+
+After checking the complete body, static description may recognize a finite state-identity
+pattern: when a source exists and every normal `next`/`break` exit directly returns the same state
+binding, the normal return description is init. This does not change loop execution, exit
+evaluation, effects, errors, or budgets; source-free carry does not qualify because it may not
+terminate.
 
 The carried value may contain both lists and objects. Append with `concat(s.items,[item])`, add or replace a field with `put(s.index,key,item)`, and pass the combined new state through next. These operations leave earlier states unchanged. A carry result may seed a later carry, so construction need not happen in a single pass. Duplicate keys follow put replacement rules while duplicate list entries remain; concat has no amortized constant-time append guarantee.
 
@@ -1415,7 +1434,7 @@ The following reasons have stable meanings; wording/layout may differ:
 | dynamic_target | No complete finite callable target set or compatible signatures |
 | open_shape | Unknown origins remain in container rest/elements |
 | recursive_boundary | Repeated-origin fallback under §5.3 cannot prove the required fact |
-| carry_boundary | Cross-iteration carry/fold results supply no such static information |
+| carry_boundary | Carry cross-iteration results, or fold results outside the finite exact-source rule, supply no such static information |
 | unsupported_transfer | An operation outside the §5.2 transfer table provides no such information |
 | type_mismatch | A known type/candidate cannot provide the required value kind |
 | arity_mismatch | A known signature cannot bind the argument structure |
@@ -1969,7 +1988,7 @@ Use §16.4 contracts with fresh bindings/journals. In this table r is a construc
 | Ordinary graph for p in [r,r], versus for p in [r,w] | Iteration variable keeps source element candidates; the first permits parallel, the second rejects without per-iteration or constant-guard pruning |
 | map/comprehension of a known empty list; callback has invalid known arity | map still rejects arity statically; no callback/body/guard performs or diagnostics; valid empty results provide no request element |
 | Runtime-unknown callback on an empty map/fold source | After outer arguments evaluate, check actual callable/arity; body invocation count and fn activation increment are zero |
-| fold/carry returns a read seed on an empty source | Actual result may be r, but static returned request information remains Unknown(carry_boundary); no private empty-loop specialization |
+| fold/carry returns a read seed on an empty source | Actual result is seed/init and its static request description remains r; fold does not call the callback, while carry still checks its body without a cross-iteration summary |
 | Callable alternatives all bind names/arity but only some accept a known argument type | Unknown(dynamic_target); do not reject possible success or discard the incompatible alternatives to authorize parallel |
 | Number/string callable alternatives and an independently obtained number/string argument union | Analyze conservative combinations; do not zip branches into apparent all-failure or all-read results; actual type checks remain dynamic |
 | Every callable alternative fails, some by arity and others by type | Static E-ARITY from the earlier validation stage; retain all failures; zero argument/provider evaluation |

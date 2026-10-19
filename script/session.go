@@ -671,7 +671,7 @@ native_data(value) takes a Data snapshot; native_release(value) releases a nativ
 Direct library calls use the Host boundary; effect constructs a request, perform executes it.
 fn bodies remain pure. fn f(x:number)->number @{math.sqrt(x)} promises the native computation is pure; ordinary wrappers need no @, and nested fn require their own marker for direct native calls.
 nan and inf are number literals. -inf < finite numbers < inf; nan != nan. JSON rejects non-finite numbers. :run -data-encoding c-hex selects lossless Data transport.
-Known pure request builders preserve operation summaries across calls, aliases and cells. Closed-container projections, conditional/returned functions, and recursive effect forwarding can preserve a known request; open projections, dynamic calls, and carry remain Unknown. Parallel still requires every operation to be Concurrent ReadOnly.
+Known pure request builders preserve operation summaries across calls, aliases and cells. Closed-container projections, conditional/returned functions, recursive effect forwarding, and state-identity carries can preserve a known request; open projections, dynamic calls, and general carries remain Unknown. Parallel still requires every operation to be Concurrent ReadOnly.
 The REPL displays expression and binding results. fmt.Print/Printf/Println return the byte count after the adapter handles error; this count is also displayed.
 :vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.`
 
@@ -683,7 +683,7 @@ var sessionBuiltinHelp = map[string]string{
 	"str":          "str(value) -> string\nReturn strings unchanged; display other Data without whitespace, including nan and inf.",
 	"range":        "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",
 	"map":          "map(xs, f) -> list\nCall pure unary f in order and return the results.",
-	"fold":         "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed.",
+	"fold":         "fold(xs, seed, f) -> any\nCall pure binary f(acc, item) in order; an empty list returns seed, and an accumulator-identity callback preserves seed for an unknown-length list.",
 	"fail":         "fail(message:string)\nEnd evaluation with E-FAIL.",
 	"concat":       "concat(a:list, b:list) -> list\nReturn a new list concatenating both inputs.",
 	"slice":        "slice(value, start:number?, stop:number? [, step:number?])\nSlice a list or string, excluding stop, just like value[start:stop:step]. Negative bounds are relative to length and clip; null selects defaults. Step defaults to 1 and cannot be zero; slice(value,null,null,-1) reverses.",
