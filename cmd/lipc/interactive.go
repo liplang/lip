@@ -60,6 +60,55 @@ func interactiveOptions() script.Options {
 	return script.Options{Parallelism: 4, MaxSteps: 1000000, MaxElements: 1000000, MaxNodes: 100000}
 }
 
+const replHelp = `help() shows interactive help; help(value), help(module), and
+help(module.member) describe values, Go exports, or Python libraries.
+The generic Go/Python bridge is enabled by default; packages must exist in the
+current Go module or Python environment. Use full, case-sensitive Go package
+paths; configure dependencies with go get in your module, and choose an alias
+with as. For example:
+  import go "strings"; strings.ToUpper("hello")
+  import python "math"; math.sqrt(3)
+
+The REPL displays return values: fmt.Print/Printf/Println return a byte count,
+which is displayed too. native_data(value) takes a Data snapshot;
+native_release(value) releases a native reference.
+
+:vars shows saved values; :history shows input; :del name[,name...] unbinds
+names; :reset clears the session; :cancel discards a draft; :quit exits.
+:run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output]
+     [-data-encoding json|c-hex] [-project DIR] [-frames N] file.lip
+     runs a complete file with static modules.
+Quote paths containing spaces or JSON with single/double quotes; no shell runs.
+:run inherits -host and uses independent file bindings.
+
+fn/Flow declarations, static Data, exports, import lip, Claims, and script
+statements are supported. Call a declared Flow by name or through |>.
+LIP imports resolve under -project DIR (default: current directory) and stay
+frozen until :reset.
+:begin / :end submits a whole script or several declarations as one cell,
+including forward references and Claim joins.
+An if statement without else waits for the next line; enter else, a blank line,
+or another statement.
+Names stay bound until :del removes them. Open () [] {} or triple-quoted strings
+allow more input; other expressions use a trailing \ to continue.
+Successful cells retain results without rerunning past actions; failed cells
+commit no bindings, and completed external actions remain.
+
+fn f(x:number)->number @{math.sqrt(x)} promises native computational purity.
+Outer wrappers need no @; nested native bodies need their own marker. nan and
+inf are number literals; use -data-encoding c-hex for lossless file transport.
+Known pure request builders retain operation summaries. Closed projections,
+conditional/returned functions, recursive effect forwarding, and state-identity
+carries can preserve a known request. Open projections, dynamic calls, and
+general carries stay Unknown; parallel still requires every candidate to be
+Concurrent ReadOnly.
+Non-tail calls default to 10,000 active frames; -frames changes the budget.
+Exhaustion reports E-BUDGET; the next cell can still run.
+-parallel accepts nonnegative integers; zero uses one. It limits active
+evaluations without preallocating workers, and :run inherits the limit unless
+overridden.
+`
+
 func showValue(value script.Value) string {
 	if description, ok := script.NativeDescription(value); ok {
 		return description
@@ -82,7 +131,12 @@ func showValue(value script.Value) string {
 }
 
 func repl(ctx context.Context, args []string) error {
+	if commandHelpRequested(args) {
+		printCommandHelp(os.Stdout, "repl")
+		return nil
+	}
 	flags := flag.NewFlagSet("repl", flag.ContinueOnError)
+	configureFlagHelp(flags, "repl")
 	quiet := flags.Bool("quiet", !terminal(os.Stdin) || !terminal(os.Stdout), "hide prompts (automatic for pipes)")
 	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	project := flags.String("project", "", "project root for static LIP imports (default: current directory)")
@@ -90,7 +144,10 @@ func repl(ctx context.Context, args []string) error {
 	parallel := flags.Int("parallel", 4, "maximum active leaf evaluations per cell and :run (0 uses one)")
 	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("%w; run lipc repl -h for usage", err)
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("repl accepts expressions interactively; use :run file.lip for a program")
@@ -112,7 +169,7 @@ func repl(ctx context.Context, args []string) error {
 			return err
 		}
 	} else if *hostName != "" {
-		return fmt.Errorf("unknown Host %q", *hostName)
+		return fmt.Errorf("unknown Host %q; supported values: demo (or omit -host)", *hostName)
 	}
 	session, err := script.NewInteractiveSession(host, script.SessionOptions{ProjectRoot: *project})
 	if err != nil {
@@ -185,26 +242,9 @@ func repl(ctx context.Context, args []string) error {
 				collecting = false
 				evaluate()
 			case text == ":help":
-				fmt.Printf("LIP %s: pure fn compute values, Flows organize dependencies, Claims collect facts, effect/perform run external actions.\n", script.LanguageVersion)
-				fmt.Println("help() shows interactive help; help(value), help(module), help(module.member) describe values, Go exports, or Python libraries.")
-				fmt.Println("The generic Go/Python bridge is enabled by default; packages must exist in the current Go module or Python environment.")
-				fmt.Println("Use full, case-sensitive Go package paths; configure dependencies with go get in your module, and choose an alias with as.")
-				fmt.Println("import go \"strings\"; strings.ToUpper(\"hello\"); import python \"math\"; math.sqrt(3).")
-				fmt.Println("The REPL displays return values: fmt.Print/Printf/Println return a byte count, which is displayed too.")
-				fmt.Println("native_data(value) takes a Data snapshot; native_release(value) releases a native reference.")
-				fmt.Println(":vars shows saved values; :history shows input; :del name[,name...] unbinds names for reuse; :reset clears the session; :cancel discards a draft; :quit exits.")
-				fmt.Println(":run [-entry Name] [-input JSON | -entry-input JSON] [-entry-output] [-data-encoding json|c-hex] [-project DIR] [-frames N] file.lip runs a complete file with static modules.")
-				fmt.Println("Quote paths containing spaces or JSON with single/double quotes; no shell runs. :run inherits -host and uses independent file bindings.")
-				fmt.Println("fn/Flow declarations, static Data, exports, import lip, Claims, and script statements are supported. Call a declared Flow by name or through |>.")
-				fmt.Println("LIP imports resolve under -project DIR (default: current directory) and stay frozen until :reset.")
-				fmt.Println(":begin / :end submits a whole script or several declarations as one cell, including forward references and Claim joins.")
-				fmt.Println("An if statement without else waits for the next line; enter else, a blank line, or another statement.")
-				fmt.Println("Names stay bound until :del removes them. Open () [] {} or triple-quoted strings allow more input; other expressions use a trailing \\ to continue.")
-				fmt.Println("Successful cells retain results without rerunning past actions; failed cells commit no bindings, and completed external actions remain.")
-				fmt.Println("fn f(x:number)->number @{math.sqrt(x)} promises native computational purity. Outer wrappers need no @; nested native bodies need their own marker. nan and inf are number literals; use -data-encoding c-hex for lossless file transport.")
-				fmt.Println("Known pure request builders retain operation summaries; closed projections, conditional/returned functions, recursive effect forwarding, and state-identity carries can preserve a known request. Open projections, dynamic calls, and general carries stay Unknown; parallel still requires every candidate Concurrent ReadOnly.")
-				fmt.Println("Non-tail calls default to 10,000 active frames; -frames changes the budget. Exhaustion reports E-BUDGET; the next cell can still run.")
-				fmt.Println("-parallel accepts any positive integer; it limits active evaluations without preallocating that many workers. :run inherits the limit unless overridden.")
+				fmt.Printf("LIP %s: pure fn compute values, Flows organize dependencies,\n"+
+					"Claims collect facts, effect/perform run external actions.\n", script.LanguageVersion)
+				fmt.Print(replHelp)
 				fmt.Println(editorHelp)
 			case text == ":vars":
 				values := session.Values()
@@ -239,7 +279,13 @@ func repl(ctx context.Context, args []string) error {
 			case strings.HasPrefix(text, ":run "):
 				args, err := fileRunArgs(strings.TrimSpace(strings.TrimPrefix(text, ":run ")))
 				if err == nil {
-					err = run(ctx, append([]string{"run", "-host", *hostName, "-parallel", strconv.Itoa(*parallel), "-frames", strconv.Itoa(*frames), "-trace=" + strconv.FormatBool(*trace)}, args...))
+					runArgs := []string{
+						"run", "-host", *hostName,
+						"-parallel", strconv.Itoa(*parallel),
+						"-frames", strconv.Itoa(*frames),
+						"-trace=" + strconv.FormatBool(*trace),
+					}
+					err = run(ctx, append(runArgs, args...))
 				}
 				if err != nil {
 					fmt.Fprintln(os.Stderr, err)

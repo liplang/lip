@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"lip/script"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 )
 
 func main() {
@@ -22,7 +24,8 @@ func main() {
 }
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return usage()
+		printGlobalHelp(os.Stdout)
+		return nil
 	}
 	command := args[0]
 	switch command {
@@ -33,20 +36,36 @@ func run(ctx context.Context, args []string) error {
 	case "learn":
 		return learn(ctx, args[1:])
 	case "help", "-h", "--help":
-		fmt.Printf("LIP %s · pure values, structured Flows, Claim facts, effect/perform\n", script.LanguageVersion)
-		fmt.Println("run/repl/serve and generated executables accept -frames N (default 10000; 0 selects default). Tail calls reuse frames; exhaustion reports E-BUDGET.")
-		fmt.Println("-parallel N accepts any positive integer and limits active leaf evaluations; workers start on demand. REPL :run inherits the selected limit.")
-		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-data-encoding json|c-hex] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
-		fmt.Printf("learn: %d short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.\n", len(course))
-		fmt.Println("print/log/telemetry are one-way diagnostics, allowed in fn. Output goes to stderr; run/repl accept -trace=false to disable delivery.")
-		fmt.Println("Direct native computation inside fn requires an @{...} purity promise; effect builds requests and perform executes them in a Flow.")
+		if len(args) == 1 || len(args) == 2 && isHelpArg(args[1]) {
+			printGlobalHelp(os.Stdout)
+			return nil
+		}
+		if len(args) != 2 || !knownCommand(args[1]) {
+			return fmt.Errorf("unknown help topic %q; run lipc help for available commands", strings.Join(args[1:], " "))
+		}
+		printCommandHelp(os.Stdout, args[1])
 		return nil
 	case "run", "emit-go", "build":
 		args = args[1:]
 	default:
-		command = "run"
+		if isHelpArg(command) {
+			printGlobalHelp(os.Stdout)
+			return nil
+		}
+		if strings.HasPrefix(command, "-") || strings.HasSuffix(command, ".lip") || strings.Contains(command, string(filepath.Separator)) {
+			// Keep the convenient `lipc program.lip` shorthand, including its
+			// `lipc -host demo program.lip` form.
+			command = "run"
+		} else {
+			return fmt.Errorf("unknown command %q; run lipc help to see available commands", command)
+		}
+	}
+	if commandHelpRequested(args) {
+		printCommandHelp(os.Stdout, command)
+		return nil
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	configureFlagHelp(flags, command)
 	hostName := flags.String("host", "", "Host: generic Go/Python libraries by default; demo adds teaching contracts")
 	output := flags.String("o", "", "generated Go or executable destination")
 	input := flags.String("input", "{}", "Flow inputs as a JSON object")
@@ -61,10 +80,13 @@ func run(ctx context.Context, args []string) error {
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget (0 uses default; tail calls reuse frames)")
 	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("%w; run lipc %s -h for usage", err, command)
 	}
 	if flags.NArg() != 1 {
-		return usage()
+		return fmt.Errorf("%s requires exactly one source file; run lipc %s -h for examples", command, command)
 	}
 	if *frames < 0 {
 		return fmt.Errorf("-frames must be nonnegative (0 uses the default)")
@@ -72,13 +94,32 @@ func run(ctx context.Context, args []string) error {
 	if *parallel < 0 {
 		return fmt.Errorf("-parallel must be nonnegative (0 uses one)")
 	}
-	hasInput, hasEntryInput := false, false
+	if *steps < 0 {
+		return fmt.Errorf("-steps must be nonnegative (0 means unlimited)")
+	}
+	if *elements < 0 {
+		return fmt.Errorf("-elements must be nonnegative (0 means unlimited)")
+	}
+	hasInput, hasEntryInput, hasOutput := false, false, false
+	runtimeFlag := ""
 	flags.Visit(func(f *flag.Flag) {
 		hasInput = hasInput || f.Name == "input"
 		hasEntryInput = hasEntryInput || f.Name == "entry-input"
+		hasOutput = hasOutput || f.Name == "o"
+		if runtimeFlag == "" && (f.Name == "input" || f.Name == "entry-input" ||
+			f.Name == "entry-output" || f.Name == "data-encoding" || f.Name == "parallel" ||
+			f.Name == "steps" || f.Name == "elements" || f.Name == "frames" || f.Name == "trace") {
+			runtimeFlag = f.Name
+		}
 	})
 	if hasInput && hasEntryInput {
 		return fmt.Errorf("choose -input or -entry-input")
+	}
+	if command == "run" && hasOutput {
+		return fmt.Errorf("-o is only valid with emit-go or build; run writes its result to stdout")
+	}
+	if command != "run" && runtimeFlag != "" {
+		return fmt.Errorf("-%s is only valid with run; see lipc %s -h", runtimeFlag, command)
 	}
 	host := script.Host{}
 	goOptions := script.GoOptions{}
@@ -97,7 +138,7 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	default:
-		return fmt.Errorf("unknown Host %q", *hostName)
+		return fmt.Errorf("unknown Host %q; supported values: demo (or omit -host)", *hostName)
 	}
 	host = script.NewNativeHost(host)
 	defer host.Close()
@@ -124,7 +165,15 @@ func run(ctx context.Context, args []string) error {
 			traces, stop = script.StartTraceOutput(os.Stderr)
 			defer stop()
 		}
-		report, err := program.RunEntry(ctx, data, script.Options{Parallelism: *parallel, MaxSteps: *steps, MaxElements: *elements, MaxNodes: 1000000, MaxFrames: *frames, Trace: traces})
+		runOptions := script.Options{
+			Parallelism: *parallel,
+			MaxSteps:    *steps,
+			MaxElements: *elements,
+			MaxNodes:    1000000,
+			MaxFrames:   *frames,
+			Trace:       traces,
+		}
+		report, err := program.RunEntry(ctx, data, runOptions)
 		if err != nil {
 			return err
 		}
@@ -172,7 +221,4 @@ func writeFile(path string, data []byte) error {
 		return fmt.Errorf("emit-go output must use .go extension")
 	}
 	return os.WriteFile(path, data, 0644)
-}
-func usage() error {
-	return fmt.Errorf("usage: lipc {run|emit-go|build|serve|repl|learn}; see lipc help")
 }

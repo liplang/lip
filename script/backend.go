@@ -912,27 +912,102 @@ func specialize(template *ast.FuncDecl, tag, name, reference string, expression 
 }
 
 const generatedMain = `
-func main(){if err:=generatedRun();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}}
-func generatedRun()error{
- input:=flag.String("input","{}","Flow inputs as JSON")
- entryInput:=flag.String("entry-input","","EntryInput JSON with positional and named fields")
- entryOutput:=flag.Bool("entry-output",false,"print the value/void success envelope")
- dataEncoding:=flag.String("data-encoding","json","Data transport: json or c-hex (supports nan and inf)")
- parallel:=flag.Int("parallel",1,"active leaf evaluations; waiting containers yield")
- steps:=flag.Int64("steps",10000000,"step budget; 0 unlimited")
- elements:=flag.Int64("elements",1000000,"list budget; 0 unlimited")
- frames:=flag.Int("frames",DefaultMaxFrames,"non-tail call frame budget; 0 uses default; tail calls reuse frames")
- trace:=flag.Bool("trace",true,"show best-effort print/log/telemetry diagnostics on stderr")
- flag.Parse();if flag.NArg()!=0{return fmt.Errorf("compiled program accepts flags only")}
- if *frames<0{return fmt.Errorf("-frames must be nonnegative (0 uses the default)")}
- if *parallel<0{return fmt.Errorf("-parallel must be nonnegative (0 uses one)")}
- hasInput,hasEntryInput:=false,false;flag.Visit(func(f *flag.Flag){hasInput=hasInput||f.Name=="input";hasEntryInput=hasEntryInput||f.Name=="entry-input"});if hasInput&&hasEntryInput{return fmt.Errorf("choose -input or -entry-input")}
- inputJSON:=*entryInput;if !hasEntryInput{inputJSON="{\"positional\":[],\"named\":"+*input+"}"}
- data,err:=DecodeEntryInputWithEncoding([]byte(inputJSON),*dataEncoding);if err!=nil{return err}
- host,err:=generatedHost();if err!=nil{return err};p,err:=generatedProgram(host);if err!=nil{return err};defer p.host.Close()
- ctx,cancel:=signal.NotifyContext(context.Background(),os.Interrupt);defer cancel()
- var traces *TraceBuffer;if *trace{var stop func();traces,stop=StartTraceOutput(os.Stderr);defer stop()}
- r,err:=p.RunEntry(ctx,data,Options{Parallelism:*parallel,MaxSteps:*steps,MaxElements:*elements,MaxNodes:1000000,MaxFrames:*frames,Trace:traces});if err!=nil{return err}
- out,err:=EncodeData(r.Output,*dataEncoding);if *entryOutput{out,err=EncodeEntryOutput(*r.EntryOutput,*dataEncoding)};if err!=nil{return err};fmt.Println(string(out));return nil
+func main() {
+	if err := generatedRun(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func generatedRun() error {
+	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	flags.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\nRun the compiled LIP Flow and print its JSON result.\nOptions:\n", os.Args[0])
+		flags.PrintDefaults()
+	}
+	input := flags.String("input", "{}", "Flow inputs as JSON")
+	entryInput := flags.String("entry-input", "", "EntryInput JSON with positional and named fields")
+	entryOutput := flags.Bool("entry-output", false, "print the value/void success envelope")
+	dataEncoding := flags.String("data-encoding", "json", "Data transport: json or c-hex (supports nan and inf)")
+	parallel := flags.Int("parallel", 1, "active leaf evaluations; waiting containers yield")
+	steps := flags.Int64("steps", 10000000, "step budget; 0 unlimited")
+	elements := flags.Int64("elements", 1000000, "list budget; 0 unlimited")
+	frames := flags.Int("frames", DefaultMaxFrames, "non-tail call frame budget; 0 uses default; tail calls reuse frames")
+	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("compiled program accepts flags only; run %s -h for options", os.Args[0])
+	}
+	if *frames < 0 {
+		return fmt.Errorf("-frames must be nonnegative (0 uses the default)")
+	}
+	if *parallel < 0 {
+		return fmt.Errorf("-parallel must be nonnegative (0 uses one)")
+	}
+	if *steps < 0 {
+		return fmt.Errorf("-steps must be nonnegative (0 means unlimited)")
+	}
+	if *elements < 0 {
+		return fmt.Errorf("-elements must be nonnegative (0 means unlimited)")
+	}
+	hasInput, hasEntryInput := false, false
+	flags.Visit(func(f *flag.Flag) {
+		hasInput = hasInput || f.Name == "input"
+		hasEntryInput = hasEntryInput || f.Name == "entry-input"
+	})
+	if hasInput && hasEntryInput {
+		return fmt.Errorf("choose -input or -entry-input")
+	}
+	inputJSON := *entryInput
+	if !hasEntryInput {
+		inputJSON = "{\"positional\":[],\"named\":" + *input + "}"
+	}
+	data, err := DecodeEntryInputWithEncoding([]byte(inputJSON), *dataEncoding)
+	if err != nil {
+		return err
+	}
+	host, err := generatedHost()
+	if err != nil {
+		return err
+	}
+	p, err := generatedProgram(host)
+	if err != nil {
+		return err
+	}
+	defer p.host.Close()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	var traces *TraceBuffer
+	if *trace {
+		var stop func()
+		traces, stop = StartTraceOutput(os.Stderr)
+		defer stop()
+	}
+	r, err := p.RunEntry(ctx, data, Options{
+		Parallelism: *parallel,
+		MaxSteps:    *steps,
+		MaxElements: *elements,
+		MaxNodes:    1000000,
+		MaxFrames:   *frames,
+		Trace:       traces,
+	})
+	if err != nil {
+		return err
+	}
+	out, err := EncodeData(r.Output, *dataEncoding)
+	if *entryOutput {
+		out, err = EncodeEntryOutput(*r.EntryOutput, *dataEncoding)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
 }
 `

@@ -666,7 +666,8 @@ type lessonAttempt struct {
 	full bool
 }
 
-const learnCommands = ":show :examples :tests :hint :demo :edit :submit :retry :draft :cancel :next :prev :lesson :list :status :help :quit :exit"
+const learnCommands = ":show :examples :tests :hint :demo :edit :submit " +
+	":retry :draft :cancel :next :prev :lesson :list :status :help :quit :exit"
 
 func lessonSource(l lesson, answer string) string {
 	return strings.ReplaceAll(l.template, answerMark, strings.TrimSpace(answer))
@@ -759,7 +760,9 @@ func lessonNames(source string) []string {
 			continue
 		}
 		start := i
-		for i < len(source) && (source[i] >= 'a' && source[i] <= 'z' || source[i] >= 'A' && source[i] <= 'Z' || source[i] == '_' || i > start && (source[i] >= '0' && source[i] <= '9' || source[i] == '.')) {
+		for i < len(source) && (source[i] >= 'a' && source[i] <= 'z' ||
+			source[i] >= 'A' && source[i] <= 'Z' || source[i] == '_' ||
+			i > start && (source[i] >= '0' && source[i] <= '9' || source[i] == '.')) {
 			i++
 		}
 		if i > start {
@@ -832,7 +835,9 @@ func showLessonError(err error, source string, l lesson) {
 		case "E-TYPE", "E-SCHEMA":
 			fmt.Fprintln(os.Stderr, "Check the requested result type. Text needs quotes; numbers and true/false do not.")
 		case "E-PURITY":
-			fmt.Fprintln(os.Stderr, "fn computes values, builds requests, and may use print/log/telemetry for diagnostics. Direct native computation needs an @{...} purity promise. Execute requests with perform inside a Flow.")
+			fmt.Fprintln(os.Stderr,
+				"fn computes values, builds requests, and may use print/log/telemetry for diagnostics. "+
+					"Direct native computation needs an @{...} purity promise. Execute requests with perform inside a Flow.")
 		case "E-PARALLEL":
 			fmt.Fprintln(os.Stderr, "Each possible request operation must have a Host contract allowing concurrent reads.")
 		}
@@ -841,7 +846,12 @@ func showLessonError(err error, source string, l lesson) {
 }
 
 func learn(ctx context.Context, args []string) error {
+	if commandHelpRequested(args) {
+		printCommandHelp(os.Stdout, "learn")
+		return nil
+	}
 	flags := flag.NewFlagSet("learn", flag.ContinueOnError)
+	configureFlagHelp(flags, "learn")
 	list := flags.Bool("list", false, "list lessons in learning order")
 	start := flags.String("lesson", "", "start at a lesson ID or number (see -list)")
 	path := flags.String("progress", "", "save/resume progress at this JSON path (default: no files)")
@@ -850,10 +860,10 @@ func learn(ctx context.Context, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("%w; run lipc learn -h for usage", err)
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("use lipc learn -lesson ID to choose a lesson, then enter code at the prompt")
+		return fmt.Errorf("learn does not take a source file; use -lesson ID or run lipc learn -h for examples")
 	}
 	if *list {
 		for i, l := range course {

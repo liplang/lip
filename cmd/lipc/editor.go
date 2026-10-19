@@ -16,7 +16,11 @@ import (
 
 var errInputCanceled = errors.New("input canceled")
 
-const editorHelp = "Terminal editing: arrows move (up/down edit multiline text); Ctrl-P/N browse history; Home/End reach line ends, Ctrl-A/E input ends; Alt-Enter or Ctrl-J adds an indented line; Tab completes names/indents; Ctrl-R searches history; Ctrl-_ undoes; Ctrl-C clears input."
+const editorHelp = `Terminal editing:
+  arrows move; Up/Down edit multiline text; Home/End reach line ends.
+  Ctrl-A/E jump to input ends; Ctrl-P/N browse history; Ctrl-R searches history.
+  Alt-Enter or Ctrl-J adds an indented line; Tab completes names or indents.
+  Ctrl-_ undoes; Ctrl-C clears the current input.`
 
 func commandCompletions(prefix string, names []string, commands string) []string {
 	for _, command := range strings.Fields(commands) {

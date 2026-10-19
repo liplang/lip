@@ -14,7 +14,12 @@ import (
 )
 
 func serve(ctx context.Context, args []string) error {
+	if commandHelpRequested(args) {
+		printCommandHelp(os.Stdout, "serve")
+		return nil
+	}
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	configureFlagHelp(flags, "serve")
 	addr := flags.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	pattern := flags.String("route", "GET /{$}", "Go ServeMux pattern for the single source file")
 	entry := flags.String("entry", "", "root Flow for a single source (default Main, otherwise the sole root Flow)")
@@ -31,12 +36,39 @@ func serve(ctx context.Context, args []string) error {
 	frames := flags.Int("frames", script.DefaultMaxFrames, "non-tail call frame budget per request (0 uses default)")
 	trace := flags.Bool("trace", true, "show best-effort print/log/telemetry diagnostics on stderr")
 	if err := flags.Parse(args); err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("%w; run lipc serve -h for usage", err)
+	}
+	if *timeout < 0 {
+		return fmt.Errorf("-timeout must be nonnegative (0 uses the server default)")
+	}
+	if *concurrent <= 0 {
+		return fmt.Errorf("-concurrent must be greater than zero")
+	}
+	if *bodyLimit <= 0 {
+		return fmt.Errorf("-body-bytes must be greater than zero")
+	}
+	if *responseLimit <= 0 {
+		return fmt.Errorf("-response-bytes must be greater than zero")
+	}
+	if *parallel < 0 {
+		return fmt.Errorf("-parallel must be nonnegative (0 uses one)")
+	}
+	if *steps < 0 {
+		return fmt.Errorf("-steps must be nonnegative (0 means unlimited)")
+	}
+	if *elements < 0 {
+		return fmt.Errorf("-elements must be nonnegative (0 means unlimited)")
+	}
+	if *frames < 0 {
+		return fmt.Errorf("-frames must be nonnegative (0 uses the default)")
 	}
 	var routes []httpSourceRoute
 	if *manifest != "" {
 		if flags.NArg() != 0 {
-			return fmt.Errorf("serve -routes does not accept a source argument")
+			return fmt.Errorf("serve -routes does not accept a source argument; run lipc serve -h for examples")
 		}
 		var hasPattern bool
 		flags.Visit(func(f *flag.Flag) {
@@ -45,7 +77,7 @@ func serve(ctx context.Context, args []string) error {
 			}
 		})
 		if hasPattern {
-			return fmt.Errorf("serve selects either -route or -routes")
+			return fmt.Errorf("serve selects either -route or -routes, not both")
 		}
 		var err error
 		routes, err = readHTTPRoutes(*manifest)
@@ -54,7 +86,7 @@ func serve(ctx context.Context, args []string) error {
 		}
 	} else {
 		if flags.NArg() != 1 {
-			return fmt.Errorf("serve requires one source file or -routes manifest")
+			return fmt.Errorf("serve requires one source file or -routes manifest; run lipc serve -h for examples")
 		}
 		routes = []httpSourceRoute{{pattern: *pattern, source: flags.Arg(0), entry: *entry}}
 	}
@@ -66,7 +98,7 @@ func serve(ctx context.Context, args []string) error {
 			return err
 		}
 	} else if *hostName != "" {
-		return fmt.Errorf("unknown Host %q", *hostName)
+		return fmt.Errorf("unknown Host %q; supported values: demo (or omit -host)", *hostName)
 	}
 	defer host.Close()
 	programs := map[string]*script.Program{}
@@ -125,6 +157,9 @@ func serve(ctx context.Context, args []string) error {
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	fmt.Fprintf(os.Stderr, "Serving %d route(s) at http://%s\n", len(compiled), listener.Addr())
+	for _, route := range compiled {
+		fmt.Fprintf(os.Stderr, "  %s\n", route.Pattern)
+	}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	select {
@@ -152,11 +187,11 @@ func readHTTPRoutes(path string) ([]httpSourceRoute, error) {
 	}
 	data, err := script.DecodeData(raw)
 	if err != nil {
-		return nil, fmt.Errorf("routes manifest: %w", err)
+		return nil, fmt.Errorf("routes manifest %q: invalid JSON: %w", path, err)
 	}
 	entries, ok := data.Elements()
 	if !ok || len(entries) == 0 {
-		return nil, fmt.Errorf("routes manifest must be a nonempty JSON array")
+		return nil, fmt.Errorf("routes manifest %q must be a nonempty JSON array", path)
 	}
 	routes := []httpSourceRoute{}
 	for _, entry := range entries {
@@ -164,7 +199,7 @@ func readHTTPRoutes(path string) ([]httpSourceRoute, error) {
 		pattern, patternOK := fields["pattern"].Text()
 		source, sourceOK := fields["source"].Text()
 		if !ok || (len(fields) != 2 && len(fields) != 3) || !patternOK || !sourceOK || pattern == "" || source == "" {
-			return nil, fmt.Errorf("each route must contain exactly nonempty pattern and source strings")
+			return nil, fmt.Errorf("routes manifest %q: each route must contain nonempty pattern and source strings, plus optional entry", path)
 		}
 		if !filepath.IsAbs(source) {
 			source = filepath.Join(filepath.Dir(path), source)
@@ -174,7 +209,7 @@ func readHTTPRoutes(path string) ([]httpSourceRoute, error) {
 			var entryOK bool
 			selected, entryOK = fields["entry"].Text()
 			if !entryOK || selected == "" {
-				return nil, fmt.Errorf("route entry must be a nonempty string")
+				return nil, fmt.Errorf("routes manifest %q: route entry must be a nonempty string", path)
 			}
 		}
 		routes = append(routes, httpSourceRoute{pattern: pattern, source: source, entry: selected})
