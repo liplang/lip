@@ -1157,6 +1157,10 @@ type Diagnostic struct {
 	SourceID string
 	Code     string
 	Message  string
+	// Hint explains the LIP-specific rule behind a common migration error.
+	// Message stays concise and stable for API consumers; Error renders Hint
+	// as a second line for command-line users.
+	Hint     string
 	Site     int
 	Line     int
 	Column   int
@@ -1171,6 +1175,9 @@ func (e *Diagnostic) Error() string {
 		phase = "host"
 	}
 	message := "[" + phase + "] " + e.Message
+	if e.Hint != "" {
+		message += "\nHint: " + e.Hint
+	}
 	if e.Line > 0 {
 		if e.SourceID != "" {
 			return fmt.Sprintf("%s at %s:%d:%d: %s", e.Code, e.SourceID, e.Line, e.Column, message)
@@ -1180,7 +1187,156 @@ func (e *Diagnostic) Error() string {
 	return e.Code + ": " + message
 }
 func diagnostic(code, message string) *Diagnostic {
-	return &Diagnostic{Phase: "host", Code: code, Message: message, Site: -1}
+	return &Diagnostic{Phase: "host", Code: code, Message: message, Hint: DiagnosticHint(code, message), Site: -1}
+}
+
+// DiagnosticHint returns the canonical English migration guidance for a
+// diagnostic. Compiler, REPL, learn, examples, and editor/LSP adapters should
+// use this shared knowledge instead of maintaining message-specific copies.
+// Message matching is intentionally based on stable diagnostic families, so
+// the public Message field remains concise and compatible for API consumers.
+func DiagnosticHint(code, message string) string {
+	switch {
+	case strings.Contains(message, "Flow declarations are not values"):
+		return "A Flow is a static execution graph, not an ordinary value. Call it directly as Name(args); use fn for a passable pure callable, or construct an effect for a deferred external request."
+	case strings.Contains(message, "fn cannot invoke Flow"):
+		return "A regular fn cannot invoke a Flow. Move the Flow call into a Flow body, or let the fn construct and return an effect for a Flow to perform."
+	case strings.Contains(message, "void Flow cannot be used as a value"):
+		return "A void Flow has no result value. Invoke it as a statement, or give the Flow a return type before using its result."
+	case strings.Contains(message, "fn cannot capture/read active Claim"):
+		return "A Claim store belongs to the current Flow graph and cannot be captured by a pure fn. Read a completed snapshot in the Flow and pass that Data to the fn."
+	case strings.Contains(message, "fn cannot construct store snapshot"):
+		return "A Claim snapshot is an external read and can only be performed in a Flow. Read it in the Flow, then pass the result to a pure fn."
+	case strings.Contains(message, "native calls in fn require"):
+		return "A regular fn cannot make an unmarked native call. Move external business work to a Flow with effect/perform; if this native computation is genuinely pure, mark this fn body @{...} as an author purity promise."
+	case strings.Contains(message, "perform requires proposal"):
+		return "perform requires an unexecuted effect proposal, not an ordinary value or native result. Construct one with effect alias.member(args), or pass an effect value, then perform it from a Flow."
+	case strings.Contains(message, "proposal arguments must be pure"):
+		return "Effect arguments must be pure Data: constructing a request does not perform external work. Complete an external read in a Flow, then build the effect from its bound Data."
+	case strings.Contains(message, "proposal argument must be Data"):
+		return "An effect proposal can carry only Data arguments. Perform or unwrap the external work first, then pass its Data result; functions and effect proposals are not Data."
+	case strings.Contains(message, "snapshot requires a literal store name"):
+		return "Claim snapshots identify a store statically. Pass a literal store name such as claim.snapshot(\"facts\") after declaring that store in the Flow."
+	case strings.Contains(message, "join RHS must be pure") || strings.Contains(message, "guard must be pure") || strings.Contains(message, "comprehension guard must be pure") || strings.Contains(message, "carry exit must be pure"):
+		return "This position must be a repeatable pure expression. Bind external results in a Flow before this expression; a genuinely pure native call must be inside its own @{...} fn."
+	case strings.Contains(message, "Claim declarations require Flow top level"):
+		return "A Claim store belongs to a Flow instance. Declare it at the top level of a Flow body, then complete its joins before reading the store."
+	case strings.Contains(message, "join requires a Flow graph statement"):
+		return "join creates a dependency in the Flow graph, so it is valid only as a Flow graph statement. Move it out of fn, a value expression, or a local pure block."
+	case strings.Contains(message, "operation forbidden in a node-local block"):
+		return "This node-local block cannot perform graph-level work. Move the Flow call, Claim join, or external operation to a Flow graph statement."
+	case strings.Contains(message, "parallel requires Concurrent ReadOnly") || strings.Contains(message, "perform is not provably Concurrent ReadOnly"):
+		return "parallel requires every external operation in the body to be declared both ReadOnly and Concurrent. Run writes, Unknown operations, and unregistered requests sequentially; read in parallel, join, then write sequentially."
+	case strings.Contains(message, "list index requires number or list"):
+		return "List indexing accepts one number or a list of numeric indices. Use xs[i] for one item or xs[[i,j]] for a projection; indexes are zero-based."
+	case strings.Contains(message, "object index requires string"):
+		return "Object fields are indexed by string keys, for example object[\"name\"] or object.name. A numeric key is not converted automatically."
+	case strings.Contains(message, "index requires number"):
+		return "Sequence indexes must be numbers and safe integers. Use a numeric index such as xs[0], and check bounds before indexing."
+	case strings.Contains(message, "value cannot be indexed"):
+		return "Only lists, strings, and objects support indexing. Check the receiver type, then use a numeric index for a sequence or a string key for an object."
+	case strings.Contains(message, "slice requires list or string"):
+		return "Slicing is defined for lists and strings. Keep the receiver as a list/string or convert the value explicitly before using start:stop:step."
+	case strings.Contains(message, "slice step cannot be zero") || strings.Contains(message, "range step is zero"):
+		return "A step of zero cannot make progress. Use a positive or negative nonzero step, such as 1 or -1."
+	case strings.Contains(message, "expected bool") || strings.Contains(message, "requires bool") || strings.Contains(message, "must be bool"):
+		return "LIP has no truthiness conversion: conditions, !, and guards require bool. Compare explicitly, for example x != 0, text != \"\", or value == null."
+	case strings.Contains(message, "expected number") || strings.Contains(message, "requires number") || strings.Contains(message, "requires numbers"):
+		return "LIP keeps numbers and other types separate. When input is text, use parse_number(text) at the boundary and handle invalid numeric text; other types need explicit logic instead of implicit conversion."
+	case strings.Contains(message, "expected string") || strings.Contains(message, "requires string"):
+		return "This position requires a string. Use a string literal or str(value) for an explicit Data-to-text conversion; LIP does not coerce numbers automatically."
+	case strings.Contains(message, "expected list") || strings.Contains(message, "requires list") || strings.Contains(message, "comprehension requires list") || strings.Contains(message, "carry requires list"):
+		return "This position requires a list. Use a list literal, range, map, or concat; an object, string, or scalar is not converted implicitly."
+	case strings.Contains(message, "expected object") || strings.Contains(message, "requires object"):
+		return "This position requires an object. Use an object literal {key:value} or construct a new object with put; LIP does not coerce other containers."
+	case strings.Contains(message, "comparison requires matching number/string") || strings.Contains(message, "comparison requires two numbers or two strings"):
+		return "Ordered comparisons accept two numbers or two strings of the same type. Convert input explicitly before comparing; use == or != for equality."
+	case strings.Contains(message, "function/effect equality is undefined"):
+		return "Functions and effect proposals have no equality operation. Compare their Data inputs or results, or perform the proposal and compare its returned Data."
+	case strings.Contains(message, "arithmetic requires numbers"):
+		return "Arithmetic operators require numbers on both sides. Parse text with parse_number(text), or keep text operations separate from numeric operations."
+	case strings.Contains(message, "expected effect"):
+		return "This position requires an unexecuted effect proposal. Construct one with effect alias.member(args); do not pass an ordinary value or an already executed native result to perform."
+	case strings.Contains(message, "expected function") || strings.Contains(message, "got flow") || strings.Contains(message, "callee is not a language function") || strings.Contains(message, "callee is not callable"):
+		return "Only fn values are ordinary callable values. Call a Flow by its declared name, and call imported Go/Python members through alias.member; a Flow cannot be stored in a variable or passed to map/fold."
+	case strings.Contains(message, "duplicate binding"):
+		return "Bindings are immutable within a scope, so assignment is not rebinding. Use a new name, create a nested scope to shadow deliberately, or express loop state with carry/next."
+	case strings.Contains(message, "unbound name"):
+		return "Check spelling, capitalization, and declaration order. Import Go/Python modules explicitly and refer to their exported members through the alias; LIP does not read a host global environment."
+	case strings.Contains(message, "operation requires imported alias and member"):
+		return "External operations need an explicit import alias and member, for example import go \"strings\" as strings followed by strings.ToUpper(...)."
+	case strings.Contains(message, "unregistered operation"):
+		return "The imported member is not registered by the Host. Check the exact case-sensitive package/member name and register the operation before compiling."
+	case strings.Contains(message, "invalid import language"):
+		return "LIP imports use one of the declared languages: lip, go, python, or host. Use import go \"path\" as alias, import python \"module\" as alias, or the matching project form."
+	case strings.Contains(message, "full package path") || strings.Contains(message, "case-sensitive Go"):
+		return "Go imports require the full, case-sensitive package path and an exported symbol. Add the dependency in the module that builds the generated program."
+	case strings.Contains(message, "core functions reject named arguments"):
+		return "Core functions use positional arguments only. Use map(xs, fn), fold(xs, seed, fn), or the documented positional order instead of name=value."
+	case strings.Contains(message, "wrong core arity"):
+		return "Check the core function signature in help(...). Core functions have fixed positional arity and do not accept omitted or extra arguments."
+	case strings.Contains(message, "wrong function arity"):
+		return "LIP checks function and Flow arity before executing arguments. Match the declared parameter count, or use named arguments only for declared fn/Flow parameters."
+	case strings.Contains(message, "unknown/duplicate operation argument") || strings.Contains(message, "missing operation argument") || strings.Contains(message, "operation parameter"):
+		return "Match the imported operation's declared parameter names and order. Each required parameter must be supplied once; optional parameters may be omitted."
+	case strings.Contains(message, "reserved name") || strings.Contains(message, "reserved alias") || strings.Contains(message, "reserved declaration") || strings.Contains(message, "import alias conflicts with declaration"):
+		return "This identifier is reserved by LIP. Choose a different binding or import alias; declarations cannot shadow keywords and core names in the same namespace."
+	case strings.Contains(message, "duplicate object field"):
+		return "An object literal cannot define the same field twice. Remove the duplicate key or combine the values into one field."
+	case strings.Contains(message, "duplicate declaration") || strings.Contains(message, "duplicate import alias") || strings.Contains(message, "duplicate alias"):
+		return "Each declaration and import alias must be unique in its scope. Rename one declaration or remove the duplicate."
+	case strings.Contains(message, "only calls and perform may be statements"):
+		return "An if, match, or ordinary value is an expression in a block. Bind it or put it in the Flow's tail, for example return if condition {value} else {other}; standalone statements are calls and perform."
+	case strings.Contains(message, "return only at Flow tail"):
+		return "return is allowed only for the final result of a Flow. Use return expression at the tail, and use bindings or calls before it."
+	case strings.Contains(message, "declaration files cannot contain top-level statements"):
+		return "A source file may declare imports, data, fn, and Flow definitions at the top level. Put executable statements inside a Flow, usually flow Main(...)."
+	case strings.Contains(message, "value block requires a tail"):
+		return "A value block must end with one expression. Remove the trailing separator or provide the final expression after the bindings."
+	case strings.Contains(message, "expected carry exit"):
+		return "A carry body must finish with its state using a next expression. Return or break outside the carry grammar cannot supply the next state."
+	case strings.Contains(message, "@ must be followed by { on the same line"):
+		return "The native purity marker belongs immediately before a fn body: write fn name(args)->type @{ native.call(...) }. It is not a general decorator or expression operator."
+	case strings.Contains(message, "pipeline stages only accept named arguments"):
+		return "A pipeline supplies its left value as the first positional argument. Use named arguments only for the remaining parameters, for example value |> convert(mode=\"fast\")."
+	case strings.Contains(message, "positional argument after named argument"):
+		return "Once a call uses a named argument, all later arguments must also be named. Reorder the call or name every argument after the first named one."
+	case strings.Contains(message, "import requires an explicit alias") || strings.Contains(message, "LIP imports require an explicit alias"):
+		return "Give every import an alias, for example import go \"strings\" as strings or import python \"math\" as math, then use alias.member."
+	case strings.Contains(message, "export requires a declaration"):
+		return "export applies to a declaration such as export fn or export flow. It cannot prefix a call, binding, or ordinary statement."
+	case strings.Contains(message, "unknown type") || strings.Contains(message, "void cannot be nullable"):
+		return "Use only LIP's declared types: any, bool, number, string, list, object, function, effect, or void where allowed. Nullable syntax is type?; void? is not valid."
+	case strings.Contains(message, "leading zero in number"):
+		return "LIP number literals do not allow leading zeroes. Write 0 for zero, 0.5 for a fraction, or 12 for an integer."
+	case strings.Contains(message, "fraction requires digits"):
+		return "A decimal point must be followed by digits. Write 1.0 instead of 1., or use an integer literal 1."
+	case strings.Contains(message, "exponent requires digits"):
+		return "An exponent must contain digits after e or E, for example 1e3 or 1.5e-2."
+	case strings.Contains(message, "invalid number suffix") || strings.Contains(message, "number overflow") || strings.Contains(message, "non-finite number"):
+		return "Use a complete finite number literal with LIP's decimal syntax. For nan or infinity, use the explicit nan, inf, or -inf literals."
+	case strings.Contains(message, "unknown string escape") || strings.Contains(message, "Unicode escape requires braces"):
+		return "Strings use escapes such as \\\" \\\\ \\n, \\r, \\t, and \\u{...}. Check the backslash spelling and put braces around Unicode code points."
+	case strings.Contains(message, "unterminated string") || strings.Contains(message, "unterminated multiline string"):
+		return "Close the string with its matching quote. Multiline strings use triple quotes: \"\"\"text\"\"\"."
+	case strings.Contains(message, "expected statement separator"):
+		return "Separate statements with a newline or semicolon. Keep a value expression in the Flow tail or after return."
+	case code == "E-PURITY":
+		return "This position must be pure and repeatable. Move external work into a Flow, construct an effect without executing it, or call a fn whose body explicitly promises pure native computation with @{...}."
+	case code == "E-SCHEMA":
+		return "This boundary accepts only LIP Data: null, bool, number, string, list, or object. Consume functions/effects inside LIP and convert native values through an explicit adapter."
+	case code == "E-ARITY":
+		return "Check the declared signature and argument order. LIP validates arity before evaluating arguments or executing external work."
+	case code == "E-OPERATION":
+		return "Check the imported alias, case-sensitive member name, Host contract, and operation registration before compiling the external call."
+	case code == "E-NAME":
+		return "Check the declaration, spelling, scope, and import alias. A name becomes available only after its declaration and successful cell."
+	case code == "E-PARSE":
+		return "LIP syntax is explicit: use fn for pure callable values, flow for execution graphs, effect to construct a request, and perform to execute it. Check the delimiter and declaration form near this position."
+	case code == "E-LEX":
+		return "LIP source is UTF-8 and uses explicit lexical forms. Check quotes, escapes, number spelling, and supported punctuation near this position."
+	}
+	return ""
 }
 func diagnosticPhase(err error, phase string) error {
 	if e, ok := err.(*Diagnostic); ok {

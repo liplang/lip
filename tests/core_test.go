@@ -35,6 +35,67 @@ func display(t *testing.T, v Value) string {
 	return string(b)
 }
 
+func TestDiagnosticHints(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "flow value",
+			source: `flow Child()->number{return 1} flow Main()->any{return Child}`,
+			want:   "A Flow is a static execution graph",
+		},
+		{
+			name:   "flow in fn",
+			source: `flow Child()->number{return 1} fn use()->number{Child()} flow Main()->number{return use()}`,
+			want:   "A regular fn cannot invoke a Flow",
+		},
+		{
+			name:   "perform value",
+			source: `flow Main()->number{return perform 1}`,
+			want:   "effect proposal",
+		},
+		{
+			name:   "rebinding",
+			source: `flow Main()->number{x=1;x=2;return x}`,
+			want:   "Bindings are immutable within a scope",
+		},
+		{
+			name:   "truthiness",
+			source: `flow Main()->number{return if 1 {1} else {2}}`,
+			want:   "no truthiness conversion",
+		},
+		{
+			name:   "list index type",
+			source: `flow Main()->number{return [1]["x"]}`,
+			want:   "List indexing accepts",
+		},
+		{
+			name:   "statement expression",
+			source: `flow Main()->number{if true {1} else {2}}`,
+			want:   "An if, match, or ordinary value is an expression",
+		},
+		{
+			name:   "top level statement",
+			source: "flow Main()->number{return 1}\nx=1",
+			want:   "A source file may declare",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(tc.source, Host{})
+			if err == nil {
+				t.Fatal("expected diagnostic")
+			}
+			d, ok := err.(*Diagnostic)
+			if !ok || d.Hint == "" || DiagnosticHint(d.Code, d.Message) != d.Hint || !strings.Contains(d.Hint, tc.want) || !strings.Contains(err.Error(), "Hint: ") {
+				t.Fatalf("diagnostic=%#v error=%v", d, err)
+			}
+		})
+	}
+}
+
 func TestEntryInputBoundary(t *testing.T) {
 	var calls atomic.Int64
 	host := Host{Contracts: []Contract{{Operation: Operation{Language: "host", Path: "app", Member: "touch"}, Version: "1", Result: Schema{Type: "null"}, Effect: WriteEffect,
