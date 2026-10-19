@@ -333,6 +333,22 @@ var course = []lesson{
 		cases: []lessonCase{{"{\"x\":3}", "6"}, {"{\"x\":-1}", "-2"}},
 	},
 	{
+		id:       "native-purity",
+		title:    "Mark a pure native calculation",
+		section:  "Deciding and transforming",
+		explain:  "A fn that directly calls a Go or Python calculation must mark its body with @{...}. The marker is an explicit promise that the native call only computes a value; it does not grant permission for business writes.",
+		task:     "Put the native upper-case call in the marked function body.",
+		template: "import go \"strings\" as text\nfn upper(name:string)->string @{__ANSWER__}\nflow Main(name:string)->string {return upper(name)}",
+		solution: "text.ToUpper(name)",
+		hint:     "Keep @ before the opening brace. The answer is the native call text.ToUpper(name); do not add perform here.",
+		examples: []lessonExample{
+			{code: "upper(\"ada\")", want: "\"ADA\"", setup: "import go \"strings\" as text\nfn upper(name:string)->string @{text.ToUpper(name)}"},
+			{code: "upper(\"lip\")", want: "\"LIP\"", setup: "import go \"strings\" as text\nfn upper(name:string)->string @{text.ToUpper(name)}"},
+		},
+		cases: []lessonCase{{"{\"name\":\"Ada\"}", "\"ADA\""}, {"{\"name\":\"lip\"}", "\"LIP\""}},
+		demo:  true,
+	},
+	{
 		id:       "carry",
 		title:    "Update a loop result",
 		section:  "Deciding and transforming",
@@ -610,6 +626,21 @@ var course = []lesson{
 		},
 		cases: []lessonCase{{"{\"xs\":[0,1,2,3,4],\"indices\":[-1,0,-1],\"label\":\"a𐀀b\"}", "{\"picked\":[4,0,4],\"reverse\":[4,3,2,1,0],\"stride\":[1,3],\"text\":\"b𐀀a\"}"}, {"{\"xs\":[],\"indices\":[],\"label\":\"\"}", "{\"picked\":[],\"reverse\":[],\"stride\":[],\"text\":\"\"}"}},
 	},
+	{
+		id:       "nonfinite",
+		title:    "Display NaN and infinity",
+		section:  "Extra practice",
+		explain:  "number includes nan, inf, and -inf. They remain numeric values; str is a convenient way to display them when ordinary JSON cannot carry non-finite numbers.",
+		task:     "Return x together with all three non-finite number values as text.",
+		template: "flow Describe(x:number)->string {return __ANSWER__}",
+		solution: "str([x, nan, inf, -inf])",
+		hint:     "Build a list [x, nan, inf, -inf], then wrap it in str(...).",
+		examples: []lessonExample{
+			{code: "str([nan, inf, -inf])", want: "\"[nan,inf,-inf]\""},
+			{code: "str([0, nan])", want: "\"[0,nan]\""},
+		},
+		cases: []lessonCase{{"{\"x\":3}", "\"[3,nan,inf,-inf]\""}, {"{\"x\":-2}", "\"[-2,nan,inf,-inf]\""}},
+	},
 }
 
 type progress struct {
@@ -801,7 +832,7 @@ func showLessonError(err error, source string, l lesson) {
 		case "E-TYPE", "E-SCHEMA":
 			fmt.Fprintln(os.Stderr, "Check the requested result type. Text needs quotes; numbers and true/false do not.")
 		case "E-PURITY":
-			fmt.Fprintln(os.Stderr, "fn computes values, builds requests, and may use print/log/telemetry for diagnostics. Execute requests with perform inside a Flow.")
+			fmt.Fprintln(os.Stderr, "fn computes values, builds requests, and may use print/log/telemetry for diagnostics. Direct native computation needs an @{...} purity promise. Execute requests with perform inside a Flow.")
 		case "E-PARALLEL":
 			fmt.Fprintln(os.Stderr, "Each possible request operation must have a Host contract allowing concurrent reads.")
 		}
@@ -862,6 +893,7 @@ func learn(ctx context.Context, args []string) error {
 	fmt.Printf("LIP %s · Learn by small steps\n", script.LanguageVersion)
 	fmt.Println("Each lesson has one blank. Type the missing code and press Enter; no whole program needed.")
 	fmt.Println(":hint gives a small step; :examples runs worked examples; :demo shows one possible answer.")
+	fmt.Println("Direct native computation inside fn uses @{...}; effect builds requests and perform executes them in a Flow.")
 	if *path == "" {
 		fmt.Println("Progress stays in this session. Add -progress FILE next time to save it; :quit or Ctrl-D exits.")
 	} else {
@@ -1136,6 +1168,9 @@ func checkLesson(ctx context.Context, l lesson, source string, trace bool) error
 		if err != nil {
 			return err
 		}
+		// Demo contracts remain available while the native bridge enables
+		// marked @{...} lessons to call deterministic standard-library code.
+		host = script.NewNativeHost(host)
 	}
 	defer host.Close()
 	sources := map[string]script.Source{"main.lip": {Version: "local", Text: source}}

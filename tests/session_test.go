@@ -1133,7 +1133,7 @@ flow Canceled()->number {return 0}
 		}
 	})
 	t.Run("learning-errors-and-navigation", func(t *testing.T) {
-		stdout, stderr := run("42\n:hint\n\"Hello, LIP!\"\n:prev\n:submit\n:lesson\n:lesson slicing\n:next\n:quit\n", "learn", "-lesson", "hello")
+		stdout, stderr := run("42\n:hint\n\"Hello, LIP!\"\n:prev\n:submit\n:lesson\n:lesson nonfinite\n:next\n:quit\n", "learn", "-lesson", "hello")
 		if !strings.Contains(stderr, "E-TYPE") || !strings.Contains(stderr, "Text needs quotes") || !strings.Contains(stderr, "1 | flow Hello") || !strings.Contains(stderr, ":lesson hello") || !strings.Contains(stdout, "Passed.") || !strings.Contains(stdout, "first lesson") || !strings.Contains(stdout, "last lesson") || !strings.Contains(stdout, "Nothing to check") {
 			t.Fatal(stdout, stderr)
 		}

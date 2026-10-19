@@ -39,6 +39,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println("lipc run [-entry Name] [-project DIR] [-host demo] [-input JSON | -entry-input JSON] [-entry-output] [-data-encoding json|c-hex] [-parallel N] program.lip\nlipc emit-go [-entry Name] [-project DIR] [-host demo] -o program.go program.lip\nlipc build [-entry Name] [-project DIR] [-host demo] -o executable program.lip\nlipc serve [-addr 127.0.0.1:8080] [-route 'GET /{$}'] [-entry Name] [-project DIR] [-host demo] program.lip\nlipc serve [-addr 127.0.0.1:8080] -routes routes.json\nlipc repl [-host demo] [-quiet]\nlipc learn [-list] [-lesson ID] [-progress file]")
 		fmt.Printf("learn: %d short lessons with small examples. Fill one blank; :hint gives increasing help, :retry edits your answer.\n", len(course))
 		fmt.Println("print/log/telemetry are one-way diagnostics, allowed in fn. Output goes to stderr; run/repl accept -trace=false to disable delivery.")
+		fmt.Println("Direct native computation inside fn requires an @{...} purity promise; effect builds requests and perform executes them in a Flow.")
 		return nil
 	case "run", "emit-go", "build":
 		args = args[1:]

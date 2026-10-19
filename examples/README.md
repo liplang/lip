@@ -6,7 +6,7 @@
 
 这些可执行示例逐步展开 LIP 1.2 的同一计算模型：用纯函数计算值，用 Flow 组织依赖，用 Claim 汇聚事实，用 effect / perform 执行外部动作。`#` 开始行注释，每个文件都用英文注释在代码旁解释语法。先在项目根目录运行 `make build`；示例可由解释器运行，也可生成 Go 程序。
 
-第一次接触可运行 `./lipc learn`，跟随 38 课与 76 个小例子填写和验证代码；随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
+第一次接触可运行 `./lipc learn`，跟随 40 课与 80 个小例子填写和验证代码；课程还包括 `@{...}` 原生纯性承诺以及 `nan`/`inf` 的最新数值写法。随时用 `./lipc repl` 试算表达式。想先看组合能力，可直接阅读 [26_flows](advanced/26_flows.lip)，再回到基础语法。REPL 的 `:run 文件路径` 执行完整 Flow；需要选择其他入口时使用 `-entry`，输入用 `-input` 或 `-entry-input`。
 
 REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道阶段。输入完整脚本或前向声明时，使用 `:begin` / `:end` 作为一个 cell 提交；`-project DIR` 指定静态导入根目录。
 
@@ -147,6 +147,8 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 1.2 将模型和配置捕获在一个纯请求构造函数中，传给 `RunAgent`；每轮由 `StreamReply(request(s.messages, tools), terminal)` 接收 effect 并执行。模型在启动时选定，替换构造函数可接入兼容 Ollama 分块接口的实现。`Query(request:effect)` 返回行列表，`Write(request:effect)` 返回影响行数；请求须产生 SQLite 游标，两个 Flow 都负责关闭和释放它。SQL 仍使用独立参数。动态请求结果的原生属性使用 `py.getattr(cursor, "rowcount")`，方法使用显式 `effect cursor.method(...)`；已知请求则可沿有限描述穿过函数、容器和 Flow 返回值。
 
 工具定义用纯 `Tool(name, description, properties, required)` 统一结构。此应用选择由 `BuildTools()` 在启动时构造一次；也可用 `concat(base, [Tool(...)])` 追加，再由 carry 将新列表带入下一轮，见 [12_carry](structures/12_carry.lip)。按条件逐项构造也可使用推导式。需要随对话更新时，将工具列表与 messages 一起放入 carry 状态。`Tool` 只生成模型看到的 schema，新增工具仍须同步业务校验和 `DispatchTool` 分派。顶层静态声明只接受字面量，构造函数应在 fn/Flow 内调用。
+
+参数校验中的 `strings.TrimSpace` 使用 `fn TrimSpace(...) @{...}` 表达确定性的原生计算；`@{...}` 是作者对计算纯性的显式承诺，实际工具请求仍由 Flow 中的 `perform` 执行。
 
 业务逻辑集中在一个文件中：`Main` 负责启动、会话与关闭，`OpenModel` 返回包含请求闭包的普通对象，`Conversation` 管理输入循环，`RunCommand` 处理命令，`ChatTurn` 准备上下文，`RunTools` 反馈观察。流式代码分成原生分块解码、纯 `MergeChunk` 累积和终端显示。工具构造复用纯函数；请求函数、effect 和嵌套容器可以跨 Flow 传递，有限描述让已知只读请求保留并行资格，动态原生属性仍通过显式调用取得。
 

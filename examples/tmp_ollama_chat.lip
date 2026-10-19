@@ -213,18 +213,21 @@ fn ValidDateTime(value: any) -> bool {
     }
 }
 
-flow ValidText(value: any, allow_empty: bool) -> bool {
+# strings.TrimSpace is deterministic computation, so the 1.2 marker keeps it
+# inside a pure fn instead of making every validation call a Flow node.
+fn TrimSpace(value: string) -> string @{ strings.TrimSpace(value) }
+
+fn ValidText(value: any, allow_empty: bool) -> bool {
     result = match value {
         string if len(value) <= 500 => {
-            trimmed = strings.TrimSpace(value)
-            control = re.search("[\\x00-\\x1f\\x7f-\\x9f]", value)
-            clean = control == null
-            if control != null { native_release(control) }
+            trimmed = TrimSpace(value)
+            clean = len([i for i in range(len(value)) if
+                value[i] < "\u{20}" || (value[i] >= "\u{7f}" && value[i] <= "\u{9f}")]) == 0
             clean && (allow_empty || trimmed != "")
         },
         _ => false
     }
-    return result
+    result
 }
 
 flow Timestamp(stamp: number) -> string {
