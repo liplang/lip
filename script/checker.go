@@ -2894,8 +2894,8 @@ func (c *checker) builtinTypes(e *expression, name string, env *scope) {
 			c.error(e.tok, "E-TYPE", "invalid "+name+" argument")
 		}
 	}
-	if name == "str" && (e.args[0].expr.info.typ == "function" || e.args[0].expr.info.typ == "effect") {
-		c.error(e.tok, "E-TYPE", "str requires Data")
+	if name == "str" && e.args[0].expr.info.typ == "function" {
+		c.error(e.tok, "E-TYPE", "str requires Data or an effect proposal")
 	}
 	if name == "slice" {
 		for _, arg := range e.args[1:] {

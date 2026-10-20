@@ -668,7 +668,9 @@ Use full, case-sensitive Go package paths; configure dependencies with go get in
 import python "math"; math.sqrt(3) calls a Python library.
 import go "strings"; strings.ToUpper("hello") calls an exported Go function.
 native_data(value) takes a Data snapshot; native_release(value) releases a native reference.
-Direct library calls use the Host boundary; effect constructs a request, perform executes it.
+Direct library calls use the Host boundary; effect constructs a request. print(effect) and help(effect)
+show searchable path:value review lines; str(effect) gives the stable complete summary containing its
+operation, contract and Data arguments; perform is still the only execution boundary.
 fn bodies remain pure. fn f(x:number)->number @{math.sqrt(x)} promises the native computation is pure; ordinary wrappers need no @, and nested fn require their own marker for direct native calls.
 nan and inf are number literals. -inf < finite numbers < inf; nan != nan. JSON rejects non-finite numbers. :run -data-encoding c-hex selects lossless Data transport.
 Known pure request builders preserve operation summaries across calls, aliases and cells. Closed-container projections, conditional/returned functions, recursive effect forwarding, and state-identity carries can preserve a known request; open projections, dynamic calls, and general carries remain Unknown. Parallel still requires every operation to be Concurrent ReadOnly.
@@ -680,7 +682,7 @@ var sessionBuiltinHelp = map[string]string{
 	"log":            "log(level:string, value) -> null\nEmit a labelled diagnostic; delivery failure does not change computation. Allowed in fn.",
 	"telemetry":      "telemetry(name:string, fields:object) -> null\nEmit a one-way diagnostic event; no acknowledgement or exactly-once guarantee. Allowed in fn.",
 	"len":            "len(value) -> number\nReturn the Unicode scalar count, list length, or object field count.",
-	"str":            "str(value) -> string\nReturn strings unchanged; display other Data without whitespace, including nan and inf.",
+	"str":            "str(value) -> string\nReturn strings unchanged, display Data canonically, or return an effect's complete stable review string without executing it; print/help show searchable path:value lines.",
 	"range":          "range(stop) / range(start, stop) / range(start, stop, step) -> list\nGenerate integers excluding stop; step must not be 0.",
 	"map":            "map(xs, f) -> list\nCall pure unary f in order and return the results.",
 	"mapcat":         "mapcat(xs, f) -> list\nCall pure unary f for each list item; each result must be a list, then concatenate one level.",
@@ -1019,7 +1021,7 @@ func sessionHelpFunction(t token, param string) *expression {
 				text = fmt.Sprintf("fn(%s) -> %s\nPure function; captures immutable values.", strings.Join(params, ", "), value.f.typ)
 			}
 		} else if value.k == Effect {
-			text = fmt.Sprintf("effect %s %q %s\nExternal request; not yet performed. Use perform to execute it.", value.p.contract.Operation.Language, value.p.contract.Operation.Path, value.p.contract.Operation.Member)
+			text = fmt.Sprintf("effect %s %q %s\nReview summary (searchable path:value lines):\n%s\nExternal request; not yet performed. Use perform to execute it.", value.p.contract.Operation.Language, value.p.contract.Operation.Path, value.p.contract.Operation.Member, effectReviewText(value.p))
 		} else {
 			descriptions := map[Kind]string{Null: "Null value.", Bool: "Boolean true / false.", Number: "Finite binary64 number.", String: "Immutable UTF-8 string; scalar indices and slices count Unicode scalars: s[-1], s[::-1]; use len / split / slice / to_chars.", Char: "One Unicode scalar value; use to_codepoint / from_codepoint and from_chars.", List: "Immutable list; use a[-1], a[[2,0,-1]], a[start:stop:step], or a[::-1]. Index lists preserve order and duplicates; slice bounds clip; step cannot be zero. Use len / map / mapcat / fold / slice / allcat.", Object: "Immutable object with string keys; read with .field or [key]; use keys / has / put."}
 			text += "\n" + descriptions[value.k]

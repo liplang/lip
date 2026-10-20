@@ -921,6 +921,19 @@ func TestNativeReceiverProposals(t *testing.T) {
 	if authorizations.Load() != before {
 		t.Fatal("proposal construction reached the Host")
 	}
+	review := nativeCell(t, s, `str(request)`, "")
+	summary, ok := review.Text()
+	if !ok || !strings.Contains(summary, `"<go `) || !strings.Contains(summary, "bridgeCounter") {
+		t.Fatalf("native reference missing from review summary: %q", summary)
+	}
+	for _, leaked := range []string{"$lip.native", "owner", "generation", "CallID"} {
+		if strings.Contains(summary, leaked) {
+			t.Fatalf("native identity leaked into review summary: %q", summary)
+		}
+	}
+	if authorizations.Load() != before {
+		t.Fatal("reviewing a native proposal reached the Host")
+	}
 	nativeCell(t, s, `counter.Value`, "10")
 	nativeCell(t, s, `fn Request(receiver:object,n:number)->effect {effect receiver.Add(n)}
 flow Update(receiver:object,n:number)->number {return perform Request(receiver,n)}

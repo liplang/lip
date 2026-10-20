@@ -17,7 +17,8 @@ REPL 支持表达式、语句与声明，Flow 可跨 cell 调用和用作管道�
 1. `flow Name(...) -> Type { ... }` 声明可复用的图；默认选择根模块的 `Main`；没有 `Main` 时选择唯一根 Flow，多个时用 `-entry Name`。显式入口覆盖默认，名称区分大小写。有值的 Flow 由末尾的 `return` 给出结果，void 没有返回值。
 2. `name = value` 创建不可变绑定。同一作用域不能给这个名字重复赋值。
 3. `fn` 保持计算结果纯性，允许 print/log/telemetry 单向诊断；函数体和值块的末尾表达式是结果。函数尾部可以加 `return`。Flow 不是函数值；子 Flow 与管道用于组合图，同一 run 的参数和成功结果可为任意普通值，包括函数与 effect。
-4. `effect op(args)` 只构造请求，`perform` 才执行已经注册的操作。
+4. `effect op(args)` 只构造请求；`str(effect)` 可生成 operation、contract 和 Data 参数的
+   审阅字符串，`perform` 才执行已经注册的操作。
 5. `claim()` 创建事实汇聚点，`<+` 追加贡献；完整读取得到带身份的记录列表。
 
 返回 string、number、list 或 object 都会被 CLI 编码为 JSON。控制块使用大括号，不依赖缩进。`any` 允许动态值，实际使用时仍要满足操作的类型要求。
@@ -115,7 +116,7 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 | 文件 | 学习内容 | 结果 |
 | --- | --- | --- |
 | [17_go_python](ecosystem/17_go_python.lip) | 在同一 Flow 中调用两个生态 | Python 均值为 2，Go 返回 SHA-256 字符串 |
-| [18_proposals](ecosystem/18_proposals.lip) | 纯函数构造/传递请求、请求链、不同结果类型 | `first="HELLO", second="HELLO, LIP", average=2` |
+| [18_proposals](ecosystem/18_proposals.lip) | `print(request)` 展示可搜索摘要，coder 在 `if` 中作出放行决定，再执行 effect；纯函数/Flow 传递请求、请求链、不同结果类型 | stdout 为 `first="HELLO", second="HELLO, LIP", average=2`；摘要在 stderr |
 | [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | 保留函数返回摘要的并行 ReadOnly、完整收集、顺序 Write | `["ADA","LIN","SAM"]`；日志写 stderr |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | 记录结果进入下一轮外部请求 | `rounds=4, score=0.8` |
 | [21_summary_recovery](ecosystem/21_summary_recovery.lip) | 闭合容器、条件/返回函数和递归参数保留请求摘要 | 每个名字得到四个大写结果 |
@@ -130,11 +131,16 @@ flow Main(xs:list)->list {return [x |> adjust.Adjust for x in xs]}
 
 这些教学示例的显式操作合约、schema 和 bytes 编码集中在 [适配器与教学 Host](../script/adapters.go) 的 `DemoHost` 中。CLI 默认还提供通用 Go/Python 桥接，可以直接调用导入库的函数、读取模块属性和操作原生对象，例如 `import go "strings"; strings.ToUpper("hello")` 或 `import python "math"; math.sqrt(3)`。直接调用和属性访问会降为 `perform effect`；数组等原生对象以资源引用保留，使用 `native_data(value)` 显式取得普通数据快照。通用配置、转换规则和运行条件见 [README](../README.md#接入-go--python)。
 
-读 effect 示例时，只需分清三件事：
+读 effect 示例时，按 coder 审阅顺序分清五件事：
 
-1. `upper_request("hello")` 得到请求，没有调用外部库。`perform request` 才执行，并返回合约规定的 Data。
-2. `18_proposals` 的 `forward(request:effect)->effect` 展示 fn 参数与返回值能传请求；Prepare/Execute 展示 Flow 返回和接收请求。Host 参数/结果、入口协议和 Claim 仍要求 Data。
-3. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格；固定字段、下标和切片投影也保留已知只读请求。`21_summary_recovery` 进一步展示闭合容器、条件/返回函数和递归 effect 参数的转发。真正未知的形参或开放来源仍可顺序执行，但不能证明并行安全。
+1. 找到 `18_proposals` 中的 `upper_request`、调用参数和 `Execute` 的 `perform`，确认 operation、参数来源和执行位置。
+2. `upper_request("hello")` 得到请求，没有调用外部库。`perform request` 才执行，并返回合约规定的 Data。
+3. `summary = str(request)` 会返回稳定的 review string，包含 operation、版本、参数、schema、ReadOnly/Write、Concurrent、capability 和 resource；它不调用 provider。`print(request)` / `help(request)` 则给 coder 看易定位的多行摘要：第一行是 `operation: go.strings.ToUpper`，后面每个嵌套叶子也用 `contract.parameters[0].schema.type: "string"` 这样的路径逐行展示，便于定位任意字段和值。
+4. 示例中的 `coder_approved` 是审阅门：先看 `print(request)`，确认后才设为 `true`；把它设为 `false` 会跳过 `perform`。需要精确匹配时再用 `str(request)` 保存完整 JSON-like 摘要并比较字符串。`forward(request:effect)->effect` 展示 fn 参数与返回值能传请求，Prepare/Execute 展示 Flow 返回和接收请求。运行时人工批准或跨 Flow 的审阅消息不属于当前语言；需要它时由 Host 提供协议。
+5. `19_parallel_read_write` 直接执行已知构造函数的结果，保留并行资格；固定字段、下标和切片投影也保留已知只读请求。`21_summary_recovery` 进一步展示闭合容器、条件/返回函数和递归 effect 参数的转发。真正未知的形参或开放来源仍可顺序执行，但不能证明并行安全。
+
+需要更强约束时，参见根目录 README 中的高级片段：完整 JSON-like 摘要可保存后做字符串匹配，
+入口 `-input` 也可以先转成字符，再决定是否执行请求。
 
 项目自定义操作可用普通 `policy` 参数携带 token、金额与时限等选项，具体限制由 Host 实施；权限需求由合约声明并由 Host 授予。短例子与当前边界见 [README 的 effect 说明](../README.md#所有外部动作都走同一条边界)。
 

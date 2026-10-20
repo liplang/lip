@@ -15,7 +15,8 @@ Start with `./lipc learn` for 40 interactive lessons and 80 small examples, incl
 1. `flow Name(...) -> Type { ... }` declares a reusable graph. Root `Main` is the default entry; otherwise use the sole root Flow or choose with `-entry Name`. Explicit selection overrides the default, and names are case-sensitive. A valued Flow ends in return; void has no value.
 2. `name = value` creates an immutable binding; no same-scope reassignment.
 3. fn is pure. Its final expression, optionally prefixed by return, is its result. Flows are not function values; child calls/pipelines compose graphs with ordinary inputs/results, including functions and effects, within one run.
-4. `effect op(args)` only constructs a request. perform executes the registered operation.
+4. `effect op(args)` only constructs a request; `str(effect)` produces an operation/contract/Data
+   review string, and perform executes the registered operation.
 5. claim() creates a fact collection; `<+` appends contributions, and complete reads return identified records.
 
 The CLI JSON-encodes string/number/list/object results. Braces define control blocks independently of indentation. any permits dynamic values but does not exempt operation-specific type checks.
@@ -113,7 +114,7 @@ These examples explicitly enable teaching contracts with -host demo. Python exam
 | File | Topics | Result |
 |---|---|---|
 | [17_go_python](ecosystem/17_go_python.lip) | Both ecosystems in one Flow | Python mean 2, Go SHA-256 string |
-| [18_proposals](ecosystem/18_proposals.lip) | Pure request construction/passing, chains, different result types | `first="HELLO", second="HELLO, LIP", average=2` |
+| [18_proposals](ecosystem/18_proposals.lip) | `print(request)` displays searchable review lines, the coder makes the `if` approval decision, then effect executes; pass requests through fn/Flow, chains, different result types | stdout is `first="HELLO", second="HELLO, LIP", average=2`; summary is on stderr |
 | [19_parallel_read_write](ecosystem/19_parallel_read_write.lip) | Function-summary parallel reads, complete collection, sequential writes | ["ADA","LIN","SAM"]; stderr logs |
 | [20_recorded_iteration](ecosystem/20_recorded_iteration.lip) | Prior observation in next request | rounds=4, score=0.8 |
 | [21_summary_recovery](ecosystem/21_summary_recovery.lip) | Request summaries through closed containers, conditional/returned functions, and recursive parameters | Four uppercase results per name |
@@ -128,11 +129,16 @@ These examples explicitly enable teaching contracts with -host demo. Python exam
 
 Teaching contracts/schemas/byte encoding live in DemoHost in [adapters.go](../script/adapters.go). The default CLI generic bridge also supports direct imported calls/properties/native objects, e.g. `import go "strings"; strings.ToUpper("hello")` or `import python "math"; math.sqrt(3)`. Calls/properties lower to perform effect. Arrays/native objects retain references; native_data(value) explicitly snapshots Data. See [configuration/conversions/prerequisites](../README.en.md#connecting-go--python).
 
-Keep three points in mind when reading the effect examples:
+Read the effect examples in this coder-review order:
 
-1. `upper_request("hello")` creates a request without calling the library. `perform request` executes it and returns the Data specified by its contract.
-2. `forward(request:effect)->effect` in `18_proposals` shows that fn parameters and results can carry requests. Prepare/Execute also show Flows returning/accepting requests. Host parameters/results, entry protocols, and Claims still require Data.
-3. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. Fixed fields, indexes, and slices preserve a known read as well. `21_summary_recovery` also shows forwarding through closed containers, conditional/returned functions, and recursive effect parameters. Genuinely unknown parameters or open sources can still execute sequentially, but cannot establish parallel safety.
+1. Find `upper_request`, its call argument, and the `perform` in `Execute` in `18_proposals`; check the operation, argument source, and execution point.
+2. `upper_request("hello")` creates a request without calling the library. `perform request` executes it and returns the Data specified by its contract.
+3. `summary = str(request)` produces a stable review string containing the operation, version, arguments, schema, ReadOnly/Write effect, concurrency, capabilities, and resources; it does not call the provider. `print(request)` / `help(request)` show an easy-to-scan multi-line summary: the first line is `operation: go.strings.ToUpper`, and every nested leaf gets its own path such as `contract.parameters[0].schema.type: "string"`, so any field and value can be located directly.
+4. `coder_approved` is the example's review gate: inspect `print(request)`, then set it to `true`; setting it to `false` skips `perform`. For exact matching, save the complete JSON-like `str(request)` output and compare strings. `forward(request:effect)->effect` shows that fn parameters and results can carry requests. Prepare/Execute also show Flows returning/accepting requests. Runtime human approval and review messages between Flows are outside the current language; a Host protocol is required for them.
+5. `19_parallel_read_write` directly performs known request builders' results, preserving parallel eligibility. Fixed fields, indexes, and slices preserve a known read as well. `21_summary_recovery` also shows forwarding through closed containers, conditional/returned functions, and recursive effect parameters. Genuinely unknown parameters or open sources can still execute sequentially, but cannot establish parallel safety.
+
+For stricter gates, see the advanced snippets in the root README: save the complete JSON-like summary
+for string matching, or read entry `-input`, convert it to characters, and choose whether to execute.
 
 Project operations can accept ordinary `policy` parameters carrying token, money, and time options, with enforcement implemented by the Host. Contracts declare permission requirements and the Host grants access. See the short example and current boundaries in the [README effect explanation](../README.en.md#every-external-action-follows-one-protocol).
 

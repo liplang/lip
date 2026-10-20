@@ -9,15 +9,32 @@ fn upper_request(value:string)->effect { effect text.ToUpper(value) }
 # parameter remains conservative for parallel safety; a known request argument
 # can now be substituted into the summary at the call site.
 fn forward(request:effect)->effect { request }
-# Same-run Flows can return a request or receive one for execution.
+# Same-run Flows can return a request or receive one for execution. This is
+# value transport: Execute receives the request and its review decision.
 flow Prepare(value:string)->effect { return upper_request(value) }
-flow Execute(request:effect)->any { return perform request }
+flow Execute(request:effect)->any {
+    # Execute is called only after Main has reviewed str(request).
+    return perform request
+}
 flow Main() -> object {
+    # Construction is pure; it does not call Go.
     request = Prepare("hello")
-    result = Execute(request)
+    # print(request) emits searchable path:value lines for every review field.
+    print(request)
+    # This condition is the coder's review decision. A changed operation,
+    # argument or contract must be reviewed again before this is set true.
+    coder_approved = true
+    result = if coder_approved { Execute(request) } else { null }
     # A recorded external result can become an argument to the next request.
-    repeated = perform forward(upper_request(result + ", lip"))
+    repeated_request = forward(upper_request(result + ", lip"))
+    print(repeated_request)
+    repeated_approved = true
+    repeated = if repeated_approved { perform repeated_request } else { null }
     # The operation's result schema decides the type: string above, number here.
-    average = perform effect stats.mean([1, 2, 3])
+    average_request = effect stats.mean([1, 2, 3])
+    print(average_request)
+    average_approved = true
+    average = if average_approved { perform average_request } else { null }
+    # The effect is consumed and never serialized; only Data leaves the Flow.
     return {first: result, second: repeated, average: average}
 }

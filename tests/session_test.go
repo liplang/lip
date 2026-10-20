@@ -1084,7 +1084,7 @@ flow Canceled()->number {return 0}
 		}
 		input.WriteString(":quit\n")
 		stdout, stderr = run(input.String(), "learn")
-		unexpected := regexp.MustCompile(`(?m)^\[learn\] (3|-1)\n`).ReplaceAllString(stderr, "")
+		unexpected := regexp.MustCompile(`(?m)^(?:\[learn\] (?:3|-1)|operation(?::|\.).*|kind:.*|contract\..*|arguments\..*)\n`).ReplaceAllString(stderr, "")
 		if lessons < 30 || unexpected != "" || !strings.Contains(stderr, "[learn] 3\n") || strings.Count(stdout, "Case 1 ✓") != lessons*3 || strings.Count(stdout, "Example 2\n") != lessons {
 			t.Fatal("lesson examples and demos", lessons, stdout, stderr)
 		}
@@ -1163,7 +1163,8 @@ flow Canceled()->number {return 0}
 			t.Fatal(err)
 		}
 		stdout, stderr := run(":status\n:demo\n:quit\n", "learn", "-progress", path)
-		if stderr != "" || !strings.Contains(stdout, "(effect) · completed") || !strings.Contains(stdout, "Completed 3/") {
+		reviewOnly := regexp.MustCompile(`(?m)^(?:operation(?::|\.).*|kind:.*|contract\..*|arguments\..*)\n`).ReplaceAllString(stderr, "")
+		if reviewOnly != "" || !strings.Contains(stdout, "(effect) · completed") || !strings.Contains(stdout, "Completed 3/") {
 			t.Fatal(stdout, stderr)
 		}
 		data, err := os.ReadFile(path)

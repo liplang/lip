@@ -519,13 +519,13 @@ var course = []lesson{
 	},
 	{
 		id:       "effect",
-		title:    "Execute a saved request",
+		title:    "Review, then execute a saved request",
 		section:  "Making requests",
-		explain:  "The Host supplies the operation and checks access. This lesson includes a registered Go strings.ToUpper operation.",
-		task:     "Execute upper_request(name) with perform.",
-		template: "import go \"strings\" as text\nfn upper_request(name:string)->effect {effect text.ToUpper(name)}\nflow Upper(name:string)->string {return __ANSWER__}",
-		solution: "perform upper_request(name)",
-		hint:     "Put perform before upper_request(name). Calling the pure builder alone only returns a request.",
+		explain:  "A coder reviews the builder, its arguments, and the Host contract. print(request) shows searchable path:value lines without calling the provider; str(request) keeps the complete stable string for exact matching. A pure review value then gates the one explicit perform. This lesson uses a registered Go strings.ToUpper operation.",
+		task:     "Put perform request in the approved branch. The other branch must return \"rejected\" without calling the provider.",
+		template: "import go \"strings\" as text\nfn upper_request(name:string)->effect {effect text.ToUpper(name)}\nflow Upper(name:string)->string {\n    request = upper_request(name)\n    print(request)\n    review = str(request)\n    allowed = review != \"\" && name != \"\"\n    return if allowed { __ANSWER__ } else { \"rejected\" }\n}",
+		solution: "perform request",
+		hint:     "Put perform request in the true branch. request construction above was pure; the false branch must not perform anything.",
 		examples: []lessonExample{
 			{code: "perform upper_request(\"ada\")", want: "\"ADA\"", setup: "import go \"strings\" as text\nfn upper_request(name:string)->effect {effect text.ToUpper(name)}"},
 			{code: "perform upper_request(\"lip\")", want: "\"LIP\"", setup: "import go \"strings\" as text\nfn upper_request(name:string)->effect {effect text.ToUpper(name)}"},
@@ -537,7 +537,7 @@ var course = []lesson{
 		id:       "effect-values",
 		title:    "Pass a request through a function",
 		section:  "Making requests",
-		explain:  "Requests can travel through fn and Flow parameters/results. Passing one never executes it; Host, entry JSON, and Claim boundaries still require Data.",
+		explain:  "Requests can travel through fn and Flow parameters/results. This is value transport: passing one never executes it; print(request) can show its searchable review paths and str(request) can produce the complete summary, while field projection and automatic approval remain unavailable. Host, entry JSON, and Claim boundaries still require Data.",
 		task:     "Return request from forward unchanged. Do not execute it inside fn.",
 		template: "import go \"strings\" as text\nfn forward(request:effect)->effect {__ANSWER__}\nflow Main(name:string)->string {\n    request = effect text.ToUpper(name)\n    return perform forward(request)\n}",
 		solution: "request",
@@ -903,7 +903,7 @@ func learn(ctx context.Context, args []string) error {
 	fmt.Printf("LIP %s · Learn by small steps\n", script.LanguageVersion)
 	fmt.Println("Each lesson has one blank. Type the missing code and press Enter; no whole program needed.")
 	fmt.Println(":hint gives a small step; :examples runs worked examples; :demo shows one possible answer.")
-	fmt.Println("Direct native computation inside fn uses @{...}; effect builds requests and perform executes them in a Flow.")
+	fmt.Println("Direct native computation inside fn uses @{...}; effect builds requests. Review print(request)'s searchable path:value lines, the builder, arguments, and Host contract, then perform in a Flow; use str(request) for exact matching; field projection stays unavailable.")
 	if *path == "" {
 		fmt.Println("Progress stays in this session. Add -progress FILE next time to save it; :quit or Ctrl-D exits.")
 	} else {

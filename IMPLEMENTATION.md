@@ -44,7 +44,7 @@
 | §14、16.3–16.5 组合与固定向量 | 同一冻结依赖经两条路径复用；闭包、carry、图循环、管道、void、未选分支及动态 Data 故障；固定 binary64 参考算法 | `CoreCompositionConformance` 在并发额度 1/2/4/7/1238/73295 下对照实际生成程序；`SpecNumericReference`、`GoBackendPowerLogarithm` |
 | §6.3、8–10、12.3 证据与决策组合 | 跨模块子 Flow、纯闭包、父子同名 Claim、完整汇聚与条件顺序写；业务拒绝、空输入、类型与 Host schema 故障；记录重放 | `EvidenceDecisionComposition` 对照解释器、实际生成程序与 REPL |
 
-§3.2 的单向诊断由 `script/trace.go` 的有界缓冲实现，事件脱离业务值与 AST，不执行用户 sink 回调。`DiagnosticComposition` 对照解释器、生成程序和 session，覆盖闭包、map/fold、guard、carry、管道、尾递归与未选分支；禁用、满队列和关闭时结果、Steps 与 journal 相同。`DiagnosticArgumentsAndEffects` 检查实参错误、签名顺序和 Pure/parallel 边界；`DiagnosticRequestSummariesAndReplay` 用会合证明带诊断的读取实际重叠，检查重放零新增 provider 调用。`DiagnosticModulesAndNativeValues` 检查模块返回函数/容器与原生引用释放后的不透明显示；`DiagnosticReceiverIsolation`、`DiagnosticBlockedReceiverAndBudgets`、`DiagnosticSessionFailureAndCaptures` 和 `DiagnosticCancellation` 检查接收端故障/阻塞、共享关闭、预算/取消、失败 cell 与旧捕获。`HTTPDiagnosticsStayOutsideResponse` 用内存 HTTP 并发请求核对独立 run、无日志混入响应及关闭接收端不影响状态；`InteractiveCLI/diagnostics` 核对 stdout/stderr、开关、`:run` 继承和新课程。终端诊断排空最多等待 100ms；嵌入者的阻塞 Writer 须自行解除阻塞以回收接收协程，求值本身不等待它。
+§3.2 的单向诊断由 `script/trace.go` 的有界缓冲实现，事件脱离业务值与 AST，不执行用户 sink 回调。`DiagnosticComposition` 对照解释器、生成程序和 session，覆盖闭包、map/fold、guard、carry、管道、尾递归与未选分支；禁用、满队列和关闭时结果、Steps 与 journal 相同。`DiagnosticArgumentsAndEffects` 检查实参错误、签名顺序和 Pure/parallel 边界；`DiagnosticRequestSummariesAndReplay` 用会合证明带诊断的读取实际重叠，检查重放零新增 provider 调用。`DiagnosticModulesAndNativeValues` 检查模块返回函数、effect 摘要与原生引用释放后的显示；`DiagnosticReceiverIsolation`、`DiagnosticBlockedReceiverAndBudgets`、`DiagnosticSessionFailureAndCaptures` 和 `DiagnosticCancellation` 检查接收端故障/阻塞、共享关闭、预算/取消、失败 cell 与旧捕获。`HTTPDiagnosticsStayOutsideResponse` 用内存 HTTP 并发请求核对独立 run、无日志混入响应及关闭接收端不影响状态；`InteractiveCLI/diagnostics` 核对 stdout/stderr、开关、`:run` 继承和新课程。终端诊断排空最多等待 100ms；嵌入者的阻塞 Writer 须自行解除阻塞以回收接收协程，求值本身不等待它。
 
 模块/调用实现复用 compiler、checker、evaluator、scheduler 和 backend。源码加载与链接集中在 `script/modules.go`，没有第二套执行机。函数参数和全局数据按词法作用域解析；Claim 读取使用当前环境，不按执行节点的 store 名劫持模块函数里的同名值。`native_data` / `native_release` 仅转换未被声明、参数、binding、Claim 或 import alias 占用的辅助调用；依赖模块的辅助调用在链接时固定其来源。管道阶段保留静态目标供普通 checker 验证，原生调用不会把它转换成另一种 AST 后绕过检查。
 
@@ -101,7 +101,14 @@ HTTP 只接受显式 Host 合约，不提供请求级通用 Native bridge。普�
 
 ## 正确性与 Host 集成边界
 
-REPL 保存 proposal 原有的规范 Ops 和静态已知函数的返回摘要。能够证明的固定字段/下标投影、条件函数、返回函数和 state-identity carry 跨 cell 与别名继续保留摘要；无法证明的开放投影、动态调用和一般 carry 结果仍为 Unknown，不能凭保存值的实际函数或 operation 身份补强摘要。成功函数声明、别名和捕获保留摘要，失败 cell 不提交新摘要，删除或复用名字不改变旧闭包。`SessionPreservesProposalOps` 与 `SessionFunctionProposalSummaries` 检查上述边界和 provider 调用次数。
+REPL 保存 proposal 原有的规范 Ops 和静态已知函数的返回摘要。`str(effect)` 通过同一份不可变
+proposal 元数据生成稳定的 operation/contract/Data 参数审阅字符串，不调用 provider；`print(effect)`
+和 `help(effect)` 显示按递归路径拆开的 `path: value` 行（例如
+`contract.parameters[0].schema.type: "string"`），`str` 仍保留完整 JSON-like 形式供精确比较。能够证明的固定字段/下标投影、条件函数、返回函数和 state-identity carry 跨 cell
+与别名继续保留摘要；无法证明的开放投影、动态调用和一般 carry 结果仍为 Unknown，不能凭保存值
+的实际函数或 operation 身份补强摘要。成功函数声明、别名和捕获保留摘要，失败 cell 不提交新摘要，
+删除或复用名字不改变旧闭包。`SessionPreservesProposalOps`、`SessionFunctionProposalSummaries`
+和 effect review 回归检查上述边界及 provider 调用次数。
 
 list/string 单值索引支持负安全整数，list 的索引列表保留顺序与重复项。方括号切片与 `slice(v,start,stop[,step])` 共用精确整数归一化、边界裁剪、null 默认值和负步长；这取代此前只接受非负且严格边界的 slice 规则。核心求值与原生 Data 投影共用 helper，Go 资源支持单值/列表索引和切片，Python 资源收到原生 slice。新 list 在分配前检查预算，循环检查取消与指令预算；选出的 function/effect 保持原值，已证明的闭合请求来源保留规范 Ops，开放或未追踪来源仍为 Unknown。
 
@@ -148,7 +155,7 @@ make clean
 
 数值逐位表由 `go run ./tests/reference_numeric -check` 从规范参考算法独立核对，正常包含在 `make test`。`CoreCompositionConformance` 除成功输出还比较原始模块诊断；错误不会改写为调用方包装错误。After、barrier 和资源等待的专项测试继续检查完成集合及前置依赖，而非仅比较最终值。原生组合用例让 Go/Python 对象经过合法纯 fn 管道后继续调用方法/索引，再对照实际生成程序。
 
-README 中英文的对应程序块保持一致；入口、Claim 和模块示例已实际验证命名/位置输入、null/void 协议、模块复用与并发额度 1/2/4。`Examples/ecosystem/18_proposals.lip` 与 `SessionScriptExamples` 验证 effect 的纯函数构造、参数传递、请求链和不同结果类型，`19_parallel_read_write` 验证保留操作摘要后的并行读取与顺序写入，`21_summary_recovery.lip` 展示闭合容器、条件/返回函数和递归参数的摘要恢复。项目 policy 片段明确要求应用注册与实施限制，不作为 demo 内建能力。命令验收还包括 emit-go/build 的可执行结果、Go/Python REPL、全部脚本示例的 session 执行、Flow 跨 cell 事务、模块来源冻结、多行语句、真实 PTY 下的 Flow 补全与粘贴、含空格路径的 :run、仓库外的内置模块课与 38 课目录。文档相对路径、章节链接和表中的测试名一并核对。
+README 中英文的对应程序块保持一致；入口、Claim 和模块示例已实际验证命名/位置输入、null/void 协议、模块复用与并发额度 1/2/4。`Examples/ecosystem/18_proposals.lip` 展示 `print(request)` 的递归路径摘要、`if` 放行后再跨 Flow perform；README 高级片段另覆盖 `str(request)` 的字符串比较和完整 JSON。`SessionScriptExamples` 验证 effect 的纯函数构造、参数传递、请求链和不同结果类型，`19_parallel_read_write` 验证保留操作摘要后的并行读取与顺序写入，`21_summary_recovery.lip` 展示闭合容器、条件/返回函数和递归参数的摘要恢复。项目 policy 片段明确要求应用注册与实施限制，不作为 demo 内建能力。命令验收还包括 emit-go/build 的可执行结果、Go/Python REPL、全部脚本示例的 session 执行、Flow 跨 cell 事务、模块来源冻结、多行语句、真实 PTY 下的 Flow 补全与粘贴、含空格路径的 :run、仓库外的内置模块课与 38 课目录。文档相对路径、章节链接和表中的测试名一并核对。
 
 2026-10-15 在 Go 1.27、Python 3.13、Linux 环境完成 `make test`、`make race`、`make vet`，均通过。真实 TCP 监听在受限沙箱中不可用时，`InteractiveCLI/web-server` 明确跳过；内存 HTTP 请求/响应与 handler 用例继续执行。依赖平台 plugin、已安装第三方库的用例按前提标记跳过，不能将跳过算作通过。
 

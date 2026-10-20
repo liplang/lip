@@ -164,7 +164,13 @@ func traceText(value Value) string {
 		case Function:
 			write("<function>")
 		case Effect:
-			write("<effect>")
+			if v.p == nil {
+				write("<effect>")
+			} else {
+				// Effects are reviewable values. Diagnostics use the provider-free
+				// human summary; str(effect) remains the canonical JSON form.
+				write(effectReviewText(v.p))
+			}
 		case List:
 			write("[")
 			for i, item := range v.l {

@@ -7,15 +7,14 @@ LIP 把“计算一个值”和“完成一组工作”写成两种清楚的东�
 `perform` 执行动作，`claim` 收集带来源的事实。
 
 ```text
-输入 → 纯函数整理 → Flow 展开工作 → 并行工具调用 → Claim 汇聚证据 → 纯函数决策 → 输出
+输入 → fn 整理 → Flow 展开工作 → 并行工具调用 → Claim 汇聚证据 → fn 决策 → 输出
 ```
 
 语言核心很小，Go 和 Python 负责数据库、网络、模型及科学计算。
 LIP 负责把这些能力组成一个可阅读的工作流：哪些步骤可以并行、什么时候结果完整、
 哪个工具产生了哪条事实，都由程序结构表达。
 
-[语言规范](spec/LIP-1.2-SPEC.md) · [示例教程](examples/README.md) ·
-[实现与验证](IMPLEMENTATION.md)
+[语言规范](spec/LIP-1.2-SPEC.md) · [示例教程](examples/README.md) · [实现与验证](IMPLEMENTATION.md)
 
 ## 用几十行写一个 LLM agent
 
@@ -28,13 +27,8 @@ LIP 负责把这些能力组成一个可阅读的工作流：哪些步骤可以�
 ```lip
 import host "agent" as ai
 
-fn ask(prompt:string)->effect {
-    effect ai.chat(prompt)
-}
-
-fn search(query:string)->effect {
-    effect ai.search(query)
-}
+fn ask(prompt:string)->effect { effect ai.chat(prompt) }
+fn search(query:string)->effect { effect ai.search(query) }
 
 flow Research(question:string)->object {
     evidence = claim()
@@ -95,7 +89,108 @@ flow Main(question:string)->object { return question |> Research |> Review }
 
 **请求是值，执行只有一个入口。** `effect op(args)` 不调用 provider，只产生带合约身份的请求。
 请求可以放进 list/object、闭包、函数参数和 Flow 返回值；`perform` 才进行 schema、授权、
-资源和 provider 调用。这样 agent 可以先计划一组动作，再在明确的位置执行。
+资源和 provider 调用。这样 agent 可以先计划一组动作，再在明确的位置执行。需要在程序中
+审阅时，`str(request)` 会返回一个稳定的字符串摘要，包含 operation、contract 和 Data 参数；
+它是纯计算，不调用 provider，也不暴露 CallID 或运行时资源。
+
+拿到一个 effect 后，coder 按下面顺序审阅，再决定是否保留 `perform`：
+
+1. 先绑定 `request = effect ...`，再用 `print(request)` / `help(request)` 查看易定位的多行摘要：第一行
+   是 `operation: go.strings.ToUpper`，其后按 `字段: 内容` 展示版本、参数、schema、effect class、并发、capability 和 resource。
+2. 对照 Host contract 检查摘要中的参数/结果 schema、版本和权限；Go/Python 包的路径和 member
+   也会出现在 operation 中，包文档仍由 Host/REPL 的帮助工具提供。
+3. 让纯的审阅规则读取这个字符串，只有通过规则的分支才执行 `perform request`；拒绝分支不调用 provider。
+4. 检查 `perform` 所在的 Flow 节点和前置依赖；只有合约声明为 Concurrent ReadOnly 的已知请求才可放进 `parallel`。
+
+这是一项在 Flow 内完成的 coder/program review：请求可以作为值传给 fn 或 Flow，摘要字符串也
+可以作为普通值继续传递。它不是跨 Flow 的人工审批消息通道；如果产品需要运行时人工批准，
+仍由 Host 在这条边界外提供协议。
+
+### 一个最小的审阅—执行结构如下：
+
+```lip
+import go "strings" as text
+
+fn upper_request(value:string)->effect { effect text.ToUpper(value) }
+
+flow Main()->object {
+    request = upper_request("hello")
+    # The coder inspects the labelled lines, then chooses whether to set this gate true.
+    print(request)
+    coder_approved = true
+    decision = if coder_approved {
+        result = perform request
+        {approved: true, result: result}
+    } else {
+        {approved: false, result: null}
+    }
+    return decision
+}
+```
+
+示例把审阅决定集中在 `coder_approved`：先打印带标签的摘要，确认 operation、参数、版本、schema、
+效果和权限，再把它设为 `true`；改为 `false` 就拒绝请求。更严格的应用可以把打印过的完整
+摘要保存为审核记录，再用字符串相等比较绑定到这次请求；规范摘要的长字面量适合测试或生成
+配置，不必手写在日常业务代码里。`str(effect)` 不等于字段投影，也不会改变 effect 的不可
+比较性；它只提供一个可审阅、可传递的字符串。完整的 Go/Python 例子见
+[18_proposals](examples/ecosystem/18_proposals.lip)，其中还展示了请求的函数/Flow 传递、
+并行只读调用和独立的顺序写入。
+
+带标签的显示把每个嵌套叶子也拆成可搜索的路径，便于直接定位冒号后的值：
+
+```text
+operation: go.strings.ToUpper
+operation.language: "go"
+operation.path: "strings"
+operation.member: "ToUpper"
+kind: "effect"
+contract.version: "1"
+contract.effect: "ReadOnly"
+contract.concurrent: true
+contract.parameters[0].name: "text"
+contract.parameters[0].schema.type: "string"
+contract.result.type: "string"
+arguments.positional[0]: "hello"
+arguments.named: {}
+```
+
+路径显示只用于人读的诊断；要保存完整、无损、可做字符串相等比较的摘要，使用 `str(request)`。
+
+需要严格字符串匹配时，把审核记录作为配置或生成文件读入即可，代码仍然只比较 `str(request)` 的完整字符串：
+
+```lip
+summary = str(request)
+print(request)
+approved = summary == REVIEWED_SUMMARY  # REVIEWED_SUMMARY 由审核工具生成
+result = if approved { perform request } else { null }
+```
+
+`str(request)` 的完整稳定输出例如是下面这样；它适合日志、审核记录和测试快照，日常代码通常只
+保留上面的带标签打印和门控：
+
+```text
+{"arguments":{"named":{},"positional":["hello"]},"contract":{"capabilities":[],"concurrent":true,"effect":"ReadOnly","parameters":[{"name":"text","optional":false,"schema":{"type":"string"}}],"resources":{},"result":{"type":"string"},"version":"1"},"kind":"effect","operation":{"language":"go","member":"ToUpper","path":"strings"}}
+```
+
+审核决定也可以来自入口输入。入口输入是普通 Data，先转成字符再选择是否放行：
+
+```lip
+import go "strings" as text
+fn upper_request(value:string)->effect { effect text.ToUpper(value) }
+
+flow ReviewFromInput(input:object)->object {
+    request = upper_request(input.text)
+    print(request)
+    decision = to_chars(input.approve)
+    approved = if len(decision) == 0 { false } else { decision[0] == 'y' }
+    result = if approved { perform request } else { null }
+    return {approved: approved, result: result}
+}
+```
+
+例如 `-entry ReviewFromInput -entry-input '{"positional":[{"text":"hello","approve":"y"}],"named":{}}'`
+会先显示带标签摘要，再执行请求；把 `approve` 改成 `"n"` 则只返回拒绝结果。真实终端输入、
+人工审批或跨 Flow 消息仍由 Host 提供相应 operation 和协议。
 
 **有限描述让封装仍然可分析。** 1.2 会沿着固定字段、索引列表、切片、`put`、函数参数/返回值、
 闭包和静态 Flow 返回值保留请求与可调用来源。`identity(p:effect)->effect {p}`、
@@ -146,7 +241,7 @@ make build
 - [基础示例](examples/basics/01_hello.lip)：绑定、算术、容器和字符串。
 - [结构示例](examples/structures/12_carry.lip)：条件、函数、map/fold、携带值循环。
 - [高级示例](examples/advanced/14_parallel_claim.lip)：并行 Claim、输入、快调用和诊断。
-- [生态示例](examples/ecosystem/18_proposals.lip)：Go/Python 请求、顺序写入和记录式迭代。
+- [生态示例](examples/ecosystem/18_proposals.lip)：用 `print(request)` 展示可搜索摘要，在 `if` 中审阅放行后执行 effect、Go/Python 请求、顺序写入和记录式迭代。
 - [完整示例说明](examples/README.md)：按概念逐步运行所有 `.lip` 文件。
 
 ```sh
@@ -187,6 +282,9 @@ Flow 结构保持不变。
 
 请求由 `effect` 构造，由 `perform` 执行；Go、Python、HTTP 和自定义 Host 使用同一边界。
 构造阶段可以自由组合和传递请求，执行阶段统一做 schema、授权、资源和 provider 检查。
+需要审阅时通常先 `print(request)`；它把 operation、contract 和 Data 参数拆成便于定位的带标签行，仍是纯
+显示，不会执行 provider。需要机器精确绑定时再用 `summary = str(request)`，用
+`if summary == reviewed_summary {perform request} else {null}` 把放行点写在 Flow 中；effect 不支持字段投影或比较。
 
 ## 网站与 HTTP 接入
 

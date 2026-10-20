@@ -54,7 +54,13 @@ Specification and engineering release versions are managed separately. §17 reco
 
 Ordinary values V recursively comprise null, bool, number, char, string, list<V>, object<string,V>, fn, and effect. Data excludes fn/effect recursively. Ordinary containers and same-run Flow inputs/results MAY contain any V, including fn, effect, and nested containers. Host arguments/results, entry protocol inputs/outputs, and Claim contributions MUST be Data. Stores are not values or transferable handles. Names bind once; inner scopes may shadow ordinary values but not store names. Flows are neither V, Data, nor function values: they cannot be contained, captured as values, aliased, passed, returned, or supplied to map/fold. Their targets resolve statically under §2.1.
 
-`effect` constructs requests; `perform` interprets them. Every Go/Python call, external property read, random draw, clock read, business log, storage access, and network access uses perform. The §3.2 core diagnostics only emit information and are not business operations. Pure core/local fn calls are direct; external operations are not. The generic adapter profile in §10 may lower convenient direct syntax to perform before core checking; it still uses the same boundary.
+`effect` constructs requests; `perform` interprets them. `str(effect)` may turn a request's fixed
+operation, contract, and Data arguments into a stable review string without executing it. Every
+Go/Python call, external property read, random draw, clock read, business log, storage access, and
+network access uses perform. The §3.2 core diagnostics only emit information and are not business
+operations. Pure core/local fn calls are direct; external operations are not. The generic adapter
+profile in §10 may lower convenient direct syntax to perform before core checking; it still uses
+the same boundary.
 
 ## 2. Source files and syntax
 
@@ -331,7 +337,7 @@ The table and §3.2 diagnostics form the complete non-overridable core functions
 | Signature | Arity | Contract |
 |---|---|---|
 | len(value) | 1 | string/list/object → number; strings count Unicode scalars |
-| str(value) | 1 | Data → string; strings unchanged, other Data as compact canonical display, extended for nonfinite numbers under §3.3 |
+| str(value) | 1 | Data or effect → string; strings unchanged, Data as compact canonical display, or the stable effect review summary in §3.1.1 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | Safe integers, nonzero step → half-open number list; defaults start=0, step=1 |
 | map(xs,f) | 2 | list, pure unary function → results in input order |
 | mapcat(xs,f) | 2 | list, pure unary function returning a list → map in input order and concatenate one level into a new list |
@@ -366,6 +372,50 @@ the result is flattened one level, and nested lists are not recursively expanded
 
 parse_number accepts exactly lowercase "nan", "inf", "+inf", "-inf", or an optional ASCII sign followed by exactly §2's number token. Reject whitespace, leading zeroes, hex, "NaN", "+nan", "-nan", Infinity, and trailing text. Invalid text/overflow is E-VALUE; wrong type E-TYPE. Rounding, subnormals, underflow, and zero normalization match literals, not permissive Host parsers. `parse_number(str(n)) == n` holds for every non-NaN number; test NaN round trips with is_nan.
 
+### Effect review summary
+
+When `p` is an unexecuted effect, `str(p)` returns a compact canonical JSON-like string. It reads
+only the proposal's fixed operation, contract, and Data arguments. It does not read the provider,
+native receiver, CallID, run/node/path identity, resource lease, or journal state, and it does not
+perform provider execution, authorization, resource admission, or argument conversion. Therefore
+`str(p)` is Pure and may be used in fn, guards, proposal arguments, Flow conditions, and unselected
+branches; an unselected branch makes no external attempt.
+
+The top-level summary shape is fixed:
+
+```text
+{
+  "arguments": {"named": object, "positional": list},
+  "contract": {
+    "capabilities": list<string>, "concurrent": bool,
+    "effect": "ReadOnly" | "Write" | "Unknown" | "Pure",
+    "parameters": [{"name": string, "optional": bool, "schema": SchemaSummary}],
+    "resources": object<string, number|string>, "result": SchemaSummary,
+    "version": string
+  },
+  "kind": "effect",
+  "operation": {"language": string, "member": string, "path": string}
+}
+```
+
+`SchemaSummary` contains at least `{"type":string}` and recursively includes `items`, `fields`,
+and `required` when present. `fields` and object keys are sorted by UTF-8 bytes; `required` and
+capabilities are sorted by UTF-8 bytes. Positional arguments and parameter declarations retain
+their source order. Resource units are displayed as their contract's nonnegative integer in the
+canonical number form; values beyond the safe-integer range are decimal strings to preserve uint64
+precision. Native references in arguments recursively display as `"<language type>"` without their
+id/owner, so runtime resource identity is not leaked. String escaping, numbers (including
+`nan`/`inf`), and containers use the canonical display rules above; the summary is not a fingerprint,
+identity, or Host transport encoding.
+
+Only a direct effect supplied to `str` uses this summary; a list/object containing an effect is not
+Data and remains an E-TYPE for `str`. fn values remain invalid. The summary is not field projection,
+and effects remain incomparable. A program may compare the summary string or derive a review decision
+from the same construction Data, then put `perform p` in the approved branch. The summary can be
+passed as an ordinary string to a fn/Flow, but it is not a cross-Flow human approval message or an
+authorization record. Host/REPL tools MAY additionally show Go export signatures or Python docs;
+those help texts are not part of stable `str(effect)` output.
+
 Filtering, defaults, object merging, concatenation, and membership can be composed in ordinary pure fn:
 
 ```text
@@ -380,7 +430,7 @@ fn merge_objects(a: object, b: object) -> object {
 }
 ```
 
-Canonical JSON display for finite numbers is independent of Host printing. Zero is `0`. For the exact mathematical value v of a nonzero binary64, among round-tripping decimal values `m×10^e`, choose m with the fewest significant digits and no leading/trailing zeroes, then the smallest exact distance to v, then smaller absolute value on a tie. Let its scientific exponent be k: use plain decimal when `-6≤k<21`, otherwise one integer digit, optional fraction, lowercase e, and exponent without plus sign/leading zeroes. Plain fractions need an integer part and no meaningless trailing zeroes; prefix negatives with `-`. Thus `str(1e3)=1000`, `str(1e21)=1e21`. Escape only quote, backslash, and U+0000–001F; controls use lowercase `\u00xx`, all other UTF-8 is literal. Recurse into lists/objects and sort object fields by UTF-8 bytes. fn/effect and containers containing them cannot be str-encoded.
+Canonical JSON display for finite numbers is independent of Host printing. Zero is `0`. For the exact mathematical value v of a nonzero binary64, among round-tripping decimal values `m×10^e`, choose m with the fewest significant digits and no leading/trailing zeroes, then the smallest exact distance to v, then smaller absolute value on a tie. Let its scientific exponent be k: use plain decimal when `-6≤k<21`, otherwise one integer digit, optional fraction, lowercase e, and exponent without plus sign/leading zeroes. Plain fractions need an integer part and no meaningless trailing zeroes; prefix negatives with `-`. Thus `str(1e3)=1000`, `str(1e21)=1e21`. Escape only quote, backslash, and U+0000–001F; controls use lowercase `\u00xx`, all other UTF-8 is literal. Recurse into lists/objects and sort object fields by UTF-8 bytes. `str(function)` and containers containing fn/effect cannot be str-encoded; a direct effect uses §3.1.1 instead.
 
 This display is not RFC 8785/JCS and need not match JSON.stringify bytes. Display is not injective: `str("1")==str(1)` is valid. Fingerprints/identities use typed C (§16.1), never str. JSON inputs MUST reject duplicate keys, including equal decoded keys.
 
@@ -400,7 +450,7 @@ These names follow core resolution, non-overriding, and positional-argument rule
 
 Each actually evaluated valid diagnostic call makes one emission attempt and normally returns null. Unselected branches do not emit. Declaration, completion, static checking, and builds do not execute diagnostics. Disabling output MUST retain ordinary argument evaluation order and checks; print(1/0) still evaluates its argument and displays inf. Compilers MUST NOT use result purity alone to delete, merge, cache, or speculate diagnostic calls in ways that change emission attempts on the executed path. Pure-value optimization must preserve these attempts and argument errors.
 
-Receivers accept fixed events, return no delivery status to LIP, do not synchronously call back into LIP, and expose no program-readable count or cache. Closure, full queues, and delivery faults do not become program errors, retries, cancellation, or control choices. Runtime buffering MUST be bounded and lossy; business computation does not wait for an external receiver. Diagnostic rendering is also bounded and may truncate long/deep values. Functions, effects, and native references use opaque displays without execution, implicit native_data, or external attribute reads. Queues retain independent text and positions rather than business values, closures, ASTs, or resources.
+Receivers accept fixed events, return no delivery status to LIP, do not synchronously call back into LIP, and expose no program-readable count or cache. Closure, full queues, and delivery faults do not become program errors, retries, cancellation, or control choices. Runtime buffering MUST be bounded and lossy; business computation does not wait for an external receiver. Diagnostic rendering is also bounded and may truncate long/deep values. Functions and native references use opaque displays without execution, implicit native_data, or external attribute reads; effects use the §3.1.1 summary but still do not execute providers. When an effect is rendered directly for a human, the first line MUST be `operation: value`, where value is the easy-to-locate `language.path.member` form (omit the path segment when empty). It then emits `operation.language: ...`, `operation.path: ...`, and `operation.member: ...`, followed in fixed top-level order by recursive paths under `kind`, `contract`, and `arguments`. Each leaf occupies its own line, using dot segments for identifier keys, `["key"]` for other keys, and `[index]` for list positions (for example, `contract.parameters[0].schema.type: "string"`); empty objects/lists still emit their path with `{}`/`[]`. The path form is diagnostic locator text, not operation identity or transport encoding; values use the canonical display in §3.1.1. The complete lossless summary remains available through `str(effect)`. Queues retain independent text and positions rather than business values, closures, ASTs, or resources.
 
 Attempts within one local cursor follow evaluation order; independent graph nodes have no diagnostic total-order guarantee. Recovery/replay emits only diagnostics actually reevaluated in this attempt, with no exactly-once delivery. Adding diagnostic source still changes SourceHash, revision, and related source identities; it does not permit resuming an old-source journal. Cancellation, instruction budgets, and argument errors retain existing rules; diagnostic capacity/truncation does not alter business budgets.
 
@@ -1754,7 +1804,7 @@ The §3.2 diagnostics also MUST satisfy these composition vectors. Bounded diagn
 | Diagnostics in unselected branches; declaration/compilation only | Zero emission attempts | core paths |
 | Known ReadOnly request builder containing diagnostics, executed in parallel | Preserve RetOps; actual reads may overlap; journal records only perform | core summaries |
 | `print(perform effect store.commit())` in parallel body / ordinary fn / @{...} fn | E-PARALLEL / E-PURITY / accepted under the explicit promise; actual writes violate it and Host checks remain enforced | core effects |
-| fn/effect/native reference as diagnostic value | Opaque display; no requests/attributes/snapshots executed and no resources retained | core lifetime |
+| fn/effect/native reference as diagnostic value | fn/native are opaque; effect may use the §3.1.1 summary, with no request/attribute/snapshot execution and no resources retained | core lifetime |
 | Same-source/run/journal replay | No repeated providers; diagnostics reevaluated in this attempt may emit again | core replay |
 
 NaN and native calls explicitly promised pure through @{...} additionally MUST satisfy these composition vectors. Use generic native adaptation without a special purity contract for np.sqrt; worker.read is Concurrent ReadOnly and store.commit is Write. is_nan uses the §3.3 helper fn. Actually impure calls violate the author promise; static acceptance does not guarantee their business purity.

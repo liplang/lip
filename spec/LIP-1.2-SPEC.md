@@ -85,7 +85,8 @@ store handle。变量只绑定一次；内层可遮蔽普通值，但不得遮�
 Flow 定义不属于 V 或 Data，也不是 function。不能把 Flow 放入容器、捕获为闭包值、
 绑定为别名、作为参数/返回值传递或交给 map/fold；调用目标按第 2.1 节静态解析。
 
-`effect` 构造请求，`perform` 解释请求。所有 Go/Python 调用、外部属性读取、随机、时钟、
+`effect` 构造请求，`perform` 解释请求；`str(effect)` 可把请求的固定 operation、contract
+和 Data 参数变成可审阅的稳定字符串，但不执行请求。所有 Go/Python 调用、外部属性读取、随机、时钟、
 业务日志、存储和网络访问都经 perform；没有第二条即时 Host 调用通道。第 3.2 节核心诊断
 只单向输出，不属于业务 operation。纯核心操作与本地 fn
 可直接调用，外部 operation 不可直接调用。第 10 节的通用库适配配置可在核心检查前
@@ -589,7 +590,7 @@ Host 资源按其注册的原生索引协议访问。
 | 签名 | arity | 参数/结果与规则 |
 |---|---|---|
 | len(value) | 1 | string/list/object → number 长度；string 按 Unicode 标量计数 |
-| str(value) | 1 | Data → string；string 原值，其余为无空白规范显示；含非有限数时按第 3.3 节扩展 |
+| str(value) | 1 | Data 或 effect → string；string 原值，Data 为无空白规范显示，effect 为第 3.1.1 节的稳定审阅摘要 |
 | range(end) / range(start,end) / range(start,end,step) | 1/2/3 | 安全整数、非零 step → 半开 number list；默认 start=0、step=1 |
 | map(xs,f) | 2 | list、纯一元 function → 按输入顺序的新 list |
 | mapcat(xs,f) | 2 | list、纯一元 function（每次返回 list）→ 按输入顺序映射并一层合并为新 list |
@@ -624,6 +625,45 @@ parse_number 接受整段 ASCII 文本：恰为小写 `"nan"`、`"inf"`、`"+inf
 报 E-TYPE。nearest/ties-to-even、次正规数/下溢和零规范化与字面量一致，不使用 Host 的
 宽松数字 parser。`parse_number(str(n)) == n` 对所有非 NaN number 成立；NaN 的往返用 is_nan 验证。
 
+### effect 的审阅摘要
+
+`str(p)` 在 `p` 为未执行 effect 时返回一个紧凑、规范 JSON-like 的字符串。它只读取 proposal
+中已经固定的 operation、contract 和 Data 参数，不读取 provider、原生 receiver、CallID、run/
+node/path 身份、资源租约或 journal 状态，也不执行 provider、授权、资源准入或参数转换。
+因此 `str(p)` 是 Pure；它可以出现在 fn、guard、proposal 参数、Flow 条件及未选分支中，
+未选分支不会产生任何外部动作。
+
+摘要的顶层结构固定为：
+
+```text
+{
+  "arguments": {"named": object, "positional": list},
+  "contract": {
+    "capabilities": list<string>, "concurrent": bool,
+    "effect": "ReadOnly" | "Write" | "Unknown" | "Pure",
+    "parameters": [{"name": string, "optional": bool, "schema": SchemaSummary}],
+    "resources": object<string, number|string>, "result": SchemaSummary,
+    "version": string
+  },
+  "kind": "effect",
+  "operation": {"language": string, "member": string, "path": string}
+}
+```
+
+`SchemaSummary` 至少含 `{"type":string}`；有 `items`、`fields`、`required` 时递归包含它们，
+其中 `fields` 按 UTF-8 键排序，`required` 按 UTF-8 排序。`named` 的键和所有普通 object
+字段按 UTF-8 排序；`positional` 与参数声明顺序保持不变；capability 按 UTF-8 排序。
+资源值按合约的非负整数以规范 number 显示。字符串转义、数字（包括 `nan`/`inf`）和容器
+编码沿用本节规范显示；safe integer 以内的资源单位为 number，超出该范围时为十进制
+string 以保持 uint64 精度；参数中的 native reference 递归显示为不含 id/owner 的
+`"<language type>"`，不泄漏运行时资源身份；摘要本身不是 fingerprint、身份或 Host 的传输编码。
+
+effect 只有直接作为 `str` 实参时才使用上述摘要；包含 effect 的 list/object 仍不是 Data，
+`str` 报 E-TYPE。fn 仍不能 `str`。摘要不是字段投影，effect 仍不可比较；程序应比较摘要
+字符串或根据同一份构造 Data 得出审阅决定，再在通过的分支执行 `perform p`。摘要可作为
+普通 string 传给 fn/Flow，但不构成跨 Flow 的人工审批消息或授权记录。Host/REPL 可以另外
+显示 Go 导出签名或 Python 文档；这些帮助文本不属于 `str(effect)` 的稳定规范内容。
+
 `allcat` 只展开外层 parts：`allcat([[1],[2,3]])` 为 `[1,2,3]`，不会递归展开
 嵌套 list。它要求 parts 非空且每一项同为 list 或同为 string；`concat([1],[2])` 与
 `concat("a","b")` 保留为两个参数的拼接函数，list 与 string 不能混用。`to_chars` 和
@@ -657,7 +697,7 @@ binary64 的精确数学值 v，在能 round-trip 为 v 的十进制数 `m×10^e
 无意义末尾零。负数前置 `-`。例如 `str(1e3)` 为 `1000`，`str(1e21)` 为 `1e21`。
 JSON string 仅转义引号、反斜杠、U+0000–001F，其余 UTF-8 原样；控制字符统一
 `\u00xx` 小写编码。list/object 递归使用此规则，字段按 UTF-8 bytes 排序。
-`str(function/effect)` 及递归含它们的容器非法。
+`str(function)` 及递归含 fn/effect 的容器非法；直接 `str(effect)` 使用第 3.1.1 节摘要。
 这是本版的规范显示，不是 RFC 8785/JCS（JSON Canonicalization Scheme），也不要求
 与 JavaScript 的 JSON.stringify 字节相同。str 仅用于显示，`str("1")==str(1)` 合法；
 fingerprint（参数摘要）与身份使用第 16.1 节定义的带类型编码函数 C，不使用 str。
@@ -702,8 +742,18 @@ print(1/0) 仍先求值参数并显示 inf。编译器不得仅依据返回值�
 接收端只接受已经固定的事件，不向 LIP 返回发送状态，不同步回调 LIP，不提供程序可读的
 发送计数或缓存。关闭、满队列或发送故障不转为程序错误，不触发重试、取消或控制选择。
 运行时使用有界、可丢弃的缓冲；业务计算不等待外部接收端。诊断显示同样有界，过长/过深
-内容可以截断；函数、effect 与原生引用仅作不透明显示，不执行它们，不隐式调用 native_data
-或外部属性。队列保存独立的文本与位置，不保留业务值、闭包、AST 或资源。
+内容可以截断；函数与原生引用仅作不透明显示，不执行它们，不隐式调用 native_data
+或外部属性；effect 使用第 3.1.1 节摘要，但仍不执行 provider。直接把 effect 作为诊断值时，
+人读显示必须先输出 `operation: value`，其中 value 是便于定位的
+`language.path.member`（path 为空时省略该段）；随后按固定的顶层顺序输出 operation 的
+`operation.language: ...`、`operation.path: ...`、`operation.member: ...`，再输出
+`kind`、`contract` 和 `arguments` 的递归路径。每个叶子字段独占一行，合法标识符键使用点号，
+其他键使用 `["key"]` 形式，list 使用 `[index]`（例如
+`contract.parameters[0].schema.type: "string"`）；空 object/list 仍输出
+该路径及 `{}`/`[]`。这里的点号形式只是诊断定位文本，不是 operation 身份或传输编码；值
+使用第 3.1.1 节的规范显示。完整无损摘要仍由 `str(effect)` 提供。队列保存独立的文本与位置，
+完整无损摘要仍由 `str(effect)` 提供。队列保存独立的文本与位置，
+不保留业务值、闭包、AST 或资源。
 
 同一局部游标中的发送尝试遵守求值次序，独立图节点之间不承诺诊断全序。恢复/重放只输出
 本次实际重新求值的诊断，不提供恰好一次投递。源码中加入诊断仍改变 SourceHash、revision
@@ -3111,7 +3161,7 @@ HTTP 接入还须满足以下用例；它们不要求未声明 HTTP 配置的 co
 | 未选分支中的诊断；只声明/编译带诊断的函数 | 零发送尝试 | core 路径 |
 | 带诊断的已知 ReadOnly 请求构造函数在 parallel 中执行 | RetOps 不丢失；真实读取可重叠；journal 只记录 perform | core 摘要 |
 | `print(perform effect store.commit())` 位于 parallel body / 普通 fn / @{...} fn | E-PARALLEL / E-PURITY / 按显式承诺接受；实际写入违反承诺，Host 检查仍生效 | core 效果 |
-| fn/effect/native 引用作为诊断值 | 不透明显示；不执行请求、不调用属性/快照、不保留资源 | core 生命周期 |
+| fn/effect/native 引用作为诊断值 | fn/native 仅不透明显示；effect 可显示第 3.1.1 节摘要，但不执行请求、不调用属性/快照、不保留资源 | core 生命周期 |
 | 重放相同源码、run 与 journal | provider 不重调用；本次重新求值的诊断可再次发送 | core 重放 |
 
 NaN 与 @{...} 显式承诺纯性的原生调用还必须满足以下组合向量。以下使用通用原生适配配置，

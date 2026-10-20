@@ -714,8 +714,14 @@ func DecodeDataWithEncoding(data []byte, encoding string) (Value, error) {
 }
 
 func Display(v Value) (string, error) {
+	if v.k == Effect {
+		if v.p == nil {
+			return "", diagnostic("E-TYPE", "str requires Data or a valid effect proposal")
+		}
+		return effectSummary(v.p), nil
+	}
 	if !v.IsData() {
-		return "", diagnostic("E-TYPE", "str requires Data")
+		return "", diagnostic("E-TYPE", "str requires Data or an effect proposal")
 	}
 	if v.k == String {
 		return v.s, nil
@@ -726,6 +732,236 @@ func Display(v Value) (string, error) {
 	var b strings.Builder
 	displayJSON(&b, v)
 	return b.String(), nil
+}
+
+// effectSummaryValue renders only the immutable proposal identity, contract
+// and Data arguments. It deliberately omits CallID, run state and the provider
+// function: str(effect) is a pure review value and must never execute or
+// inspect the external operation.
+func effectSummaryValue(p *proposal) Value {
+	if p == nil {
+		return NullValue()
+	}
+	contract := p.contract
+	params := make([]Value, len(contract.Params))
+	for i, param := range contract.Params {
+		params[i] = object(map[string]Value{
+			"name":     textValue(param.Name),
+			"optional": BoolValue(param.Optional),
+			"schema":   schemaSummary(param.Schema),
+		})
+	}
+	capabilities := append([]string(nil), contract.Capabilities...)
+	sort.Strings(capabilities)
+	capabilityValues := make([]Value, len(capabilities))
+	for i, capability := range capabilities {
+		capabilityValues[i] = textValue(capability)
+	}
+	resources := make(map[string]Value, len(contract.Resources))
+	for name, units := range contract.Resources {
+		if units <= 9007199254740991 {
+			resources[name] = number(float64(units))
+		} else {
+			// Host resource units are uint64 while LIP numbers are safe
+			// integers. Keep unusually large contract values exact rather than
+			// rounding them in a review summary.
+			resources[name] = textValue(strconv.FormatUint(units, 10))
+		}
+	}
+	positional := make([]Value, len(p.positional))
+	for i, value := range p.positional {
+		positional[i] = reviewData(value)
+	}
+	named := make(map[string]Value, len(p.named))
+	for name, value := range p.named {
+		named[name] = reviewData(value)
+	}
+	arguments := object(map[string]Value{
+		"named":      object(named),
+		"positional": ListValue(positional...),
+	})
+	summary := object(map[string]Value{
+		"arguments": arguments,
+		"contract": object(map[string]Value{
+			"capabilities": ListValue(capabilityValues...),
+			"concurrent":   BoolValue(contract.Concurrent),
+			"effect":       textValue(effectClassName(contract.Effect)),
+			"parameters":   ListValue(params...),
+			"resources":    object(resources),
+			"result":       schemaSummary(contract.Result),
+			"version":      textValue(contract.Version),
+		}),
+		"kind": textValue("effect"),
+		"operation": object(map[string]Value{
+			"language": textValue(contract.Operation.Language),
+			"member":   textValue(contract.Operation.Member),
+			"path":     textValue(contract.Operation.Path),
+		}),
+	})
+	return summary
+}
+
+func effectSummary(p *proposal) string {
+	var b strings.Builder
+	displayJSON(&b, effectSummaryValue(p))
+	return b.String()
+}
+
+// effectReviewText is the human-facing diagnostic/help form. Keep operation
+// first and put each review field after an easy-to-search label; str(effect)
+// remains the compact canonical form used for exact comparisons.
+func effectReviewText(p *proposal) string {
+	if p == nil {
+		return "<effect>"
+	}
+	summary := effectSummaryValue(p)
+	var b strings.Builder
+	line := func(name, value string) {
+		if b.Len() != 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(name)
+		b.WriteString(": ")
+		b.WriteString(value)
+	}
+	// Every leaf gets its own path: value line. This keeps arbitrary nested
+	// argument and schema fields searchable without requiring a JSON parser.
+	var appendPath func(string, Value)
+	appendPath = func(path string, value Value) {
+		switch value.k {
+		case Object:
+			keys := sortedKeys(value.o)
+			if len(keys) == 0 {
+				line(path, "{}")
+				return
+			}
+			for _, key := range keys {
+				child := key
+				if path != "" {
+					child = path + reviewPathKey(key)
+				}
+				appendPath(child, value.o[key])
+			}
+		case List:
+			if len(value.l) == 0 {
+				line(path, "[]")
+				return
+			}
+			for i, item := range value.l {
+				appendPath(fmt.Sprintf("%s[%d]", path, i), item)
+			}
+		default:
+			var encoded strings.Builder
+			displayJSON(&encoded, value)
+			line(path, encoded.String())
+		}
+	}
+	// The dotted operation spelling is deliberately a human locator, not a
+	// new identity or transport encoding. The complete summary remains the
+	// lossless canonical str(effect) form.
+	line("operation", effectOperationText(p.contract.Operation))
+	if operation, ok := summary.o["operation"]; ok {
+		if operation.k == Object {
+			seen := map[string]bool{}
+			for _, key := range []string{"language", "path", "member"} {
+				if value, present := operation.o[key]; present {
+					appendPath("operation."+key, value)
+					seen[key] = true
+				}
+			}
+			for _, key := range sortedKeys(operation.o) {
+				if !seen[key] {
+					appendPath("operation."+key, operation.o[key])
+				}
+			}
+		} else {
+			appendPath("operation", operation)
+		}
+	}
+	if kind, ok := summary.o["kind"]; ok {
+		appendPath("kind", kind)
+	}
+	for _, name := range []string{"contract", "arguments"} {
+		if value, ok := summary.o[name]; ok {
+			appendPath(name, value)
+		}
+	}
+	return b.String()
+}
+
+func reviewPathKey(key string) string {
+	if validID(key) {
+		return "." + key
+	}
+	return "[" + strconv.Quote(key) + "]"
+}
+
+func effectOperationText(operation Operation) string {
+	if operation.Path == "" {
+		return operation.Language + "." + operation.Member
+	}
+	return operation.Language + "." + operation.Path + "." + operation.Member
+}
+
+func reviewData(v Value) Value {
+	if text, ok := NativeDescription(v); ok {
+		return textValue(text)
+	}
+	switch v.k {
+	case List:
+		values := make([]Value, len(v.l))
+		for i, value := range v.l {
+			values[i] = reviewData(value)
+		}
+		return ListValue(values...)
+	case Object:
+		fields := make(map[string]Value, len(v.o))
+		for name, value := range v.o {
+			fields[name] = reviewData(value)
+		}
+		return object(fields)
+	default:
+		return v
+	}
+}
+
+func effectClassName(effect EffectClass) string {
+	switch effect {
+	case ReadOnlyEffect:
+		return "ReadOnly"
+	case WriteEffect:
+		return "Write"
+	case UnknownEffect:
+		return "Unknown"
+	case PureEffect:
+		return "Pure"
+	default:
+		return "Unknown"
+	}
+}
+
+func schemaSummary(schema Schema) Value {
+	fields := make(map[string]Value, len(schema.Fields))
+	for name, field := range schema.Fields {
+		fields[name] = schemaSummary(field)
+	}
+	required := append([]string(nil), schema.Required...)
+	sort.Strings(required)
+	requiredValues := make([]Value, len(required))
+	for i, name := range required {
+		requiredValues[i] = textValue(name)
+	}
+	result := map[string]Value{"type": textValue(schema.Type)}
+	if schema.Items != nil {
+		result["items"] = schemaSummary(*schema.Items)
+	}
+	if len(fields) > 0 {
+		result["fields"] = object(fields)
+	}
+	if len(requiredValues) > 0 {
+		result["required"] = ListValue(requiredValues...)
+	}
+	return object(result)
 }
 func EncodeJSON(v Value) ([]byte, error) {
 	if !v.IsData() {

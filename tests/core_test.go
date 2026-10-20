@@ -6,6 +6,7 @@ import (
 	"fmt"
 	. "lip/script"
 	"math"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1653,6 +1654,193 @@ func generatedHost()(Host,error){return Host{Contracts:[]Contract{{Operation:Ope
 	_, err = Compile(`import host "steps";flow Execute(p:effect)->any{return perform p} flow Main()->void{for x in [1] parallel {Execute(effect steps.read(x))}}`, host)
 	if d, ok := err.(*Diagnostic); !ok || d.Code != "E-PARALLEL" {
 		t.Fatal(err)
+	}
+}
+
+func TestEffectReviewSummaryIsPureAndGatesPerform(t *testing.T) {
+	var calls atomic.Int64
+	host := Host{Capabilities: map[string]bool{"review.read": true}, Resources: NewResourcePool(map[string]uint64{"provider": 2}), Contracts: []Contract{{
+		Operation: Operation{Language: "host", Path: "review", Member: "read"},
+		Version:   "v1",
+		Params:    []Parameter{{Name: "value", Schema: Schema{Type: "number"}}},
+		Result:    Schema{Type: "number"}, Effect: ReadOnlyEffect, Concurrent: true,
+		Capabilities: []string{"review.read"}, Resources: map[string]uint64{"provider": 2},
+		Invoke: func(_ context.Context, r Request) Response { calls.Add(1); return Result(r.Positional[0]) },
+	}}}
+	source := `import host "review"
+flow Main()->object {
+    request = effect review.read(3)
+    summary = str(request)
+    result = if summary == "never-approved" {perform request} else {null}
+    return {summary: summary, result: result}
+}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("effect construction called provider")
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, ok := report.Output.Fields()
+	if !ok {
+		t.Fatal("summary result is not an object")
+	}
+	summary, _ := fields["summary"].Text()
+	for _, part := range []string{
+		`"kind":"effect"`, `"language":"host"`, `"path":"review"`, `"member":"read"`,
+		`"version":"v1"`, `"effect":"ReadOnly"`, `"concurrent":true`,
+		`"capabilities":["review.read"]`, `"resources":{"provider":2}`,
+		`"positional":[3]`, `"named":{}`, `"type":"number"`,
+	} {
+		if !strings.Contains(summary, part) {
+			t.Fatalf("summary %q lacks %s", summary, part)
+		}
+	}
+	if got := display(t, report.Output); !strings.Contains(got, `"result":null`) {
+		t.Fatalf("unexpected gated result: %s", got)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("rejected branch called provider %d times", calls.Load())
+	}
+	// Generated Go uses the same summary helper and keeps the rejected branch
+	// provider-free as well.
+	executable, _ := buildNative(t, p, GoOptions{HostSource: `package main
+import "context"
+func generatedHost()(Host,error){return Host{Capabilities:map[string]bool{"review.read":true},Resources:NewResourcePool(map[string]uint64{"provider":2}),Contracts:[]Contract{{Operation:Operation{Language:"host",Path:"review",Member:"read"},Version:"v1",Params:[]Parameter{{Name:"value",Schema:Schema{Type:"number"}}},Result:Schema{Type:"number"},Effect:ReadOnlyEffect,Concurrent:true,Capabilities:[]string{"review.read"},Resources:map[string]uint64{"provider":2},Invoke:func(_ context.Context,r Request)Response{return Result(r.Positional[0])}}}},nil}`})
+	stdout, stderr, err := runNative(t, executable)
+	if err != nil || !strings.Contains(stdout, `\"kind\":\"effect\"`) || strings.Contains(stdout, `"result":3`) {
+		t.Fatalf("generated summary/review: stdout=%s stderr=%s err=%v", stdout, stderr, err)
+	}
+
+	// The same summary can be used as an explicit review token; matching it
+	// permits the one perform, while the summary operation itself remains pure.
+	approved := `import host "review"
+flow Main()->number {
+    request = effect review.read(3)
+    summary = str(request)
+    result = if summary == ` + strconv.Quote(summary) + ` {perform request} else {0}
+    return result
+}`
+	p, err = Compile(approved, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{})
+	if err != nil || display(t, report.Output) != "3" || calls.Load() != 1 {
+		t.Fatalf("approved request: %s, calls=%d, err=%v", display(t, report.Output), calls.Load(), err)
+	}
+
+	// A summary can cross a Flow/function boundary, while an effect nested in
+	// a Data container still cannot be string-encoded and fn remains invalid.
+	forwarded := `import host "review"
+fn inspect(p:effect)->string {str(p)}
+flow Inspect(p:effect)->string {return inspect(p)}
+flow Main()->string {return Inspect(effect review.read(4))}`
+	p, err = Compile(forwarded, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{})
+	if err != nil || report.Output.Kind() != String {
+		t.Fatalf("forwarded summary: %v, %v", report.Output, err)
+	}
+	nested := `import host "review"
+flow Main()->string {request=effect review.read(4);return str([request])}`
+	p, err = Compile(nested, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.Run(context.Background(), nil, Options{}); err == nil || !strings.Contains(err.Error(), "E-TYPE") {
+		t.Fatalf("nested effect str error: %v", err)
+	}
+	if _, err = Compile(`flow Main()->string{return str(fn()->number{1})}`, Host{}); err == nil || !strings.Contains(err.Error(), "E-TYPE") {
+		t.Fatalf("fn str error: %v", err)
+	}
+}
+
+func TestEffectReviewSummaryCanonicalEdges(t *testing.T) {
+	var calls atomic.Int64
+	items := Schema{Type: "list", Items: &Schema{Type: "number"}}
+	payload := Schema{Type: "object", Fields: map[string]Schema{
+		"z": {Type: "string"},
+		"a": items,
+	}, Required: []string{"z", "a"}}
+	result := Schema{Type: "object", Fields: map[string]Schema{
+		"z": {Type: "bool"},
+		"a": {Type: "list", Items: &Schema{Type: "string"}},
+	}, Required: []string{"z"}}
+	host := Host{Contracts: []Contract{{
+		Operation: Operation{Language: "host", Path: "review", Member: "inspect"},
+		Version:   "v2",
+		Params: []Parameter{
+			{Name: "payload", Schema: payload},
+			{Name: "note", Schema: Schema{Type: "string"}, Optional: true},
+		},
+		Result: result, Effect: ReadOnlyEffect, Concurrent: true,
+		Capabilities: []string{"zeta", "alpha"},
+		Resources:    map[string]uint64{"z": 9007199254740992, "a": 2},
+		Invoke:       func(_ context.Context, _ Request) Response { calls.Add(1); return Result(NullValue()) },
+	}}}
+	source := `import host "review"
+flow Main()->string {
+    request = effect review.inspect({z:"value",a:[1,nan]},note="hello")
+    return str(request)
+}`
+	p, err := Compile(source, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := p.Run(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, ok := report.Output.Text()
+	if !ok {
+		t.Fatalf("summary is not a string: %v", report.Output)
+	}
+	want := `{"arguments":{"named":{"note":"hello"},"positional":[{"a":[1,nan],"z":"value"}]},"contract":{"capabilities":["alpha","zeta"],"concurrent":true,"effect":"ReadOnly","parameters":[{"name":"payload","optional":false,"schema":{"fields":{"a":{"items":{"type":"number"},"type":"list"},"z":{"type":"string"}},"required":["a","z"],"type":"object"}},{"name":"note","optional":true,"schema":{"type":"string"}}],"resources":{"a":2,"z":"9007199254740992"},"result":{"fields":{"a":{"items":{"type":"string"},"type":"list"},"z":{"type":"bool"}},"required":["z"],"type":"object"},"version":"v2"},"kind":"effect","operation":{"language":"host","member":"inspect","path":"review"}}`
+	if summary != want {
+		t.Fatalf("unstable or incomplete summary:\n got %s\nwant %s", summary, want)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("review executed provider %d times", calls.Load())
+	}
+
+	// A summary is ordinary string data and can cross a Flow boundary; the
+	// effect itself remains reviewable only through str, not through projection.
+	forwarded := `import host "review"
+flow Inspect(request:effect)->string {return str(request)}
+flow Main()->string {return Inspect(effect review.inspect({z:"value",a:[1,nan]},note="hello"))}`
+	p, err = Compile(forwarded, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := report.Output.Text(); got != want {
+		t.Fatalf("cross-Flow summary changed:\n got %s\nwant %s", got, want)
+	}
+
+	// An unselected branch may construct and review an effect without any
+	// provider activity; a selected perform remains the only execution path.
+	skipped := `import host "review"
+flow Main()->string {result=if false {str(effect review.inspect({z:"value",a:[1,nan]},note="hello"))} else {"skipped"};return result}`
+	p, err = Compile(skipped, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = p.Run(context.Background(), nil, Options{})
+	if err != nil || report.Output.Kind() != String {
+		t.Fatalf("unselected review branch: %v, %v", report.Output, err)
+	}
+	if got, _ := report.Output.Text(); got != "skipped" || calls.Load() != 0 {
+		t.Fatalf("unselected review branch changed output/calls: %q, %d", got, calls.Load())
 	}
 }
 

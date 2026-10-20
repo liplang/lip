@@ -365,7 +365,12 @@ flow Main()->number {
 			switch event.Text {
 			case "<native reference>":
 				native++
-			case "<effect>":
+			}
+			if strings.HasPrefix(event.Text, "operation: ") &&
+				!strings.HasPrefix(event.Text, "operation: {") &&
+				strings.Contains(event.Text, "\ncontract.version: \"") &&
+				strings.Contains(event.Text, "\narguments.") &&
+				strings.Contains(event.Text, "contract.parameters[0].schema.") {
 				effect++
 			}
 			if event.Level == "capture" {
@@ -382,9 +387,58 @@ flow Main()->number {
 	executable, _ := buildNative(t, p, GoOptions{})
 	for _, parallel := range []string{"1", "7"} {
 		stdout, stderr, err := runNative(t, executable, "-parallel", parallel)
-		if err != nil || stdout != "6\n" || strings.Count(stderr, "<native reference>") != 2 || !strings.Contains(stderr, "[capture] 2") {
+		if err != nil || stdout != "6\n" || strings.Count(stderr, "<native reference>") != 2 || strings.Count(stderr, "operation: ") != 1 || strings.Contains(stderr, "operation: {") || !strings.Contains(stderr, "[capture] 2") {
 			t.Fatal(stdout, stderr, err)
 		}
+	}
+}
+
+func TestEffectReviewDiagnosticsUseSearchablePaths(t *testing.T) {
+	host := Host{Contracts: []Contract{{
+		Operation: Operation{Language: "host", Path: "review", Member: "inspect"},
+		Version:   "v2",
+		Params: []Parameter{{Name: "payload", Schema: Schema{Type: "object", Fields: map[string]Schema{
+			"nested": {Type: "object", Fields: map[string]Schema{"text": {Type: "string"}}},
+		}}}},
+		Result: Schema{Type: "string"}, Effect: ReadOnlyEffect, Concurrent: true,
+		Invoke: func(context.Context, Request) Response {
+			value, _ := StringValue("ok")
+			return Result(value)
+		},
+	}}}
+	p, err := Compile(`import host "review"
+flow Main()->string {
+    request = effect review.inspect({nested:{text:"hello"}})
+    print(request)
+    return "done"
+}`, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces := traceBuffer(t, 8)
+	r, err := p.Run(context.Background(), nil, Options{Trace: traces})
+	if err != nil || display(t, r.Output) != `"done"` {
+		t.Fatal(r, err)
+	}
+	var text string
+	for _, event := range traceEvents(traces) {
+		if strings.HasPrefix(event.Text, "operation: ") {
+			text = event.Text
+			break
+		}
+	}
+	for _, want := range []string{
+		"operation: host.review.inspect",
+		"operation.language: \"host\"",
+		"contract.parameters[0].schema.fields.nested.fields.text.type: \"string\"",
+		"arguments.positional[0].nested.text: \"hello\"",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("review output %q lacks %q", text, want)
+		}
+	}
+	if strings.Contains(text, `operation: {`) || strings.Contains(text, `arguments: {`) {
+		t.Fatalf("review output is not path-oriented: %q", text)
 	}
 }
 
